@@ -325,7 +325,13 @@ struct DisplayState final {
   bool driving{};
   bool player_valid{};
   bool vehicle_service_available{};
+  bool vehicle_valid{};
+  bool entities_available{};
+  bool actors_available{};
   std::uint32_t camera_base_source{};
+  std::uint32_t vehicle_service_version{};
+  std::uint64_t vehicle_entity_id{};
+  char vehicle_class_name[ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES + 1]{};
   bool fov_enabled{};
   std::uint32_t preset{};
   double speed_kmh{};
@@ -437,6 +443,11 @@ struct Context final {
   std::uint64_t vehicle_entity_frame_generation{};
   std::uint32_t vehicle_entity_index{};
   AnomalyGenerationHandleV1 vehicle_entity{};
+  // Fallback scan result and its rate limit. The scan is only a last resort
+  // when the vehicle service and the local player entity cannot name the car.
+  AnomalyGenerationHandleV1 scanned_vehicle_entity{};
+  double next_vehicle_scan_elapsed{};
+  bool base_diagnostic_logged{};
 
   // Game-domain state.
   std::atomic_bool started{};
@@ -1394,12 +1405,15 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
 
 bool QueryVehicle(Context &context, bool &valid, bool &speed_valid,
                   double &speed_kmh, AnomalyGenerationHandleV1 &handle,
-                  std::uint64_t &entity_id) noexcept {
+                  std::uint64_t &entity_id,
+                  char class_name[ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES +
+                                  1]) noexcept {
   valid = false;
   speed_valid = false;
   speed_kmh = 0.0;
   handle = {};
   entity_id = 0;
+  class_name[0] = '\0';
   if (!VehicleReady(context.vehicle)) {
     return false;
   }
@@ -1413,6 +1427,9 @@ bool QueryVehicle(Context &context, bool &valid, bool &speed_valid,
   valid = true;
   handle = vehicle.vehicle;
   entity_id = vehicle.vehicle_entity_id;
+  std::memcpy(class_name, vehicle.vehicle_class_name,
+              sizeof(vehicle.vehicle_class_name));
+  class_name[sizeof(vehicle.vehicle_class_name) - 1] = '\0';
   if ((vehicle.flags & ANOMALY_NTE_VEHICLE_V1_HAS_SPEED) != 0 &&
       std::isfinite(vehicle.speed_kmh)) {
     speed_valid = true;
@@ -1420,6 +1437,10 @@ bool QueryVehicle(Context &context, bool &valid, bool &speed_valid,
   }
   return true;
 }
+
+bool FindVehicleEntity(Context &context, std::uint64_t entity_id,
+                       AnomalyNteEntitySnapshotV1 &snapshot,
+                       std::uint32_t &index) noexcept;
 
 // The player Pawn's root component is the vehicle actor root, not the
 // simulated body mesh. VehicleMesh is the rendered body; its bounds center is
@@ -1460,9 +1481,203 @@ bool ReadComponentTransform(const auto *service,
   return true;
 }
 
-bool FindVehicleEntity(Context &context, std::uint64_t entity_id,
-                       AnomalyNteEntitySnapshotV1 &snapshot,
-                       std::uint32_t &index) noexcept;
+// The reflected property names are game-specific. NFS 2015 exposes the
+// rendered body as VehicleMesh; Mesh/SkeletalMesh cover the stock UE names.
+[[nodiscard]] bool ReadEntityMesh(
+    Context &context, const AnomalyGenerationHandleV1 &handle,
+    double center_cm[3], double extent_cm[3],
+    bool include_generic_names) noexcept {
+  if (handle.id == 0 || handle.generation == 0) {
+    return false;
+  }
+  static constexpr std::string_view kMeshProperties[] = {
+      "VehicleMesh", "Mesh", "SkeletalMesh"};
+  for (const std::string_view property : kMeshProperties) {
+    if (!include_generic_names && property != "VehicleMesh") {
+      continue;
+    }
+    if (ComponentBoundsReady(context.entities) &&
+        ReadComponentTransform(context.entities, handle, property, center_cm,
+                               extent_cm)) {
+      return true;
+    }
+    if (ComponentBoundsReady(context.actors) &&
+        ReadComponentTransform(context.actors, handle, property, center_cm,
+                               extent_cm)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] bool ReadVehicleRoot(
+    Context &context, const AnomalyGenerationHandleV1 &handle,
+    double center_cm[3], double extent_cm[3]) noexcept {
+  if (handle.id == 0 || handle.generation == 0) {
+    return false;
+  }
+  if (ComponentBoundsReady(context.entities) &&
+      ReadComponentTransform(context.entities, handle, "RootComponent",
+                             center_cm, extent_cm)) {
+    return true;
+  }
+  return ComponentBoundsReady(context.actors) &&
+         ReadComponentTransform(context.actors, handle, "RootComponent",
+                                center_cm, extent_cm);
+}
+
+[[nodiscard]] bool ReadVehicleBase(
+    Context &context, const AnomalyGenerationHandleV1 &handle,
+    double center_cm[3], double extent_cm[3],
+    CameraBaseSource &source) noexcept {
+  if (ReadEntityMesh(context, handle, center_cm, extent_cm, true)) {
+    source = CameraBaseSource::vehicle_mesh;
+    return true;
+  }
+  if (ReadVehicleRoot(context, handle, center_cm, extent_cm)) {
+    source = CameraBaseSource::vehicle_root;
+    return true;
+  }
+  return false;
+}
+
+[[nodiscard]] bool CopyEntityBounds(
+    const AnomalyNteEntitySnapshotV1 &snapshot, double center_cm[3],
+    double extent_cm[3]) noexcept {
+  if (!std::isfinite(snapshot.bounds_center[0]) ||
+      !std::isfinite(snapshot.bounds_center[1]) ||
+      !std::isfinite(snapshot.bounds_center[2]) ||
+      !std::isfinite(snapshot.bounds_extent[0]) ||
+      !std::isfinite(snapshot.bounds_extent[1]) ||
+      !std::isfinite(snapshot.bounds_extent[2]) ||
+      snapshot.bounds_extent[2] <= 0.5 ||
+      snapshot.bounds_extent[2] >= 1000.0) {
+    return false;
+  }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    center_cm[axis] = snapshot.bounds_center[axis];
+    extent_cm[axis] = snapshot.bounds_extent[axis];
+  }
+  return true;
+}
+
+// The vehicle service's identity tail is optional. On runtimes that do not
+// fill vehicle_entity_id, the local player entity is still in the cache; while
+// driving its rendered body is the vehicle mesh.
+[[nodiscard]] bool FindLocalPlayerEntity(
+    Context &context, AnomalyNteEntitySnapshotV1 &snapshot) noexcept {
+  const auto find = [&](const auto *service) -> bool {
+    if (service == nullptr || service->page == nullptr) {
+      return false;
+    }
+    constexpr std::uint32_t kPageCapacity = 8;
+    std::array<AnomalyNteEntitySnapshotV1, kPageCapacity> page{};
+    for (auto &entry : page) {
+      entry = AnomalyNteEntitySnapshotV1{sizeof(entry)};
+    }
+    AnomalyNteEntityPageRequestV1 request{sizeof(request)};
+    request.capacity = kPageCapacity;
+    request.required_flags = ANOMALY_NTE_ENTITY_V1_LOCAL_PLAYER;
+    AnomalyNteEntityPageResultV1 result{sizeof(result)};
+    if (service->page(service->user, &request, page.data(), &result).code !=
+            ANOMALY_STATUS_V1_OK ||
+        result.generation == 0 || result.returned == 0 ||
+        result.returned > kPageCapacity) {
+      return false;
+    }
+    snapshot = page[0];
+    return snapshot.handle.id != 0 && snapshot.handle.generation != 0;
+  };
+  return find(context.entities) || find(context.actors);
+}
+
+[[nodiscard]] bool PlausibleVehicleBounds(
+    const double center[3], const double extent[3]) noexcept {
+  if (!std::isfinite(center[0]) || !std::isfinite(center[1]) ||
+      !std::isfinite(center[2]) || !std::isfinite(extent[0]) ||
+      !std::isfinite(extent[1]) || !std::isfinite(extent[2])) {
+    return false;
+  }
+  // Bounds are UE centimetres. A car is roughly 4 m long, 2 m wide and 1.5 m
+  // tall, i.e. half extents near 200x100x75 cm. Characters and props are
+  // either too narrow or too small.
+  const double max_xy = (std::max)(extent[0], extent[1]);
+  const double min_xy = (std::min)(extent[0], extent[1]);
+  return max_xy >= 100.0 && min_xy >= 30.0 && extent[2] >= 20.0 &&
+         extent[2] <= 500.0;
+}
+
+// Last high-level fallback when neither the vehicle service nor the local
+// player entity can name the car: scan the entity/actor cache for the closest
+// vehicle-shaped bounds. This only runs when the cached handles fail, at most
+// every two seconds, and is capped so a large city cache cannot stall a tick.
+[[nodiscard]] bool ScanVehicleEntity(
+    Context &context, const double player_position_cm[3],
+    AnomalyNteEntitySnapshotV1 &best) noexcept {
+  bool found = false;
+  double best_distance_sq = (std::numeric_limits<double>::max)();
+  const auto scan = [&](const auto *service) {
+    if (service == nullptr || service->page == nullptr) {
+      return;
+    }
+    constexpr std::uint32_t kPageCapacity = 128;
+    constexpr std::uint32_t kMaximumScanEntries = 4096;
+    std::array<AnomalyNteEntitySnapshotV1, kPageCapacity> page{};
+    std::uint64_t generation = 0;
+    std::uint32_t offset = 0;
+    std::uint32_t total = 0;
+    std::uint32_t scanned = 0;
+    while (scanned < kMaximumScanEntries) {
+      AnomalyNteEntityPageRequestV1 request{sizeof(request)};
+      request.generation = generation;
+      request.offset = offset;
+      request.capacity = kPageCapacity;
+      for (auto &entry : page) {
+        entry = AnomalyNteEntitySnapshotV1{sizeof(entry)};
+      }
+      AnomalyNteEntityPageResultV1 result{sizeof(result)};
+      if (service->page(service->user, &request, page.data(), &result).code !=
+              ANOMALY_STATUS_V1_OK ||
+          result.generation == 0 || result.returned > kPageCapacity) {
+        return;
+      }
+      generation = result.generation;
+      total = result.total_matches;
+      for (std::uint32_t i = 0; i < result.returned; ++i) {
+        const AnomalyNteEntitySnapshotV1 &candidate = page[i];
+        if (candidate.entity_id == 0 ||
+            (candidate.flags & ANOMALY_NTE_ENTITY_V1_LOCAL_PLAYER) != 0 ||
+            !PlausibleVehicleBounds(candidate.bounds_center,
+                                    candidate.bounds_extent)) {
+          continue;
+        }
+        const double dx =
+            candidate.bounds_center[0] - player_position_cm[0];
+        const double dy =
+            candidate.bounds_center[1] - player_position_cm[1];
+        const double dz =
+            candidate.bounds_center[2] - player_position_cm[2];
+        const double distance_sq = dx * dx + dy * dy + dz * dz;
+        if (distance_sq < best_distance_sq) {
+          best_distance_sq = distance_sq;
+          best = candidate;
+          found = true;
+        }
+      }
+      scanned += result.returned;
+      if (result.returned == 0 || result.next_offset <= offset ||
+          result.next_offset >= total) {
+        return;
+      }
+      offset = result.next_offset;
+    }
+  };
+  scan(context.entities);
+  scan(context.actors);
+  constexpr double kMaximumDistanceCm = 1500.0;
+  return found &&
+         best_distance_sq <= kMaximumDistanceCm * kMaximumDistanceCm;
+}
 
 // The player service's bounds come from the Pawn root component, while the
 // rendered car body is the vehicle actor's root/VehicleMesh. Prefer the
@@ -1471,49 +1686,59 @@ bool FindVehicleEntity(Context &context, std::uint64_t entity_id,
 CameraBaseSource QueryVehicleBase(
     Context &context, const AnomalyGenerationHandleV1 &vehicle_handle,
     const AnomalyGenerationHandleV1 &player_handle,
-    const std::uint64_t vehicle_entity_id, double center_cm[3],
-    double extent_cm[3]) noexcept {
+    const std::uint64_t vehicle_entity_id,
+    const double player_position_cm[3], const bool allow_fallback,
+    double center_cm[3], double extent_cm[3]) noexcept {
   AnomalyNteEntitySnapshotV1 vehicle_entity{};
   std::uint32_t vehicle_entity_index = 0;
   if (FindVehicleEntity(context, vehicle_entity_id, vehicle_entity,
                         vehicle_entity_index)) {
-    // The rendered car body is VehicleMesh; the root component can be the
-    // simulated body. Read the mesh first so suspension/root offsets cannot
-    // move the car relative to the camera.
-    if (ComponentBoundsReady(context.entities) &&
-        ReadComponentTransform(context.entities, vehicle_entity.handle,
-                               "VehicleMesh", center_cm, extent_cm)) {
-      return CameraBaseSource::vehicle_mesh;
+    CameraBaseSource source = CameraBaseSource::pawn_root;
+    if (ReadVehicleBase(context, vehicle_entity.handle, center_cm, extent_cm,
+                        source)) {
+      return source;
     }
-    if (ComponentBoundsReady(context.actors) &&
-        ReadComponentTransform(context.actors, vehicle_entity.handle,
-                               "VehicleMesh", center_cm, extent_cm)) {
-      return CameraBaseSource::vehicle_mesh;
-    }
-    if (ComponentBoundsReady(context.entities) &&
-        ReadComponentTransform(context.entities, vehicle_entity.handle,
-                               "RootComponent", center_cm, extent_cm)) {
+    if (CopyEntityBounds(vehicle_entity, center_cm, extent_cm)) {
       return CameraBaseSource::vehicle_root;
     }
-    if (ComponentBoundsReady(context.actors) &&
-        ReadComponentTransform(context.actors, vehicle_entity.handle,
-                               "RootComponent", center_cm, extent_cm)) {
-      return CameraBaseSource::vehicle_root;
+  }
+
+  if (!allow_fallback) {
+    return CameraBaseSource::pawn_root;
+  }
+
+  AnomalyNteEntitySnapshotV1 player_entity{};
+  // A generic Mesh on the player entity could be the character, so only the
+  // vehicle-specific property is accepted here.
+  if (FindLocalPlayerEntity(context, player_entity) &&
+      ReadEntityMesh(context, player_entity.handle, center_cm, extent_cm,
+                     false)) {
+    return CameraBaseSource::vehicle_mesh;
+  }
+
+  if (context.scanned_vehicle_entity.id != 0) {
+    CameraBaseSource source = CameraBaseSource::pawn_root;
+    if (ReadVehicleBase(context, context.scanned_vehicle_entity, center_cm,
+                        extent_cm, source)) {
+      return source;
     }
-    // Fall back to the cached entity bounds (also the actor root sample).
-    if (std::isfinite(vehicle_entity.bounds_center[0]) &&
-        std::isfinite(vehicle_entity.bounds_center[1]) &&
-        std::isfinite(vehicle_entity.bounds_center[2]) &&
-        std::isfinite(vehicle_entity.bounds_extent[2]) &&
-        vehicle_entity.bounds_extent[2] > 0.5 &&
-        vehicle_entity.bounds_extent[2] < 1000.0) {
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        center_cm[axis] = vehicle_entity.bounds_center[axis];
+    context.scanned_vehicle_entity = {};
+  }
+
+  if (context.elapsed >= context.next_vehicle_scan_elapsed) {
+    context.next_vehicle_scan_elapsed = context.elapsed + 2.0;
+    AnomalyNteEntitySnapshotV1 scanned{};
+    if (ScanVehicleEntity(context, player_position_cm, scanned)) {
+      CameraBaseSource source = CameraBaseSource::pawn_root;
+      if (ReadVehicleBase(context, scanned.handle, center_cm, extent_cm,
+                          source)) {
+        context.scanned_vehicle_entity = scanned.handle;
+        return source;
       }
-      extent_cm[0] = vehicle_entity.bounds_extent[0];
-      extent_cm[1] = vehicle_entity.bounds_extent[1];
-      extent_cm[2] = vehicle_entity.bounds_extent[2];
-      return CameraBaseSource::vehicle_root;
+      if (CopyEntityBounds(scanned, center_cm, extent_cm)) {
+        context.scanned_vehicle_entity = scanned.handle;
+        return CameraBaseSource::vehicle_root;
+      }
     }
   }
 
@@ -1531,18 +1756,21 @@ CameraBaseSource QueryVehicleBase(
     if (candidate.handle.id == 0 || candidate.handle.generation == 0) {
       continue;
     }
-    const std::string_view property =
-        candidate.source == CameraBaseSource::vehicle_mesh ? "VehicleMesh"
-                                                           : "RootComponent";
-    if (ComponentBoundsReady(context.entities) &&
-        ReadComponentTransform(context.entities, candidate.handle, property,
-                               center_cm, extent_cm)) {
-      return candidate.source;
+    if (!allow_fallback && candidate.handle.id == player_handle.id &&
+        candidate.handle.generation == player_handle.generation) {
+      continue;
     }
-    if (ComponentBoundsReady(context.actors) &&
-        ReadComponentTransform(context.actors, candidate.handle, property,
-                               center_cm, extent_cm)) {
-      return candidate.source;
+    if (candidate.source == CameraBaseSource::vehicle_mesh) {
+      const bool generic_names =
+          candidate.handle.id != player_handle.id ||
+          candidate.handle.generation != player_handle.generation;
+      if (ReadEntityMesh(context, candidate.handle, center_cm, extent_cm,
+                         generic_names)) {
+        return CameraBaseSource::vehicle_mesh;
+      }
+    } else if (ReadVehicleRoot(context, candidate.handle, center_cm,
+                              extent_cm)) {
+      return CameraBaseSource::vehicle_root;
     }
   }
   return CameraBaseSource::pawn_root;
@@ -2068,6 +2296,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   }
   if (WorldChanged(context)) {
     ResetMotion(context);
+    context.scanned_vehicle_entity = {};
+    context.next_vehicle_scan_elapsed = 0.0;
   }
 
   double origin_cm[3]{};
@@ -2081,16 +2311,19 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   double vehicle_speed_kmh = 0.0;
   AnomalyGenerationHandleV1 vehicle_handle{};
   std::uint64_t vehicle_entity_id = 0;
+  char vehicle_class_name[ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES + 1]{};
   const bool vehicle_service =
       QueryVehicle(context, vehicle_valid, vehicle_speed_valid,
-                   vehicle_speed_kmh, vehicle_handle, vehicle_entity_id);
+                   vehicle_speed_kmh, vehicle_handle, vehicle_entity_id,
+                   vehicle_class_name);
   std::uint32_t camera_base_source = 0;
   if (vehicle_valid || player_valid) {
     double mesh_center[3]{};
     double mesh_extent[3]{};
+    const bool allow_base_fallback = vehicle_valid || !vehicle_service;
     const CameraBaseSource source = QueryVehicleBase(
-        context, vehicle_handle, player_handle, vehicle_entity_id,
-        mesh_center, mesh_extent);
+        context, vehicle_handle, player_handle, vehicle_entity_id, base_cm,
+        allow_base_fallback, mesh_center, mesh_extent);
     if (source != CameraBaseSource::pawn_root) {
       camera_base_source = static_cast<std::uint32_t>(source);
       const double origin_offset_cm =
@@ -2106,6 +2339,21 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   if (camera_base_source != context.camera_base_source) {
     context.camera_base_source = camera_base_source;
     context.view_snap = true;
+  }
+  if (!context.base_diagnostic_logged && vehicle_valid) {
+    context.base_diagnostic_logged = true;
+    char detail[320]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "camera base source=%u vehicle_id=%llu class=%s entities=%d "
+        "actors=%d vehicle_service_version=%u",
+        camera_base_source,
+        static_cast<unsigned long long>(vehicle_entity_id),
+        vehicle_class_name[0] != '\0' ? vehicle_class_name : "-",
+        context.entities != nullptr ? 1 : 0,
+        context.actors != nullptr ? 1 : 0,
+        context.vehicle != nullptr ? context.vehicle->service_version : 0);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, detail);
   }
 
   bool identity_changed = false;
@@ -2124,6 +2372,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   if (identity_changed) {
     ResetMotion(context);
     context.chase_initialized = false;
+    context.scanned_vehicle_entity = {};
+    context.next_vehicle_scan_elapsed = 0.0;
   }
 
   if (vehicle_valid) {
@@ -2274,6 +2524,14 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.driving = true;
     context.display.player_valid = true;
     context.display.vehicle_service_available = vehicle_service;
+    context.display.vehicle_valid = vehicle_valid;
+    context.display.entities_available = context.entities != nullptr;
+    context.display.actors_available = context.actors != nullptr;
+    context.display.vehicle_service_version =
+        context.vehicle != nullptr ? context.vehicle->service_version : 0;
+    context.display.vehicle_entity_id = vehicle_entity_id;
+    std::memcpy(context.display.vehicle_class_name, vehicle_class_name,
+                sizeof(vehicle_class_name));
     context.display.camera_base_source = camera_base_source;
     context.display.speed_kmh = vehicle_speed_kmh > 0.5
                                     ? vehicle_speed_kmh
@@ -2807,6 +3065,17 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                                                 "Vehicle root")
                       : context->localizer.Text("base.pawn_root",
                                                 "Pawn root"));
+        char base_detail[192]{};
+        std::snprintf(base_detail, sizeof(base_detail),
+                      "id=%llu  ent=%s  act=%s  v%u  %s",
+                      static_cast<unsigned long long>(
+                          display.vehicle_entity_id),
+                      display.entities_available ? "yes" : "no",
+                      display.actors_available ? "yes" : "no",
+                      display.vehicle_service_version,
+                      display.vehicle_class_name);
+        DrawStatusLine(ui, context->localizer, "status.car_base_detail",
+                       "Base detail", base_detail);
         char speed_distance_line[32]{};
         std::snprintf(speed_distance_line, sizeof(speed_distance_line),
                       "%.2f", display.speed_distance_scale);
