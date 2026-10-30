@@ -406,7 +406,6 @@ struct Context final {
   // VehicleMesh bounds center when entity reflection is available, otherwise
   // the pawn root. ESP bounds are only a model-height reference.
   std::atomic<double> view_car_location[3]{};
-  std::atomic<double> view_car_velocity[3]{};
   std::atomic<double> view_update_hz{};
   std::atomic<double> view_location[3]{};
   std::atomic<double> view_rotation[3]{};
@@ -1056,7 +1055,6 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
       if (leased && active) {
         context->view_output_frames.fetch_add(1, std::memory_order_relaxed);
         std::array<double, 3> current_car_location{};
-        std::array<double, 3> current_car_velocity{};
         std::array<double, 3> current_location{};
         std::array<double, 3> current_rotation{};
         std::array<double, 3> previous_location{};
@@ -1074,9 +1072,6 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         for (std::size_t axis = 0; axis < 3; ++axis) {
           current_car_location[axis] =
               context->view_car_location[axis].load(
-                  std::memory_order_relaxed);
-          current_car_velocity[axis] =
-              context->view_car_velocity[axis].load(
                   std::memory_order_relaxed);
           current_location[axis] =
               context->view_location[axis].load(std::memory_order_relaxed);
@@ -1121,28 +1116,6 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
             std::isfinite(current_rotation[2]);
         if (sequence == after && finite) {
           const std::int64_t render_now_ns = NowNanoseconds();
-          std::array<double, 3> render_car = current_car_location;
-          // The camera model runs at the Game tick, while the car body is
-          // rendered at the display frame. At 60 Hz the difference is one
-          // frame and invisible; below 60 Hz the camera samples an older car
-          // position and the car visibly slides fore/aft. Predict the base
-          // forward only when the camera tick is actually below 60 Hz.
-          const double prediction_strength = nfs2015_chase::Clamp(
-              (60.0 - update_hz) / 20.0, 0.0, 1.0);
-          const bool velocity_finite =
-              std::isfinite(current_car_velocity[0]) &&
-              std::isfinite(current_car_velocity[1]) &&
-              std::isfinite(current_car_velocity[2]);
-          if (prediction_strength > 0.0 && velocity_finite &&
-              current_time_ns > 0 && render_now_ns > current_time_ns) {
-            const double ahead_seconds = nfs2015_chase::Clamp(
-                static_cast<double>(render_now_ns - current_time_ns) * 1e-9,
-                0.0, 0.15) * prediction_strength;
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-              render_car[axis] +=
-                  current_car_velocity[axis] * ahead_seconds;
-            }
-          }
           std::array<double, 3> render_offset = current_location;
           std::array<double, 3> render_rotation = current_rotation;
           float render_lens = current_lens;
@@ -1219,7 +1192,7 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
             render_offset = {sized.x, sized.y, sized.z};
           }
           for (std::size_t axis = 0; axis < 3; ++axis) {
-            location[axis] = render_car[axis] + render_offset[axis];
+            location[axis] = current_car_location[axis] + render_offset[axis];
             rotation[axis] = render_rotation[axis];
           }
           const std::uintptr_t pov =
@@ -1805,9 +1778,9 @@ void PublishInactive(Context &context) noexcept {
 
 void PublishView(Context &context, const nfs2015_chase::CameraState &view,
                  const double origin_cm[3], const double base_cm[3],
-                 const double car_velocity_cmps[3], const double update_hz,
-                 const double camera_scale, const double aspect_ratio,
-                 const bool fov_enabled, const double dt) noexcept {
+                 const double update_hz, const double camera_scale,
+                 const double aspect_ratio, const bool fov_enabled,
+                 const double dt) noexcept {
   const double scale = nfs2015_chase::Clamp(camera_scale, kMinimumCameraScale,
                                             kMaximumCameraScale);
   const nfs2015_chase::Vec3 origin{origin_cm[0], origin_cm[1], origin_cm[2]};
@@ -1922,8 +1895,6 @@ void PublishView(Context &context, const nfs2015_chase::CameraState &view,
   for (std::size_t axis = 0; axis < 3; ++axis) {
     context.view_car_location[axis].store(base_cm[axis],
                                           std::memory_order_relaxed);
-    context.view_car_velocity[axis].store(
-        car_velocity_cmps[axis], std::memory_order_relaxed);
     context.view_location[axis].store(next_location[axis],
                                       std::memory_order_relaxed);
     context.view_rotation[axis].store(next_rotation[axis],
@@ -2183,8 +2154,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.chase_initialized = true;
   }
   view = context.chase.Update(dt, car);
-  PublishView(context, view, origin_cm, base_cm, context.velocity_cmps,
-              context.update_hz, camera_scale, aspect_ratio, fov_enabled, dt);
+  PublishView(context, view, origin_cm, base_cm, context.update_hz,
+              camera_scale, aspect_ratio, fov_enabled, dt);
 
   {
     std::scoped_lock lock(context.display_mutex);
