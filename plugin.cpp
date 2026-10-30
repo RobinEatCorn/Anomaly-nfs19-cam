@@ -130,6 +130,11 @@ constexpr double kViewHistorySnapDistanceCm = 5000.0;
 constexpr double kViewHistorySnapAngleDegrees = 60.0;
 constexpr double kMaximumCameraYawDifference = 1.4;  // ~80 degrees
 constexpr double kHookRetrySeconds = 2.0;
+// The detour runs one engine tick after the model published. Shift the
+// published eye by the game camera's movement since that publish so the car
+// and the camera are rendered in the same frame. A larger step is a
+// teleport/hitch, not car motion.
+constexpr double kMaximumGameCameraSyncCm = 1000.0;
 
 // The view-point getter of the game's CameraManager. The same signature the
 // built-in Camera Tools plugin resolves; only one plugin can own the hook.
@@ -388,7 +393,9 @@ struct Context final {
   std::atomic<std::uintptr_t> camera_pov_manager{};
   std::atomic<float> game_fov{};
   std::atomic_bool fov_restore{};
+  std::atomic<double> observed_location[3]{};
   std::atomic<double> observed_rotation[3]{};
+  std::atomic<std::uint64_t> observed_sequence{};
   std::atomic_bool observed_valid{};
   double next_hook_retry{};
   bool hook_failure_logged{};
@@ -406,6 +413,10 @@ struct Context final {
   // VehicleMesh bounds center when entity reflection is available, otherwise
   // the pawn root. ESP bounds are only a model-height reference.
   std::atomic<double> view_car_location[3]{};
+  // Game camera location at the time the published view was computed. The
+  // detour adds the movement since then so the eye and car share a frame.
+  std::atomic<double> view_game_camera_location[3]{};
+  std::atomic_bool view_game_camera_valid{};
   std::atomic<double> view_update_hz{};
   std::atomic<double> view_location[3]{};
   std::atomic<double> view_rotation[3]{};
@@ -1030,11 +1041,24 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
     leased = false;
   }
 
+  bool original_called = false;
   try {
     if (original != nullptr) {
       original(object, location, rotation);
+      original_called = true;
     }
   } catch (...) {
+  }
+
+  std::array<double, 3> game_camera_location{};
+  bool game_camera_valid = false;
+  if (original_called && location != nullptr) {
+    game_camera_valid = std::isfinite(location[0]) &&
+                        std::isfinite(location[1]) &&
+                        std::isfinite(location[2]);
+    if (game_camera_valid) {
+      game_camera_location = {location[0], location[1], location[2]};
+    }
   }
 
   try {
@@ -1042,11 +1066,25 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         object != nullptr) {
       const std::uintptr_t manager = reinterpret_cast<std::uintptr_t>(object);
       context->observed_manager.store(manager, std::memory_order_release);
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        context->observed_rotation[axis].store(
-            rotation[axis], std::memory_order_relaxed);
+      const bool pose_finite =
+          std::isfinite(location[0]) && std::isfinite(location[1]) &&
+          std::isfinite(location[2]) && std::isfinite(rotation[0]) &&
+          std::isfinite(rotation[1]) && std::isfinite(rotation[2]);
+      if (pose_finite) {
+        const std::uint64_t observed_sequence =
+            context->observed_sequence.load(std::memory_order_relaxed);
+        context->observed_sequence.store(observed_sequence + 1U,
+                                         std::memory_order_release);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          context->observed_location[axis].store(
+              location[axis], std::memory_order_relaxed);
+          context->observed_rotation[axis].store(
+              rotation[axis], std::memory_order_relaxed);
+        }
+        context->observed_valid.store(true, std::memory_order_relaxed);
+        context->observed_sequence.store(observed_sequence + 2U,
+                                         std::memory_order_release);
       }
-      context->observed_valid.store(true, std::memory_order_release);
 
       const std::uint64_t sequence =
           context->view_sequence.load(std::memory_order_acquire);
@@ -1055,6 +1093,7 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
       if (leased && active) {
         context->view_output_frames.fetch_add(1, std::memory_order_relaxed);
         std::array<double, 3> current_car_location{};
+        std::array<double, 3> current_game_camera_location{};
         std::array<double, 3> current_location{};
         std::array<double, 3> current_rotation{};
         std::array<double, 3> previous_location{};
@@ -1064,6 +1103,7 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         double current_distance{};
         double previous_distance{};
         bool current_fov_enabled{};
+        bool current_game_camera_valid{};
         bool previous_fov_enabled{};
         bool has_previous{};
         std::int64_t previous_time_ns{};
@@ -1072,6 +1112,9 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         for (std::size_t axis = 0; axis < 3; ++axis) {
           current_car_location[axis] =
               context->view_car_location[axis].load(
+                  std::memory_order_relaxed);
+          current_game_camera_location[axis] =
+              context->view_game_camera_location[axis].load(
                   std::memory_order_relaxed);
           current_location[axis] =
               context->view_location[axis].load(std::memory_order_relaxed);
@@ -1102,6 +1145,8 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         current_time_ns =
             context->view_current_time_ns.load(std::memory_order_relaxed);
         update_hz = context->view_update_hz.load(std::memory_order_relaxed);
+        current_game_camera_valid =
+            context->view_game_camera_valid.load(std::memory_order_relaxed);
         const std::uint64_t after =
             context->view_sequence.load(std::memory_order_acquire);
         const bool finite =
@@ -1183,6 +1228,30 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
             }
           }
 
+          // The model is published one engine tick after the world updated,
+          // so the detour's original game camera pose is one frame ahead of
+          // the published base. Move the eye by that camera delta so the car
+          // and the camera are in the same frame. This is measured motion,
+          // not a velocity extrapolation.
+          double sync_delta[3]{};
+          bool sync = game_camera_valid && current_game_camera_valid;
+          if (sync) {
+            double sync_distance2 = 0.0;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+              sync_delta[axis] = game_camera_location[axis] -
+                                 current_game_camera_location[axis];
+              if (!std::isfinite(sync_delta[axis])) {
+                sync = false;
+                break;
+              }
+              sync_distance2 += sync_delta[axis] * sync_delta[axis];
+            }
+            const double limit = kMaximumGameCameraSyncCm;
+            if (sync && sync_distance2 > limit * limit) {
+              sync = false;
+            }
+          }
+
           if (std::isfinite(render_distance) && render_distance > 0.0) {
             const nfs2015_chase::Vec3 direction =
                 nfs2015_chase::Normalize({render_offset[0], render_offset[1],
@@ -1192,7 +1261,8 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
             render_offset = {sized.x, sized.y, sized.z};
           }
           for (std::size_t axis = 0; axis < 3; ++axis) {
-            location[axis] = current_car_location[axis] + render_offset[axis];
+            location[axis] = current_car_location[axis] + render_offset[axis] +
+                             (sync ? sync_delta[axis] : 0.0);
             rotation[axis] = render_rotation[axis];
           }
           const std::uintptr_t pov =
@@ -1706,21 +1776,51 @@ void UpdateMotion(Context &context, const double origin_cm[3],
   (void)dt;
 }
 
-double SelectCarYaw(Context &context, const double velocity_yaw,
-                    const bool have_velocity) noexcept {
-  double camera_yaw{};
-  bool have_camera = false;
-  if (context.observed_valid.load(std::memory_order_acquire)) {
-    const double raw =
-        context.observed_rotation[1].load(std::memory_order_acquire);
-    if (std::isfinite(raw)) {
-      camera_yaw = raw * kDegreesToRadians;
-      have_camera = true;
+struct ObservedPose final {
+  std::array<double, 3> location{};
+  std::array<double, 3> rotation{};
+};
+
+// Try-read the detour's copy of the game camera pose. The detour writes it on
+// another thread; a torn or in-progress write is reported as unavailable
+// instead of spinning the Game thread.
+[[nodiscard]] bool ReadObservedPose(Context &context,
+                                    ObservedPose &pose) noexcept {
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    const std::uint64_t before =
+        context.observed_sequence.load(std::memory_order_acquire);
+    if ((before & 1U) != 0) {
+      continue;
+    }
+    if (!context.observed_valid.load(std::memory_order_relaxed)) {
+      return false;
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      pose.location[axis] =
+          context.observed_location[axis].load(std::memory_order_relaxed);
+      pose.rotation[axis] =
+          context.observed_rotation[axis].load(std::memory_order_relaxed);
+    }
+    const std::uint64_t after =
+        context.observed_sequence.load(std::memory_order_acquire);
+    if (before == after) {
+      return true;
     }
   }
-  if (!have_camera) {
+  return false;
+}
+
+double SelectCarYaw(Context &context, const double velocity_yaw,
+                    const bool have_velocity) noexcept {
+  ObservedPose observed{};
+  if (!ReadObservedPose(context, observed)) {
     return have_velocity ? velocity_yaw : 0.0;
   }
+  const double raw = observed.rotation[1];
+  if (!std::isfinite(raw)) {
+    return have_velocity ? velocity_yaw : 0.0;
+  }
+  const double camera_yaw = raw * kDegreesToRadians;
   if (!have_velocity) {
     return camera_yaw;
   }
@@ -1737,6 +1837,7 @@ void PublishInactive(Context &context) noexcept {
   context.view_sequence.store(sequence + 1U, std::memory_order_release);
   context.view_active.store(false, std::memory_order_release);
   context.view_has_previous.store(false, std::memory_order_release);
+  context.view_game_camera_valid.store(false, std::memory_order_relaxed);
   context.view_sequence.store(sequence + 2U, std::memory_order_release);
   // Re-entering the camera must not blend from the view that was active
   // before the player stopped driving.
@@ -1873,6 +1974,8 @@ void PublishView(Context &context, const nfs2015_chase::CameraState &view,
     }
   }
 
+  ObservedPose observed{};
+  const bool observed_valid = ReadObservedPose(context, observed);
   const std::uint64_t sequence =
       context.view_sequence.load(std::memory_order_relaxed);
   context.view_sequence.store(sequence + 1U, std::memory_order_release);
@@ -1895,12 +1998,17 @@ void PublishView(Context &context, const nfs2015_chase::CameraState &view,
   for (std::size_t axis = 0; axis < 3; ++axis) {
     context.view_car_location[axis].store(base_cm[axis],
                                           std::memory_order_relaxed);
+    context.view_game_camera_location[axis].store(
+        observed_valid ? observed.location[axis] : 0.0,
+        std::memory_order_relaxed);
     context.view_location[axis].store(next_location[axis],
                                       std::memory_order_relaxed);
     context.view_rotation[axis].store(next_rotation[axis],
                                       std::memory_order_relaxed);
   }
   context.view_current_time_ns.store(now_ns, std::memory_order_relaxed);
+  context.view_game_camera_valid.store(observed_valid,
+                                       std::memory_order_relaxed);
   context.view_update_hz.store(update_hz, std::memory_order_relaxed);
   context.view_fov.store(next_fov, std::memory_order_relaxed);
   context.view_fov_enabled.store(fov_enabled, std::memory_order_relaxed);
