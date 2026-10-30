@@ -325,13 +325,7 @@ struct DisplayState final {
   bool driving{};
   bool player_valid{};
   bool vehicle_service_available{};
-  bool vehicle_valid{};
-  bool entities_available{};
-  bool actors_available{};
   std::uint32_t camera_base_source{};
-  std::uint32_t vehicle_service_version{};
-  std::uint64_t vehicle_entity_id{};
-  char vehicle_class_name[ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES + 1]{};
   bool fov_enabled{};
   std::uint32_t preset{};
   double speed_kmh{};
@@ -2524,14 +2518,6 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.driving = true;
     context.display.player_valid = true;
     context.display.vehicle_service_available = vehicle_service;
-    context.display.vehicle_valid = vehicle_valid;
-    context.display.entities_available = context.entities != nullptr;
-    context.display.actors_available = context.actors != nullptr;
-    context.display.vehicle_service_version =
-        context.vehicle != nullptr ? context.vehicle->service_version : 0;
-    context.display.vehicle_entity_id = vehicle_entity_id;
-    std::memcpy(context.display.vehicle_class_name, vehicle_class_name,
-                sizeof(vehicle_class_name));
     context.display.camera_base_source = camera_base_source;
     context.display.speed_kmh = vehicle_speed_kmh > 0.5
                                     ? vehicle_speed_kmh
@@ -3065,17 +3051,6 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                                                 "Vehicle root")
                       : context->localizer.Text("base.pawn_root",
                                                 "Pawn root"));
-        char base_detail[192]{};
-        std::snprintf(base_detail, sizeof(base_detail),
-                      "id=%llu  ent=%s  act=%s  v%u  %s",
-                      static_cast<unsigned long long>(
-                          display.vehicle_entity_id),
-                      display.entities_available ? "yes" : "no",
-                      display.actors_available ? "yes" : "no",
-                      display.vehicle_service_version,
-                      display.vehicle_class_name);
-        DrawStatusLine(ui, context->localizer, "status.car_base_detail",
-                       "Base detail", base_detail);
         char speed_distance_line[32]{};
         std::snprintf(speed_distance_line, sizeof(speed_distance_line),
                       "%.2f", display.speed_distance_scale);

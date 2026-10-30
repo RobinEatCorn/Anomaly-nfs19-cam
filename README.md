@@ -110,16 +110,21 @@ ZIP 根目录必须直接包含 `manifest.json`。
   显示视点 detour 的输出频率和命中渲染帧插值的比例。低于 60 Hz 时 detour 会用最近两次快照
   插值，不再对车辆基准做前向预测；同时会用原始游戏相机位姿的帧间位移把机位补到当前渲染帧，
   避免车身和机位差一帧。
+- 车辆基准优先读 `VehicleMesh` 的 bounds（实际渲染的车身），再回退到 `RootComponent`，最后
+  才是 Pawn root。正常驾驶时窗口里的 `Camera base` 应显示 **VehicleMesh**；如果显示
+  **Pawn root**，说明 vehicle entity 或 `component_bounds` 不可用，相机跟的是角色而不是车身。
 
 ## 冲突与限制
 
 - 与 **Camera Tools**、**BetterPose** 的相机 Hook 互斥：CameraManager 的视点函数同一时间只能有一个
   所有者。先停用其他相机插件，或在窗口里点 **Retry hook**。
 - 插件不做镜头碰撞射线，贴墙时可能穿模。
-- 已知问题：相机更新频率低于 60 Hz 时，车身在画面里仍可能有轻微抖动。前向运动预测已移除
-  （它会把逐帧变化的 `velocity * dt` 叠到机位上，反而放大抖动）；detour 现在用原始游戏相机
-  位姿的帧间位移补偿发布延迟，这是测得位移而不是速度外推。如果仍有抖动，下一步是绕过 NTE
-  快照，在 detour 里直接读车辆的实时 transform。
+- 如果 `Camera base` 显示 **Pawn root**，相机会跟玩家角色而不是渲染车身，高速时车身可能在
+  画面里前后滑动。先确认 Runtime 发布了 `anomaly.nte.vehicle` 和 `anomaly.nte.entities`；
+  插件优先用 vehicle service 的 entity id 读取 `VehicleMesh`，找不到时才回退。日志
+  `anomaly-platform.log` 里的 `camera base source=...` 可用于定位。
+- 前向运动预测已移除（它会把逐帧变化的 `velocity * dt` 叠到机位上，反而放大抖动）；detour
+  仍用原始游戏相机位姿的帧间位移补偿发布延迟，这是测得位移而不是速度外推。
 - 插件只读取公开快照，不修改游戏内存中的相机状态（`FOV` 复选框用于把 NFS 镜头写回 CameraManager
   的 `FMinimalViewInfo`，与内建相机插件的行为一致）。
 
