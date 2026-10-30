@@ -1373,8 +1373,8 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
     const double dz = esp.bounds_center[2] - player.position[2];
     const bool plausible =
         complete && finite && dx * dx + dy * dy < 500.0 * 500.0 &&
-        std::fabs(dz) < 500.0 && esp.bounds_extent[2] > 0.05F &&
-        esp.bounds_extent[2] < 10.0F;
+        std::fabs(dz) < 500.0 && esp.bounds_extent[2] > 0.5F &&
+        esp.bounds_extent[2] < 1000.0F;
     if (plausible) {
       for (std::size_t axis = 0; axis < 3; ++axis) {
         center[axis] = esp.bounds_center[axis];
@@ -1447,8 +1447,8 @@ bool ReadComponentTransform(const auto *service,
       !std::isfinite(bounds.bounds_center[1]) ||
       !std::isfinite(bounds.bounds_center[2]) ||
       !std::isfinite(bounds.bounds_extent[2]) ||
-      bounds.bounds_extent[2] <= 0.05 ||
-      bounds.bounds_extent[2] >= 10.0) {
+      bounds.bounds_extent[2] <= 0.5 ||
+      bounds.bounds_extent[2] >= 1000.0) {
     return false;
   }
   for (std::size_t axis = 0; axis < 3; ++axis) {
@@ -1477,11 +1477,9 @@ CameraBaseSource QueryVehicleBase(
   std::uint32_t vehicle_entity_index = 0;
   if (FindVehicleEntity(context, vehicle_entity_id, vehicle_entity,
                         vehicle_entity_index)) {
-    if (ComponentBoundsReady(context.entities) &&
-        ReadComponentTransform(context.entities, vehicle_entity.handle,
-                               "RootComponent", center_cm, extent_cm)) {
-      return CameraBaseSource::vehicle_root;
-    }
+    // The rendered car body is VehicleMesh; the root component can be the
+    // simulated body. Read the mesh first so suspension/root offsets cannot
+    // move the car relative to the camera.
     if (ComponentBoundsReady(context.entities) &&
         ReadComponentTransform(context.entities, vehicle_entity.handle,
                                "VehicleMesh", center_cm, extent_cm)) {
@@ -1489,21 +1487,26 @@ CameraBaseSource QueryVehicleBase(
     }
     if (ComponentBoundsReady(context.actors) &&
         ReadComponentTransform(context.actors, vehicle_entity.handle,
+                               "VehicleMesh", center_cm, extent_cm)) {
+      return CameraBaseSource::vehicle_mesh;
+    }
+    if (ComponentBoundsReady(context.entities) &&
+        ReadComponentTransform(context.entities, vehicle_entity.handle,
                                "RootComponent", center_cm, extent_cm)) {
       return CameraBaseSource::vehicle_root;
     }
     if (ComponentBoundsReady(context.actors) &&
         ReadComponentTransform(context.actors, vehicle_entity.handle,
-                               "VehicleMesh", center_cm, extent_cm)) {
-      return CameraBaseSource::vehicle_mesh;
+                               "RootComponent", center_cm, extent_cm)) {
+      return CameraBaseSource::vehicle_root;
     }
     // Fall back to the cached entity bounds (also the actor root sample).
     if (std::isfinite(vehicle_entity.bounds_center[0]) &&
         std::isfinite(vehicle_entity.bounds_center[1]) &&
         std::isfinite(vehicle_entity.bounds_center[2]) &&
         std::isfinite(vehicle_entity.bounds_extent[2]) &&
-        vehicle_entity.bounds_extent[2] > 0.05 &&
-        vehicle_entity.bounds_extent[2] < 10.0) {
+        vehicle_entity.bounds_extent[2] > 0.5 &&
+        vehicle_entity.bounds_extent[2] < 1000.0) {
       for (std::size_t axis = 0; axis < 3; ++axis) {
         center_cm[axis] = vehicle_entity.bounds_center[axis];
       }
@@ -1519,10 +1522,10 @@ CameraBaseSource QueryVehicleBase(
     CameraBaseSource source;
   };
   const Candidate candidates[] = {
-      {vehicle_handle, CameraBaseSource::vehicle_root},
       {vehicle_handle, CameraBaseSource::vehicle_mesh},
-      {player_handle, CameraBaseSource::vehicle_root},
       {player_handle, CameraBaseSource::vehicle_mesh},
+      {vehicle_handle, CameraBaseSource::vehicle_root},
+      {player_handle, CameraBaseSource::vehicle_root},
   };
   for (const Candidate &candidate : candidates) {
     if (candidate.handle.id == 0 || candidate.handle.generation == 0) {
