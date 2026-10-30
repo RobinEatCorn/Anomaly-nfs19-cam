@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 2,
+  "id": "io.github.robineatcorn.nfs2015-chase-cam",
+  "name": "NFS 2015 Chase Cam",
+  "description": "Replaces the driving camera with the NFS 2015 action camera model: a loose drift yaw spring, a car-local pivot orbit, drift push-in/drop, speed-based FOV and shake.",
+  "author": "RobinEatCorn",
+  "license": "AGPL-3.0-only",
+  "version": "1.0.0",
+  "entry": "plugin.dll",
+  "api": {
+    "major": 1,
+    "minMinor": 0,
+    "maxMinor": 0
+  },
+  "games": [
+    "nte"
+  ],
+  "builds": [
+    "nte-*"
+  ],
+  "loadPhase": "game-ready",
+  "services": [
+    {
+      "id": "anomaly.core",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.config",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.ui",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.localization",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.input",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.interop.signature",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.interop.hook",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.json",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.nte.session",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.nte.player",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.nte.vehicle",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.nte.entities",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.nte.actors",
+      "minVersion": 1,
+      "optional": true
+    }
+  ],
+  "capabilities": [
+    "configuration",
+    "ui",
+    "input",
+    "json",
+    "interop-signature",
+    "interop-hook",
+    "memory-read",
+    "memory-write",
+    "nte-session-snapshot",
+    "nte-player-snapshot",
+    "nte-vehicle",
+    "nte-entity-snapshot",
+    "nte-actor-snapshot"
+  ]
+}
