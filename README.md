@@ -17,11 +17,11 @@
 **Plugins > 可用** 刷新并安装：
 
 ```text
-https://raw.githubusercontent.com/robineatcorn/nfs2015-chase-cam/main/pluginmaster.json
+https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmaster.json
 ```
 
 插件会装到 `<game>/Anomaly/plugins/Nfs2015ChaseCam`。也可以从
-[Releases](https://github.com/robineatcorn/nfs2015-chase-cam/releases) 下载
+[Releases](https://github.com/RobinEatCorn/Anomaly-nfs19-cam/releases) 下载
 `Nfs2015ChaseCam-<version>.zip`，把 ZIP **里面的内容**解压到该目录
 （`manifest.json` 必须直接在目录根部，不能多套一层文件夹）。
 
