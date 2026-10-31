@@ -1,3 +1,20 @@
+# 构建产物
 /build/
 /build.mingw/
 /dist/
+/out/
+/package/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+
+# IDE / 编辑器
+/.vs/
+/.vscode/
+/.idea/
+*.user
+
+# 本地 SDK 路径覆盖（如自定义了 AnomalySDK_DIR）
+/*.local.cmake

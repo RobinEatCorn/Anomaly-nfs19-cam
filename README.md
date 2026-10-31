@@ -1,8 +1,33 @@
+<div align="center">
+
 # NFS 2015 Chase Cam
 
-独立的第三方 Anomaly 插件：用 NFS 2015 Action Camera 的弹簧、pivot 与漂移参数替换游戏驾驶追车视角。
+**用 NFS 2015 的 Action Camera 替换 NTE 的驾驶追车视角**
 
-本目录是一个**独立的 CMake 工程**，只消费安装好的 `AnomalySDK`，不参与 Anomaly 仓库的构建，
+![platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6) ![language](https://img.shields.io/badge/C%2B%2B-20-00599C) ![abi](https://img.shields.io/badge/Anomaly%20ABI-v1-2bb5a0) ![license](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
+
+</div>
+
+独立的第三方 Anomaly 插件：用 NFS 2015 Action Camera 的弹簧、pivot 与漂移参数替换游戏驾驶追车视角。
+本仓库既是源码仓库，也是 Anomaly 的第三方插件源（根目录的 `pluginmaster.json`）。
+
+## 安装
+
+把下面的地址添加到 Runtime 的 **Plugins > 第三方插件 > 添加插件源**，应用后到
+**Plugins > 可用** 刷新并安装：
+
+```text
+https://raw.githubusercontent.com/robineatcorn/nfs2015-chase-cam/main/pluginmaster.json
+```
+
+插件会装到 `<game>/Anomaly/plugins/Nfs2015ChaseCam`。也可以从
+[Releases](https://github.com/robineatcorn/nfs2015-chase-cam/releases) 下载
+`Nfs2015ChaseCam-<version>.zip`，把 ZIP **里面的内容**解压到该目录
+（`manifest.json` 必须直接在目录根部，不能多套一层文件夹）。
+
+## 实现方式
+
+本仓库是**独立的 CMake 工程**，只消费安装好的 `AnomalySDK`，不参与 Anomaly 仓库的构建，
 也不包含宿主内部头文件或对 Runtime 的修改。插件通过公开的纯 C ABI v1 服务工作：
 
 - `anomaly.interop.signature` + `anomaly.interop.hook` 接管 CameraManager 的视点函数；
@@ -15,17 +40,21 @@
 ## 目录
 
 ```text
-nfs2015-chase-cam/
-  CMakeLists.txt        独立工程，find_package(AnomalySDK)
-  mingw.cmake           MinGW-w64 交叉编译工具链文件
-  build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
-  manifest.json         插件包 Manifest（id / 服务 / capability）
-  plugin.cpp            ABI 入口、生命周期、视点 detour、UI
-  chase_cam.hpp         NFS 2015 相机模型（两个预设）
-  view_blend.hpp        渲染帧插值
-  localization.hpp      插件自己的本地化 helper（不依赖宿主内部头文件）
-  locales/zh-CN.json    中文文案
-  tests/               相机模型的验收夹具，不依赖游戏
+.
+├── CMakeLists.txt        独立工程，find_package(AnomalySDK)
+├── CMakePresets.json     MSVC x64 preset
+├── manifest.json         插件包 Manifest（id / 服务 / capability）
+├── pluginmaster.json     第三方插件源条目
+├── mingw.cmake           MinGW-w64 交叉编译工具链文件
+├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
+├── plugin.cpp            ABI 入口、生命周期、视点 detour、UI
+├── chase_cam.hpp         NFS 2015 相机模型（两个预设）
+├── view_blend.hpp        渲染帧插值
+├── localization.hpp      插件自己的本地化 helper（不依赖宿主内部头文件）
+├── locales/zh-CN.json    中文文案
+├── tests/                相机模型的验收夹具，不依赖游戏
+├── LICENSE               AGPL-3.0-only
+└── README.md
 ```
 
 ## 构建
@@ -35,9 +64,12 @@ nfs2015-chase-cam/
 ```powershell
 cmake --install C:\path\to\anomaly-build --prefix C:\AnomalySDK --component SDK
 
-cmake -S . -B build -DAnomalySDK_DIR=C:/AnomalySDK/lib/cmake/AnomalySDK
-cmake --build build --config RelWithDebInfo
+cmake --preset default -DAnomalySDK_DIR=C:/AnomalySDK/lib/cmake/AnomalySDK
+cmake --build --preset default
 ```
+
+等价的手工命令是 `cmake -S . -B build -DAnomalySDK_DIR=...` 加
+`cmake --build build --config RelWithDebInfo`。
 
 可加载的包默认写到 `build\package\Nfs2015ChaseCam`，其中包含 `plugin.dll`、`manifest.json`
 和 `locales\`。导入库与 PDB 分别写到 `build\lib` 和 `build\symbols`，不会混进包目录。
@@ -88,7 +120,7 @@ MSVC 构建的官方工具，但它们通过 `LoadLibrary` 加载纯 C ABI 的 D
 ## 验证与安装
 
 ```powershell
-ctest --test-dir build -C RelWithDebInfo --output-on-failure
+ctest --preset default
 anomaly-plugin validate .\build\package\Nfs2015ChaseCam
 anomaly-test-host --plugin .\build\package\Nfs2015ChaseCam --reload 10 --ticks 60
 ```
@@ -103,8 +135,8 @@ cmake --install build --config RelWithDebInfo --prefix C:\path\to\game --compone
 ```
 
 两种方式都会得到 `<game>\Anomaly\plugins\Nfs2015ChaseCam`，然后在游戏内 **Plugins > 已安装** 里启用。
-打包成第三方插件 ZIP 的流程见 Anomaly 文档 `docs/developer-guide/plugin-distribution.md`：
-ZIP 根目录必须直接包含 `manifest.json`。
+WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目录。发布 ZIP 的流程见
+下面的[发布](#发布)一节：ZIP 根目录必须直接包含 `manifest.json`。
 
 ## 使用
 
@@ -152,11 +184,33 @@ ZIP 根目录必须直接包含 `manifest.json`。
 
 ## 发布
 
-`manifest.json` 与 `plugin.cpp` 中的插件 ID 必须一致，当前为
-`io.github.robineatcorn.nfs2015-chase-cam`。发布到自己的插件源时，修改 `id`、`author` 和
-`pluginmaster.json` 的 `InternalName` / `Version` 即可，但 ID 一旦发布就不应再变。
+`manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
+`io.github.robineatcorn.nfs2015-chase-cam`，版本 `1.0.0`。ID 一旦发布就不应再变。
+
+1. 同步升版本：`manifest.json` 的 `version`、`pluginmaster.json` 的 `Version` 和 ZIP 文件名。
+2. 构建 Release 包，跑 `ctest`、`anomaly-plugin validate` 和 `anomaly-test-host`（见上一节）。
+3. 生成 ZIP。压缩的是包目录**里面的内容**，ZIP 根部必须直接有 `manifest.json` 和 `plugin.dll`：
+
+   ```powershell
+   Compress-Archive -Path .\build\package\Nfs2015ChaseCam\* `
+     -DestinationPath .\dist\Nfs2015ChaseCam-1.0.0.zip -Force
+   ```
+
+   WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`。
+4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
+
+   ```sh
+   gh release create v1.0.0 dist/Nfs2015ChaseCam-1.0.0.zip \
+     --title "NFS 2015 Chase Cam 1.0.0" --notes "首个公开版本"
+   ```
+
+5. 最后更新 `pluginmaster.json` 的 `Version` 与 `DownloadLinkInstall` / `DownloadLinkUpdate`，
+   提交到 `main`。先传 ZIP 再改索引，避免用户看到还不存在的下载地址。
+
+用户添加的插件源 URL 固定为 `main` 分支的 raw 地址，升级只改 `pluginmaster.json`，不需要
+让用户重新添加。本地测试插件源时可以用 `file://` 索引，但公开分发必须用 HTTPS。
 
 ## 许可
 
-AGPL-3.0-only。相机模型与文档来自同一仓库的 NFS 2015 相机分析；原始 TypeScript 参考实现与
-分析报告不随本插件发布。
+AGPL-3.0-only。相机模型移植自 NFS 2015 相机分析；原始 TypeScript 参考实现与分析报告不属于
+本仓库，也不随插件包分发。
