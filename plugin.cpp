@@ -703,12 +703,25 @@ bool AppendText(char *&cursor, char *const end,
 
 bool AppendNumber(char *&cursor, char *const end,
                   const double value) noexcept {
+#if defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE < 11
+  // libstdc++ before GCC 11 has no floating-point std::to_chars, and MinGW-w64
+  // toolchains shipped by LTS distributions are still on GCC 10. %.17g is the
+  // shortest form that round-trips a double.
+  const auto capacity = static_cast<std::size_t>(end - cursor);
+  const int written = std::snprintf(cursor, capacity, "%.17g", value);
+  if (written < 0 || static_cast<std::size_t>(written) >= capacity) {
+    return false;
+  }
+  cursor += written;
+  return true;
+#else
   const auto result = std::to_chars(cursor, end, value);
   if (result.ec != std::errc{}) {
     return false;
   }
   cursor = result.ptr;
   return true;
+#endif
 }
 
 bool PersistSettings(Context &context) noexcept {

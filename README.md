@@ -17,6 +17,8 @@
 ```text
 nfs2015-chase-cam/
   CMakeLists.txt        独立工程，find_package(AnomalySDK)
+  mingw.cmake           MinGW-w64 交叉编译工具链文件
+  build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
   manifest.json         插件包 Manifest（id / 服务 / capability）
   plugin.cpp            ABI 入口、生命周期、视点 detour、UI
   chase_cam.hpp         NFS 2015 相机模型（两个预设）
@@ -45,27 +47,34 @@ cmake --build build --config RelWithDebInfo
 插件只跨纯 C ABI，SDK 包里的 `Anomaly::sdk` 也只是 header-only 的 INTERFACE target，所以插件本身
 可以用 MinGW-w64 构建；Anomaly Runtime 和官方工具仍然需要 MSVC/VS2022。
 
-在 Windows 上：
+在 Windows 上用 MinGW 直接构建：
 
 ```powershell
-cmake -S . -B build -G "MinGW Makefiles" `
+cmake -S . -B build.mingw -G "MinGW Makefiles" `
   -DCMAKE_BUILD_TYPE=RelWithDebInfo `
   -DAnomalySDK_DIR=C:/AnomalySDK/lib/cmake/AnomalySDK
-cmake --build build
+cmake --build build.mingw
 ```
 
-在 Linux/WSL 上交叉编译时，用一个 toolchain 文件：
-
-```cmake
-set(CMAKE_SYSTEM_NAME Windows)
-set(CMAKE_SYSTEM_PROCESSOR x86_64)
-set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++)
-```
+在 Linux/WSL 上交叉编译用仓库里的 `build-mingw.sh`。脚本会定位 SDK、用 `mingw.cmake`
+配置并编译，最后校验 `plugin.dll` 只导入系统模块、导出 `AnomalyPluginEntryV1`：
 
 ```sh
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=mingw-toolchain.cmake \
+./build-mingw.sh                        # -> build.mingw/package/Nfs2015ChaseCam
+./build-mingw.sh --zip                  # 另出 dist/Nfs2015ChaseCam-<version>.zip
+./build-mingw.sh --install D:/Games/NTE # 装到 <game>/Anomaly/plugins/Nfs2015ChaseCam
+./build-mingw.sh --run-tests            # 用 wine 跑验收夹具
+./build-mingw.sh --help                 # 全部选项
+```
+
+需要 `x86_64-w64-mingw32-g++-posix`：GCC 的 win32 线程模型里 libstdc++ 没有
+`std::mutex`。SDK 默认取 `../Anomaly/.build/windows-vs2022/package/sdk`，可以用 `--sdk`
+或 `ANOMALY_SDK_DIR` 覆盖。等价的手工步骤：
+
+```sh
+cmake -S . -B build.mingw -DCMAKE_TOOLCHAIN_FILE=mingw.cmake \
   -DAnomalySDK_DIR=/path/to/AnomalySDK/lib/cmake/AnomalySDK -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build
+cmake --build build.mingw
 ```
 
 `CMakeLists.txt` 在 MinGW 下会自动加 `-static -static-libgcc -static-libstdc++`，让
