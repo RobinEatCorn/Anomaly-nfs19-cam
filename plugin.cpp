@@ -30,6 +30,8 @@
 #include "anomaly/sdk/services/ui_resources.h"
 
 #include "chase_cam.hpp"
+#include "latency_window.hpp"
+#include "car_sample.hpp"
 #include "view_blend.hpp"
 
 #include <windows.h>
@@ -49,6 +51,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <system_error>
 
 namespace {
@@ -113,10 +116,13 @@ constexpr double kUpdateRateWindowSeconds = 0.5;
 // The view is rendered from the last two Game-tick snapshots. Delay the pair
 // by at most one tick so a 30 Hz city tick can still feed a 60 Hz renderer;
 // the cap keeps a long hitch from making the camera trail too far behind.
-constexpr double kMaximumViewInterpolationDelaySeconds = 0.25;
 // A longer gap is a hitch/teleport, not a low update rate. Snap the history
 // instead of blending across it (which would both trail and step at the end).
-constexpr double kMaximumViewInterpolationGapSeconds = 0.25;
+// T2 presenter: how far behind the newest sample the model is fed, and the
+// largest step the springs are allowed to take in one frame.
+constexpr double kSampleMaximumDelaySeconds = 0.05;
+constexpr double kMaximumPresenterStepSeconds = 0.1;
+constexpr int kMaximumPresenterSubsteps = 12;
 // The camera-to-car distance is the direct screen-size driver. Low-pass it so
 // Game-tick sampling/spring phase noise cannot make the car breathe in frame.
 constexpr double kViewDistanceSmoothing = 4.0;
@@ -128,13 +134,19 @@ constexpr double kDrivingGraceSeconds = 0.35;
 // exactly when it is most useful.
 constexpr double kViewHistorySnapDistanceCm = 5000.0;
 constexpr double kViewHistorySnapAngleDegrees = 60.0;
+// The camera's yaw is the nose reference until it strays this far from the
+// direction of travel: past it the camera is describing something other than
+// the car (a wall, a spin, a scripted shot), and the travel direction is the
+// safer answer.
 constexpr double kMaximumCameraYawDifference = 1.4;  // ~80 degrees
+// The host reports a signed forward speed, so reverse needs no hysteresis: at
+// walking pace and below the travel direction is not used at all.
+constexpr double kReverseSpeedKmh = 1.0;
 constexpr double kHookRetrySeconds = 2.0;
 // The detour runs one engine tick after the model published. Shift the
 // published eye by the game camera's movement since that publish so the car
 // and the camera are rendered in the same frame. A larger step is a
 // teleport/hitch, not car motion.
-constexpr double kMaximumGameCameraSyncCm = 1000.0;
 
 // The view-point getter of the game's CameraManager. The same signature the
 // built-in Camera Tools plugin resolves; only one plugin can own the hook.
@@ -275,11 +287,6 @@ bool VehicleReady(const AnomalyNteVehicleServiceV1 *service) noexcept {
   return service != nullptr && service->snapshot != nullptr;
 }
 
-template <typename Service>
-bool ComponentBoundsReady(const Service *service) noexcept {
-  return service != nullptr && service->component_bounds != nullptr;
-}
-
 bool SnapshotValid(const std::uint32_t flags) noexcept {
   // STALE only means the sampler has not refreshed this tick (the interval is
   // configurable); the last sample is still the best known player/vehicle
@@ -317,6 +324,87 @@ bool ReadPointerAtOffset(const AnomalyCoreServiceV1 *core,
          value != 0;
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostics (PLAN-camera-timing.md T0)
+// ---------------------------------------------------------------------------
+//
+// Every silent degradation the camera used to take without telling anyone is
+// counted here. The point of T0 is to rank the suspected causes from one
+// recorded session instead of inferring them from the source, so the counters
+// are always on and cheap: one relaxed atomic increment on paths that already
+// call into the host far more expensively.
+enum SnapReason : std::uint32_t {
+  kSnapReasonMotion = 1U << 0U,      // ResetMotion: world/entity/driving change
+  kSnapReasonTeleport = 1U << 1U,    // implausible position step
+  kSnapReasonInactive = 1U << 2U,    // camera went idle and came back
+  kSnapReasonPreset = 1U << 3U,      // preset switch
+  kSnapReasonUserReset = 1U << 4U,   // "Reset camera" button
+  kSnapReasonCount = 5
+};
+
+// Which measurement `SelectCarYaw` returned. A switch between two of these
+// inside one drift is exactly the car-yaw step that shows up as a camera jump,
+// so this count is the direct measure of the suspected jump source.
+enum YawSource : std::uint32_t {
+  kYawSourceNone = 0,
+  kYawSourceObserved = 1,
+  kYawSourceVelocity = 2,
+  kYawSourceNoObservation = 3,
+};
+
+constexpr std::size_t kDiagnosticThreadSlots = 8;
+
+struct Diagnostics final {
+  std::atomic<std::uint64_t> snap_by_reason[kSnapReasonCount]{};
+  std::atomic<std::uint64_t> yaw_source_switches{};
+  std::atomic<std::uint64_t> observed_read_failures{};
+  std::atomic<std::uint64_t> lease_failures{};
+  std::atomic<std::uint64_t> view_read_torn{};
+  std::atomic<std::uint64_t> detour_calls{};
+  std::atomic<std::uint64_t> detour_calls_window{};
+  // Active view but no published pose: the frame the game camera shows through.
+  std::atomic<std::uint64_t> detour_no_publish{};
+  // Q1: which threads call the hooked getter.
+  std::atomic<std::uint32_t> detour_threads[kDiagnosticThreadSlots]{};
+  std::atomic<std::uint32_t> detour_thread_count{};
+  // Q6: ticks the camera ran in a vehicle on a stale snapshot (the grace path).
+  std::atomic<std::uint64_t> vehicle_gap_ticks{};
+  std::atomic<std::uint64_t> player_sequence_jumps{};
+  // Vehicle service polls, i.e. how often the expensive host call ran.
+  std::atomic<std::uint64_t> vehicle_polls{};
+  // T3.1: ticks that fell back to the render-thread camera observation because
+  // the Game-tick ESP camera tail was unavailable. Should stay 0.
+  std::atomic<std::uint64_t> camera_yaw_esp_misses{};
+  // Experiment (PLAN-camera-timing.md T3.4). Two independent ways to measure
+  // the slip angle, side by side, plus the presenter's per-frame correction.
+  // Nothing here changes behaviour; the numbers decide which fix is worth
+  // building.
+  std::atomic<double> slip_signed_speed_kmh{};
+  std::atomic<double> slip_from_position_degrees{};
+  std::atomic<double> slip_from_speed_degrees{};
+  std::atomic<std::uint64_t> slip_sign_changes{};
+  std::atomic<int> slip_last_sign{};
+  // Tenths of a degree: the largest single-tick change of the slip angle in the
+  // current window. A real drift entry is bounded by the yaw rate (~1-2 deg per
+  // tick at 50 Hz); anything much larger is the estimator, not the car.
+  std::atomic<std::uint64_t> slip_max_step_ddeg{};
+  // Tenths of a centimetre, so the max can use an integer CAS loop.
+  // Eye speed on the render clock, in millimetres per second, floor and peak.
+  // A smooth camera moves at a nearly constant speed, so the two converge on
+  // the car's own speed; a camera that freezes and jumps once per tick shows a
+  // floor near zero against a peak near twice the average. This is immune to
+  // the call rate, because each sample is divided by that call's own elapsed
+  // time - the earlier "second difference" metric was dominated by call timing.
+  std::atomic<std::uint64_t> render_speed_floor_mmps{};
+  std::atomic<std::uint64_t> render_speed_peak_mmps{};
+  // Turn rate on the render clock, in hundredths of a degree per second.
+  std::atomic<std::uint64_t> render_turn_floor_cdps{};
+  std::atomic<std::uint64_t> render_turn_peak_cdps{};
+  // How far the anchor moves in one Game tick, in tenths of a centimetre. The
+  // scale the two jitter numbers must be compared against.
+  std::atomic<std::uint64_t> car_step_dcm{};
+};
+
 struct DisplayState final {
   bool started{};
   bool enabled{};
@@ -325,7 +413,6 @@ struct DisplayState final {
   bool driving{};
   bool player_valid{};
   bool vehicle_service_available{};
-  std::uint32_t camera_base_source{};
   bool fov_enabled{};
   std::uint32_t preset{};
   double speed_kmh{};
@@ -345,7 +432,60 @@ struct DisplayState final {
   double pitch_scale{kDefaultPitchScale};
   double shake_scale{kDefaultShakeScale};
   bool roll_only_in_drift{};
+
+  // Diagnostics. Copied from Context::diag on the Game tick so Draw reads a
+  // plain snapshot on the render thread.
+  double detour_hz{};
+  double tick_ms_last{};
+  double tick_ms_avg{};
+  double tick_ms_p99{};
+  double tick_ms_max{};
+  std::uint64_t snap_total{};
+  std::uint64_t snap_by_reason[kSnapReasonCount]{};
+  std::uint64_t yaw_source_switches{};
+  std::uint64_t observed_read_failures{};
+  std::uint64_t lease_failures{};
+  std::uint64_t view_read_torn{};
+  std::uint64_t detour_calls{};
+  std::uint64_t detour_no_publish{};
+  std::uint64_t detour_thread_count{};
+  std::uint64_t vehicle_gap_ticks{};
+  std::uint64_t player_sequence_jumps{};
+  std::uint64_t vehicle_polls{};
+  std::uint64_t camera_yaw_esp_misses{};
+  double slip_signed_speed_kmh{};
+  double slip_from_position_degrees{};
+  double slip_from_speed_degrees{};
+  std::uint64_t slip_sign_changes{};
+  double slip_max_step_degrees{};
+  bool render_speed_valid{};
+  bool render_turn_valid{};
+  double render_speed_floor_mps{};
+  double render_speed_peak_mps{};
+  double render_turn_floor_dps{};
+  double render_turn_peak_dps{};
+  double car_step_cm{};
 };
+
+// Keep a window peak without a lock. The Game thread resets these between
+// windows, so a plain CAS loop is enough.
+template <typename T>
+void LowerFloor(std::atomic<T> &floor, T value) noexcept {
+  T previous = floor.load(std::memory_order_relaxed);
+  while (value < previous &&
+         !floor.compare_exchange_weak(previous, value,
+                                     std::memory_order_relaxed)) {
+  }
+}
+
+template <typename T>
+void RaisePeak(std::atomic<T> &peak, T value) noexcept {
+  T previous = peak.load(std::memory_order_relaxed);
+  while (value > previous &&
+         !peak.compare_exchange_weak(previous, value,
+                                     std::memory_order_relaxed)) {
+  }
+}
 
 struct Context final {
   nfs2015_chase_cam::Localizer localizer;
@@ -359,8 +499,6 @@ struct Context final {
   const AnomalyNteSessionServiceV1 *session{};
   const AnomalyNtePlayerServiceV1 *player{};
   const AnomalyNteVehicleServiceV1 *vehicle{};
-  const AnomalyNteEntitiesServiceV1 *entities{};
-  const AnomalyNteActorsServiceV1 *actors{};
 
   AnomalyGenerationHandleV1 settings_schema{};
   AnomalyGenerationHandleV1 toggle_hotkey{};
@@ -407,40 +545,29 @@ struct Context final {
   // snapshot is complete.
   std::atomic<std::uint64_t> view_sequence{};
   std::atomic_bool view_active{};
-  std::atomic_bool view_has_previous{};
   std::atomic<bool> view_fov_enabled{true};
-  // `view_car_location` is the transform the car body is rendered at: the
-  // VehicleMesh bounds center when entity reflection is available, otherwise
-  // the pawn root. ESP bounds are only a model-height reference.
+  // `view_car_location` is the published camera anchor. The detour computes
+  // `anchor + offset`, and the offset is built from the same anchor, so the
+  // anchor cancels out of the world position: it only has to be stable. The
+  // Pawn root location is the cheapest stable choice (one cached snapshot
+  // field per tick), and it is the actor transform the car is drawn at.
   std::atomic<double> view_car_location[3]{};
   // Game camera location at the time the published view was computed. The
   // detour adds the movement since then so the eye and car share a frame.
-  std::atomic<double> view_game_camera_location[3]{};
-  std::atomic_bool view_game_camera_valid{};
-  std::atomic<double> view_update_hz{};
-  std::atomic<double> view_location[3]{};
-  std::atomic<double> view_rotation[3]{};
-  std::atomic<float> view_fov{};
-  std::atomic<std::int64_t> view_previous_time_ns{};
-  std::atomic<std::int64_t> view_current_time_ns{};
-  std::atomic<double> view_distance_cm{};
-  std::atomic<double> view_previous_distance_cm{};
-  std::atomic<double> view_previous_location[3]{};
-  std::atomic<double> view_previous_rotation[3]{};
-  std::atomic<float> view_previous_fov{};
-  std::atomic<bool> view_previous_fov_enabled{};
 
-  // Vehicle entity resolution cache. The vehicle service handle is an object
-  // handle, not necessarily an entity-cache handle; look the vehicle up by its
-  // entity id and reuse the frame index while the cache generation is stable.
-  std::uint64_t vehicle_entity_id{};
-  std::uint64_t vehicle_entity_frame_generation{};
-  std::uint32_t vehicle_entity_index{};
-  AnomalyGenerationHandleV1 vehicle_entity{};
-  // Fallback scan result and its rate limit. The scan is only a last resort
-  // when the vehicle service and the local player entity cannot name the car.
-  AnomalyGenerationHandleV1 scanned_vehicle_entity{};
-  double next_vehicle_scan_elapsed{};
+  // Vehicle service poll cache. The host's vehicle snapshot runs three
+  // ProcessEvent dispatches plus a class-chain name walk on every call, so it
+  // is polled on an interval and the last sample is held in between. Speed is
+  // a slow variable and every consumer of it is damped already.
+  double next_vehicle_query_elapsed{};
+  bool vehicle_cached_valid{};
+  bool vehicle_cached_speed_valid{};
+  double vehicle_cached_speed_kmh{};
+  // True only on the tick that actually polled the host, so the speed
+  // derivative is not read from a held sample.
+  bool vehicle_cached_fresh{};
+  double brake_last_target{};
+  AnomalyGenerationHandleV1 vehicle_cached_handle{};
   bool base_diagnostic_logged{};
 
   // Game-domain state.
@@ -452,10 +579,33 @@ struct Context final {
   double view_output_hz{};
   double interpolation_ratio{};
   std::atomic<std::uint64_t> view_output_frames{};
-  std::atomic<std::uint64_t> view_interpolated_frames{};
   nfs2015_chase::ChaseCam chase{nfs2015_chase::GamePreset()};
   std::uint32_t configured_preset{0};
   bool chase_initialized{};
+  // T2: the chase model runs on the render clock, so the Game tick only writes
+  // car samples and the render side advances the springs. The model state is
+  // shared, hence the try-lock: a render call that loses the race uses the last
+  // produced pose instead of blocking a frame.
+  nfs2015_chase::SampleRing car_ring;
+  std::atomic_flag presenter_lock = ATOMIC_FLAG_INIT;
+  std::int64_t presenter_last_ns{};
+  double presenter_accumulator{};
+  std::uint64_t presenter_epoch{};
+  bool presenter_initialized{};
+  std::int64_t presenter_pose_ns{};
+  std::atomic<std::uint64_t> presenter_pose_sequence{};
+  std::atomic<double> presenter_pose_location[3]{};
+  std::atomic<double> presenter_pose_rotation[3]{};
+  std::atomic<float> presenter_pose_lens{};
+  std::atomic<bool> presenter_pose_fov{};
+  std::atomic<bool> presenter_pose_valid{};
+  std::atomic<double> presenter_anchor[3]{};
+  std::atomic<double> presenter_drift{};
+  std::atomic<double> presenter_distance_cm{};
+  std::atomic<std::int64_t> sample_interval_ns{};
+  std::int64_t sample_last_ns{};
+  // Bumped by the Game tick when the model must restart (world, preset, reset).
+  std::uint64_t sample_epoch{};
   std::atomic_bool reset_requested{};
   std::atomic<std::uint64_t> reset_feedback_until{};
   std::atomic_bool hook_retry_requested{};
@@ -471,9 +621,6 @@ struct Context final {
   double brake_input{};
   double brake_hold_until{};
   double vehicle_acceleration_mps2{};
-  double smoothed_view_distance_cm{};
-  double raw_view_distance_cm{};
-  bool have_view_distance{};
   std::uint64_t last_player_sequence{};
   double last_player_time{};
   double last_position_cm[3]{};
@@ -481,10 +628,28 @@ struct Context final {
   double acceleration_cmps2[3]{};
   double last_car_yaw{};
   double yaw_rate{};
+  double last_slip_degrees{};
+  bool have_last_slip{};
+  // Travel direction is measured from the nose or from its opposite end (T3.2).
+  // Latest raw host forward speed, still signed: negative means reversing.
+  double vehicle_speed_signed_kmh{};
   bool last_view_active{};
   bool last_fov_enabled{};
-  std::uint32_t camera_base_source{};
+  // T3.1: game-camera yaw from the player ESP snapshot, i.e. sampled by the
+  // host on this Game tick instead of observed on the render thread.
+  double camera_yaw_radians{};
+  bool camera_yaw_valid{};
   bool view_snap{true};
+
+  // Diagnostics (T0). Game thread owns the plain fields; the detour only
+  // touches Context::diag atomics.
+  Diagnostics diag{};
+  std::uint32_t view_snap_reasons{};
+  std::uint32_t yaw_source{kYawSourceNone};
+  nfs2015_chase_cam::LatencyWindow camera_cost{};
+  double camera_ms_last{};
+  double detour_hz{};
+  bool diagnostics_open{};
 
   // Game writes, Render copies.
   mutable std::mutex display_mutex;
@@ -501,6 +666,54 @@ void Log(const Context &context, const std::uint32_t level,
   }
   context.core->log(context.core->user, level, StringView(message));
 }
+
+// Mark the published view history as discontinuous. The reason is accumulated
+// and consumed by PublishView, so a reset requested while the camera is idle
+// costs nothing and is not reported as a snap that actually happened.
+void NoteViewSnap(Context &context, const SnapReason reason) noexcept {
+  context.view_snap = true;
+  context.view_snap_reasons |= static_cast<std::uint32_t>(reason);
+}
+
+void NoteYawSource(Context &context, const YawSource source) noexcept {
+  const auto value = static_cast<std::uint32_t>(source);
+  if (context.yaw_source == value) {
+    return;
+  }
+  if (context.yaw_source != kYawSourceNone) {
+    context.diag.yaw_source_switches.fetch_add(1, std::memory_order_relaxed);
+  }
+  context.yaw_source = value;
+}
+
+// Q1: a second calling thread would mean the single-clock presenter planned in
+// T2 needs explicit serialisation, so record the identities now.
+void NoteDetourThread(Context &context) noexcept {
+  const auto thread = static_cast<std::uint32_t>(GetCurrentThreadId());
+  for (std::size_t index = 0; index < kDiagnosticThreadSlots; ++index) {
+    std::uint32_t slot =
+        context.diag.detour_threads[index].load(std::memory_order_relaxed);
+    if (slot == thread) {
+      return;
+    }
+    if (slot == 0 &&
+        context.diag.detour_threads[index].compare_exchange_strong(
+            slot, thread, std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
+      context.diag.detour_thread_count.fetch_add(1,
+                                                std::memory_order_relaxed);
+      return;
+    }
+    if (slot == thread) {
+      return;
+    }
+  }
+}
+
+// Q2 answer (PLAN-camera-timing.md): the game-camera pose the entity frame
+// once exposed is already in the player ESP snapshot, which is a cached copy
+// the plugin reads every tick anyway (`camera_position` / `camera_rotation`).
+// There is no need to lease the entity service just to observe it.
 
 bool ResolveSignature(Context &context, const std::string_view pattern,
                       std::uintptr_t &address) noexcept {
@@ -1036,9 +1249,21 @@ void ReleaseToggleHotkey(Context &context) noexcept {
 // Camera view-point detour
 // ---------------------------------------------------------------------------
 
+bool AdvancePresenter(Context &context, std::int64_t now_ns,
+                      double location[3], double rotation[3], float *lens,
+                      bool *fov_enabled) noexcept;
+
+void RequestPresenterReset(Context &context) noexcept;
+
 void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
                                         double *rotation) noexcept {
   Context *context = g_active.load(std::memory_order_acquire);
+  if (context != nullptr) {
+    context->diag.detour_calls.fetch_add(1, std::memory_order_relaxed);
+    context->diag.detour_calls_window.fetch_add(1,
+                                               std::memory_order_relaxed);
+    NoteDetourThread(*context);
+  }
   AnomalyGenerationHandleV1 lease{};
   bool leased = false;
   CameraViewPointFn original =
@@ -1054,6 +1279,10 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
       leased = context->hook
                    ->begin_callback(context->hook->user, handle, &lease)
                    .code == ANOMALY_STATUS_V1_OK;
+      if (!leased) {
+        context->diag.lease_failures.fetch_add(1,
+                                               std::memory_order_relaxed);
+      }
     }
   } catch (...) {
     leased = false;
@@ -1066,17 +1295,6 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
       original_called = true;
     }
   } catch (...) {
-  }
-
-  std::array<double, 3> game_camera_location{};
-  bool game_camera_valid = false;
-  if (original_called && location != nullptr) {
-    game_camera_valid = std::isfinite(location[0]) &&
-                        std::isfinite(location[1]) &&
-                        std::isfinite(location[2]);
-    if (game_camera_valid) {
-      game_camera_location = {location[0], location[1], location[2]};
-    }
   }
 
   try {
@@ -1108,192 +1326,89 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
           context->view_sequence.load(std::memory_order_acquire);
       const bool active = (sequence & 1U) == 0 &&
                           context->view_active.load(std::memory_order_relaxed);
+      if (active && !leased) {
+        // The game camera shows through for this call. Counted separately from
+        // the torn read below: this one is the lease, not the snapshot.
+        context->diag.detour_no_publish.fetch_add(1,
+                                                 std::memory_order_relaxed);
+      }
       if (leased && active) {
         context->view_output_frames.fetch_add(1, std::memory_order_relaxed);
-        std::array<double, 3> current_car_location{};
-        std::array<double, 3> current_game_camera_location{};
-        std::array<double, 3> current_location{};
-        std::array<double, 3> current_rotation{};
-        std::array<double, 3> previous_location{};
-        std::array<double, 3> previous_rotation{};
-        float current_lens{};
-        float previous_lens{};
-        double current_distance{};
-        double previous_distance{};
-        bool current_fov_enabled{};
-        bool current_game_camera_valid{};
-        bool previous_fov_enabled{};
-        bool has_previous{};
-        std::int64_t previous_time_ns{};
-        std::int64_t current_time_ns{};
-        double update_hz{};
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-          current_car_location[axis] =
-              context->view_car_location[axis].load(
-                  std::memory_order_relaxed);
-          current_game_camera_location[axis] =
-              context->view_game_camera_location[axis].load(
-                  std::memory_order_relaxed);
-          current_location[axis] =
-              context->view_location[axis].load(std::memory_order_relaxed);
-          current_rotation[axis] =
-              context->view_rotation[axis].load(std::memory_order_relaxed);
-          previous_location[axis] =
-              context->view_previous_location[axis].load(
-                  std::memory_order_relaxed);
-          previous_rotation[axis] =
-              context->view_previous_rotation[axis].load(
-                  std::memory_order_relaxed);
-        }
-        current_lens = context->view_fov.load(std::memory_order_relaxed);
-        previous_lens =
-            context->view_previous_fov.load(std::memory_order_relaxed);
-        current_distance =
-            context->view_distance_cm.load(std::memory_order_relaxed);
-        previous_distance =
-            context->view_previous_distance_cm.load(std::memory_order_relaxed);
-        current_fov_enabled =
-            context->view_fov_enabled.load(std::memory_order_relaxed);
-        previous_fov_enabled =
-            context->view_previous_fov_enabled.load(std::memory_order_relaxed);
-        has_previous =
-            context->view_has_previous.load(std::memory_order_relaxed);
-        previous_time_ns =
-            context->view_previous_time_ns.load(std::memory_order_relaxed);
-        current_time_ns =
-            context->view_current_time_ns.load(std::memory_order_relaxed);
-        update_hz = context->view_update_hz.load(std::memory_order_relaxed);
-        current_game_camera_valid =
-            context->view_game_camera_valid.load(std::memory_order_relaxed);
-        const std::uint64_t after =
-            context->view_sequence.load(std::memory_order_acquire);
-        const bool finite =
-            std::isfinite(current_car_location[0]) &&
-            std::isfinite(current_car_location[1]) &&
-            std::isfinite(current_car_location[2]) &&
-            std::isfinite(current_location[0]) &&
-            std::isfinite(current_location[1]) &&
-            std::isfinite(current_location[2]) &&
-            std::isfinite(current_rotation[0]) &&
-            std::isfinite(current_rotation[1]) &&
-            std::isfinite(current_rotation[2]);
-        if (sequence == after && finite) {
-          const std::int64_t render_now_ns = NowNanoseconds();
-          std::array<double, 3> render_offset = current_location;
-          std::array<double, 3> render_rotation = current_rotation;
-          float render_lens = current_lens;
-          double render_distance = current_distance;
-
-          // Present the previous/current pair one Game tick behind the writer.
-          // At a 30 Hz city tick this gives the renderer a fresh blend for the
-          // frames between two model updates; at 60 Hz it adds at most one
-          // frame of latency and avoids stepping.
-          const bool previous_finite =
-              has_previous && previous_time_ns > 0 &&
-              current_time_ns > previous_time_ns &&
-              std::isfinite(previous_location[0]) &&
-              std::isfinite(previous_location[1]) &&
-              std::isfinite(previous_location[2]) &&
-              std::isfinite(previous_rotation[0]) &&
-              std::isfinite(previous_rotation[1]) &&
-              std::isfinite(previous_rotation[2]);
-          if (previous_finite) {
-            context->view_interpolated_frames.fetch_add(
-                1, std::memory_order_relaxed);
-            // The historical pair is presented one tick behind. At 60 Hz
-            // that is one frame, but below 60 Hz it lets the car body move a
-            // full camera tick ahead of the camera. Use the newest snapshot
-            // directly when the tick is already slow.
-            const double interpolation_delay =
-                update_hz > 0.0 && update_hz < 57.0
-                    ? 0.0
-                    : kMaximumViewInterpolationDelaySeconds;
-            const double alpha = nfs2015_chase::ViewInterpolationAlpha(
-                previous_time_ns, current_time_ns, render_now_ns,
-                interpolation_delay);
-            nfs2015_chase::ViewPose from;
-            from.position = {previous_location[0], previous_location[1],
-                             previous_location[2]};
-            from.pitch_degrees = previous_rotation[0];
-            from.yaw_degrees = previous_rotation[1];
-            from.roll_degrees = previous_rotation[2];
-            from.fov_degrees = previous_lens;
-            nfs2015_chase::ViewPose to;
-            to.position = {current_location[0], current_location[1],
-                           current_location[2]};
-            to.pitch_degrees = current_rotation[0];
-            to.yaw_degrees = current_rotation[1];
-            to.roll_degrees = current_rotation[2];
-            to.fov_degrees = current_lens;
-            const auto blended =
-                nfs2015_chase::BlendViewPose(from, to, alpha);
-            render_offset = {blended.position.x, blended.position.y,
-                             blended.position.z};
-            if (std::isfinite(previous_distance) &&
-                std::isfinite(current_distance) && current_distance > 0.0) {
-              render_distance = nfs2015_chase::Lerp(
-                  previous_distance, current_distance, alpha);
-            }
-            render_rotation = {blended.pitch_degrees, blended.yaw_degrees,
-                               blended.roll_degrees};
-            const bool blend_fov =
-                previous_fov_enabled && current_fov_enabled &&
-                std::isfinite(previous_lens) && previous_lens > 1.0F &&
-                previous_lens < 179.0F && std::isfinite(current_lens) &&
-                current_lens > 1.0F && current_lens < 179.0F;
-            if (blend_fov) {
-              render_lens = static_cast<float>(blended.fov_degrees);
-            }
-          }
-
-          // The model is published one engine tick after the world updated,
-          // so the detour's original game camera pose is one frame ahead of
-          // the published base. Move the eye by that camera delta so the car
-          // and the camera are in the same frame. This is measured motion,
-          // not a velocity extrapolation.
-          double sync_delta[3]{};
-          bool sync = game_camera_valid && current_game_camera_valid;
-          if (sync) {
-            double sync_distance2 = 0.0;
+        const std::int64_t render_now_ns = NowNanoseconds();
+        double present_location[3]{};
+        double present_rotation[3]{};
+        float present_lens = 0.0F;
+        bool present_fov_enabled = false;
+        if (AdvancePresenter(*context, render_now_ns, present_location,
+                             present_rotation, &present_lens,
+                             &present_fov_enabled)) {
+          // T3.4e: how fast the eye moves *relative to the car*, which is the
+          // only thing that can look like twitching. The absolute eye speed is
+          // dominated by the car's own travel, so it can never separate a
+          // smooth camera from a juddering one.
+          {
+            static thread_local bool relative_valid = false;
+            static thread_local std::int64_t relative_time_ns = 0;
+            static thread_local double relative_offset[3]{};
+            static thread_local double relative_yaw_degrees = 0.0;
+            double relative[3]{};
+            const double anchor[3] = {
+                context->presenter_anchor[0].load(std::memory_order_relaxed),
+                context->presenter_anchor[1].load(std::memory_order_relaxed),
+                context->presenter_anchor[2].load(std::memory_order_relaxed)};
             for (std::size_t axis = 0; axis < 3; ++axis) {
-              sync_delta[axis] = game_camera_location[axis] -
-                                 current_game_camera_location[axis];
-              if (!std::isfinite(sync_delta[axis])) {
-                sync = false;
-                break;
+              relative[axis] = present_location[axis] - anchor[axis];
+            }
+            const double yaw_degrees = present_rotation[1];
+            if (relative_valid && render_now_ns > relative_time_ns) {
+              const double call_seconds =
+                  static_cast<double>(render_now_ns - relative_time_ns) * 1e-9;
+              if (call_seconds > 2e-4 && call_seconds < 0.2) {
+                double step_squared = 0.0;
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                  const double step = relative[axis] - relative_offset[axis];
+                  step_squared += step * step;
+                }
+                const double speed_cmps = std::sqrt(step_squared) / call_seconds;
+                const double yaw_step = nfs2015_chase::WrapPi(
+                    (yaw_degrees - relative_yaw_degrees) *
+                    nfs2015_chase::kRadiansPerDegree);
+                const double turn_dps =
+                    std::fabs(yaw_step * nfs2015_chase::kDegreesPerRadian) /
+                    call_seconds;
+                RaisePeak(context->diag.render_speed_peak_mmps,
+                          static_cast<std::uint64_t>(speed_cmps * 10.0));
+                LowerFloor(context->diag.render_speed_floor_mmps,
+                           static_cast<std::uint64_t>(speed_cmps * 10.0));
+                RaisePeak(context->diag.render_turn_peak_cdps,
+                          static_cast<std::uint64_t>(turn_dps * 100.0));
+                LowerFloor(context->diag.render_turn_floor_cdps,
+                           static_cast<std::uint64_t>(turn_dps * 100.0));
               }
-              sync_distance2 += sync_delta[axis] * sync_delta[axis];
             }
-            const double limit = kMaximumGameCameraSyncCm;
-            if (sync && sync_distance2 > limit * limit) {
-              sync = false;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+              relative_offset[axis] = relative[axis];
             }
-          }
-
-          if (std::isfinite(render_distance) && render_distance > 0.0) {
-            const nfs2015_chase::Vec3 direction =
-                nfs2015_chase::Normalize({render_offset[0], render_offset[1],
-                                          render_offset[2]});
-            const nfs2015_chase::Vec3 sized =
-                nfs2015_chase::Mul(direction, render_distance);
-            render_offset = {sized.x, sized.y, sized.z};
+            relative_yaw_degrees = yaw_degrees;
+            relative_time_ns = render_now_ns;
+            relative_valid = true;
           }
           for (std::size_t axis = 0; axis < 3; ++axis) {
-            location[axis] = current_car_location[axis] + render_offset[axis] +
-                             (sync ? sync_delta[axis] : 0.0);
-            rotation[axis] = render_rotation[axis];
+            location[axis] = static_cast<float>(present_location[axis]);
+            rotation[axis] = static_cast<float>(present_rotation[axis]);
           }
+
           const std::uintptr_t pov =
               context->camera_pov_manager.load(std::memory_order_acquire) ==
                       manager
                   ? context->camera_pov.load(std::memory_order_acquire)
                   : 0;
-          if (pov != 0 && current_fov_enabled) {
-            if (std::isfinite(render_lens) && render_lens > 1.0F &&
-                render_lens < 179.0F) {
+          if (pov != 0 && present_fov_enabled) {
+            if (std::isfinite(present_lens) && present_lens > 1.0F &&
+                present_lens < 179.0F) {
               std::uintptr_t address{};
               if (AddAddress(pov, kCameraPovFovOffset, address)) {
-                *reinterpret_cast<float *>(address) = render_lens;
+                *reinterpret_cast<float *>(address) = present_lens;
               }
             }
           } else if (context->fov_restore.exchange(
@@ -1348,6 +1463,8 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
                  AnomalyGenerationHandleV1 &handle) noexcept {
   sequence = 0;
   handle = {};
+  context.camera_yaw_valid = false;
+  context.camera_yaw_radians = 0.0;
   if (!PlayerReady(context.player)) {
     return false;
   }
@@ -1399,6 +1516,17 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
       }
       extent_z = esp.bounds_extent[2];
     }
+    // T3.1: the game camera's yaw, sampled by the host on the same Game tick
+    // as the car position and delivered as a cached copy. The detour's
+    // observation is the same rotation read on the render thread at ~1400 Hz,
+    // which the 50 Hz Game tick then samples, so it aliases. Independent of
+    // the bounds sanity check above: the camera tail is usable even when the
+    // bounds jump.
+    if (complete && std::isfinite(esp.camera_rotation[1])) {
+      context.camera_yaw_radians =
+          esp.camera_rotation[1] * kDegreesToRadians;
+      context.camera_yaw_valid = true;
+    }
   }
   const double origin_offset_cm =
       context.origin_offset_cm.load(std::memory_order_acquire);
@@ -1410,16 +1538,20 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
          std::isfinite(base_cm[1]) && std::isfinite(base_cm[2]);
 }
 
-bool QueryVehicle(Context &context, bool &valid, bool &speed_valid,
-                  double &speed_kmh, AnomalyGenerationHandleV1 &handle,
-                  std::uint64_t &entity_id,
-                  char class_name[ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES +
-                                  1]) noexcept {
+// Every call re-runs `BP_GetCurrentDriveVehicle` and `GetForwardSpeedKmH`
+// through ProcessEvent and walks the object's class chain by name, because the
+// host caches none of it. That is a few hundred microseconds of Game tick per
+// call, spent mostly to learn a speed that changes slowly.
+constexpr double kVehicleQueryIntervalSeconds = 0.05;
+
+bool PollVehicle(Context &context, bool &valid, bool &speed_valid,
+                 double &speed_kmh, AnomalyGenerationHandleV1 &handle,
+                 char class_name[ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES +
+                                 1]) noexcept {
   valid = false;
   speed_valid = false;
   speed_kmh = 0.0;
   handle = {};
-  entity_id = 0;
   class_name[0] = '\0';
   if (!VehicleReady(context.vehicle)) {
     return false;
@@ -1433,7 +1565,6 @@ bool QueryVehicle(Context &context, bool &valid, bool &speed_valid,
   }
   valid = true;
   handle = vehicle.vehicle;
-  entity_id = vehicle.vehicle_entity_id;
   std::memcpy(class_name, vehicle.vehicle_class_name,
               sizeof(vehicle.vehicle_class_name));
   class_name[sizeof(vehicle.vehicle_class_name) - 1] = '\0';
@@ -1441,416 +1572,60 @@ bool QueryVehicle(Context &context, bool &valid, bool &speed_valid,
       std::isfinite(vehicle.speed_kmh)) {
     speed_valid = true;
     speed_kmh = std::fabs(vehicle.speed_kmh);
+    // `GetForwardSpeedKmH` is the forward component of velocity in the car's
+    // own frame, and it is signed: the sign separates forward from reverse
+    // without any state, and the magnitude is the numerator of an exact slip
+    // angle that needs no differentiation.
+    context.vehicle_speed_signed_kmh = static_cast<double>(vehicle.speed_kmh);
+    context.diag.slip_signed_speed_kmh.store(
+        context.vehicle_speed_signed_kmh, std::memory_order_relaxed);
   }
   return true;
 }
 
-bool FindVehicleEntity(Context &context, std::uint64_t entity_id,
-                       AnomalyNteEntitySnapshotV1 &snapshot,
-                       std::uint32_t &index) noexcept;
-
-// The player Pawn's root component is the vehicle actor root, not the
-// simulated body mesh. VehicleMesh is the rendered body; its bounds center is
-// the transform the car is actually drawn at. Reading it prevents a root-vs-
-// mesh offset from turning into camera shake.
-enum class CameraBaseSource : std::uint32_t {
-  pawn_root = 0,
-  vehicle_root = 1,
-  vehicle_mesh = 2,
-};
-
-bool ReadComponentTransform(const auto *service,
-                            const AnomalyGenerationHandleV1 &handle,
-                            const std::string_view property,
-                            double center_cm[3],
-                            double extent_cm[3]) noexcept {
-  AnomalyNteEntityComponentBoundsV1 bounds{sizeof(bounds)};
-  if (service->component_bounds(service->user, handle, StringView(property),
-                                &bounds)
-              .code != ANOMALY_STATUS_V1_OK ||
-      !SnapshotValid(bounds.flags) ||
-      bounds.entity.id != handle.id ||
-      bounds.entity.generation != handle.generation ||
-      !std::isfinite(bounds.bounds_center[0]) ||
-      !std::isfinite(bounds.bounds_center[1]) ||
-      !std::isfinite(bounds.bounds_center[2]) ||
-      !std::isfinite(bounds.bounds_extent[2]) ||
-      bounds.bounds_extent[2] <= 0.5 ||
-      bounds.bounds_extent[2] >= 1000.0) {
-    return false;
+// Applies the poll interval; the Game tick reads the cache instead of the host.
+void RefreshVehicleSample(Context &context) noexcept {
+  context.vehicle_cached_fresh = false;
+  if (!VehicleReady(context.vehicle)) {
+    context.vehicle_cached_valid = false;
+    context.vehicle_cached_speed_valid = false;
+    context.vehicle_cached_speed_kmh = 0.0;
+    context.vehicle_cached_handle = {};
+    context.vehicle_speed_signed_kmh = 0.0;
+    return;
   }
-  for (std::size_t axis = 0; axis < 3; ++axis) {
-    center_cm[axis] = bounds.bounds_center[axis];
+  if (context.elapsed < context.next_vehicle_query_elapsed) {
+    return;
   }
-  extent_cm[0] = bounds.bounds_extent[0];
-  extent_cm[1] = bounds.bounds_extent[1];
-  extent_cm[2] = bounds.bounds_extent[2];
-  return true;
-}
-
-// The reflected property names are game-specific. NFS 2015 exposes the
-// rendered body as VehicleMesh; Mesh/SkeletalMesh cover the stock UE names.
-[[nodiscard]] bool ReadEntityMesh(
-    Context &context, const AnomalyGenerationHandleV1 &handle,
-    double center_cm[3], double extent_cm[3],
-    bool include_generic_names) noexcept {
-  if (handle.id == 0 || handle.generation == 0) {
-    return false;
+  context.next_vehicle_query_elapsed =
+      context.elapsed + kVehicleQueryIntervalSeconds;
+  context.diag.vehicle_polls.fetch_add(1, std::memory_order_relaxed);
+  bool valid = false;
+  bool speed_valid = false;
+  double speed_kmh = 0.0;
+  AnomalyGenerationHandleV1 handle{};
+  char class_name[ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES + 1]{};
+  static_cast<void>(PollVehicle(context, valid, speed_valid, speed_kmh, handle,
+                               class_name));
+  context.vehicle_cached_valid = valid;
+  context.vehicle_cached_speed_valid = speed_valid;
+  if (!speed_valid) {
+    context.vehicle_speed_signed_kmh = 0.0;
   }
-  static constexpr std::string_view kMeshProperties[] = {
-      "VehicleMesh", "Mesh", "SkeletalMesh"};
-  for (const std::string_view property : kMeshProperties) {
-    if (!include_generic_names && property != "VehicleMesh") {
-      continue;
-    }
-    if (ComponentBoundsReady(context.entities) &&
-        ReadComponentTransform(context.entities, handle, property, center_cm,
-                               extent_cm)) {
-      return true;
-    }
-    if (ComponentBoundsReady(context.actors) &&
-        ReadComponentTransform(context.actors, handle, property, center_cm,
-                               extent_cm)) {
-      return true;
-    }
+  context.vehicle_cached_speed_kmh = speed_kmh;
+  context.vehicle_cached_handle = handle;
+  context.vehicle_cached_fresh = true;
+  if (!context.base_diagnostic_logged && valid) {
+    context.base_diagnostic_logged = true;
+    char detail[192]{};
+    std::snprintf(detail, sizeof(detail),
+                  "vehicle snapshot available: class=%s service_version=%u "
+                  "poll_interval=%.0f ms",
+                  class_name[0] != '\0' ? class_name : "-",
+                  context.vehicle->service_version,
+                  kVehicleQueryIntervalSeconds * 1000.0);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, detail);
   }
-  return false;
-}
-
-[[nodiscard]] bool ReadVehicleRoot(
-    Context &context, const AnomalyGenerationHandleV1 &handle,
-    double center_cm[3], double extent_cm[3]) noexcept {
-  if (handle.id == 0 || handle.generation == 0) {
-    return false;
-  }
-  if (ComponentBoundsReady(context.entities) &&
-      ReadComponentTransform(context.entities, handle, "RootComponent",
-                             center_cm, extent_cm)) {
-    return true;
-  }
-  return ComponentBoundsReady(context.actors) &&
-         ReadComponentTransform(context.actors, handle, "RootComponent",
-                                center_cm, extent_cm);
-}
-
-[[nodiscard]] bool ReadVehicleBase(
-    Context &context, const AnomalyGenerationHandleV1 &handle,
-    double center_cm[3], double extent_cm[3],
-    CameraBaseSource &source) noexcept {
-  if (ReadEntityMesh(context, handle, center_cm, extent_cm, true)) {
-    source = CameraBaseSource::vehicle_mesh;
-    return true;
-  }
-  if (ReadVehicleRoot(context, handle, center_cm, extent_cm)) {
-    source = CameraBaseSource::vehicle_root;
-    return true;
-  }
-  return false;
-}
-
-[[nodiscard]] bool CopyEntityBounds(
-    const AnomalyNteEntitySnapshotV1 &snapshot, double center_cm[3],
-    double extent_cm[3]) noexcept {
-  if (!std::isfinite(snapshot.bounds_center[0]) ||
-      !std::isfinite(snapshot.bounds_center[1]) ||
-      !std::isfinite(snapshot.bounds_center[2]) ||
-      !std::isfinite(snapshot.bounds_extent[0]) ||
-      !std::isfinite(snapshot.bounds_extent[1]) ||
-      !std::isfinite(snapshot.bounds_extent[2]) ||
-      snapshot.bounds_extent[2] <= 0.5 ||
-      snapshot.bounds_extent[2] >= 1000.0) {
-    return false;
-  }
-  for (std::size_t axis = 0; axis < 3; ++axis) {
-    center_cm[axis] = snapshot.bounds_center[axis];
-    extent_cm[axis] = snapshot.bounds_extent[axis];
-  }
-  return true;
-}
-
-// The vehicle service's identity tail is optional. On runtimes that do not
-// fill vehicle_entity_id, the local player entity is still in the cache; while
-// driving its rendered body is the vehicle mesh.
-[[nodiscard]] bool FindLocalPlayerEntity(
-    Context &context, AnomalyNteEntitySnapshotV1 &snapshot) noexcept {
-  const auto find = [&](const auto *service) -> bool {
-    if (service == nullptr || service->page == nullptr) {
-      return false;
-    }
-    constexpr std::uint32_t kPageCapacity = 8;
-    std::array<AnomalyNteEntitySnapshotV1, kPageCapacity> page{};
-    for (auto &entry : page) {
-      entry = AnomalyNteEntitySnapshotV1{sizeof(entry)};
-    }
-    AnomalyNteEntityPageRequestV1 request{sizeof(request)};
-    request.capacity = kPageCapacity;
-    request.required_flags = ANOMALY_NTE_ENTITY_V1_LOCAL_PLAYER;
-    AnomalyNteEntityPageResultV1 result{sizeof(result)};
-    if (service->page(service->user, &request, page.data(), &result).code !=
-            ANOMALY_STATUS_V1_OK ||
-        result.generation == 0 || result.returned == 0 ||
-        result.returned > kPageCapacity) {
-      return false;
-    }
-    snapshot = page[0];
-    return snapshot.handle.id != 0 && snapshot.handle.generation != 0;
-  };
-  return find(context.entities) || find(context.actors);
-}
-
-[[nodiscard]] bool PlausibleVehicleBounds(
-    const double center[3], const double extent[3]) noexcept {
-  if (!std::isfinite(center[0]) || !std::isfinite(center[1]) ||
-      !std::isfinite(center[2]) || !std::isfinite(extent[0]) ||
-      !std::isfinite(extent[1]) || !std::isfinite(extent[2])) {
-    return false;
-  }
-  // Bounds are UE centimetres. A car is roughly 4 m long, 2 m wide and 1.5 m
-  // tall, i.e. half extents near 200x100x75 cm. Characters and props are
-  // either too narrow or too small.
-  const double max_xy = (std::max)(extent[0], extent[1]);
-  const double min_xy = (std::min)(extent[0], extent[1]);
-  return max_xy >= 100.0 && min_xy >= 30.0 && extent[2] >= 20.0 &&
-         extent[2] <= 500.0;
-}
-
-// Last high-level fallback when neither the vehicle service nor the local
-// player entity can name the car: scan the entity/actor cache for the closest
-// vehicle-shaped bounds. This only runs when the cached handles fail, at most
-// every two seconds, and is capped so a large city cache cannot stall a tick.
-[[nodiscard]] bool ScanVehicleEntity(
-    Context &context, const double player_position_cm[3],
-    AnomalyNteEntitySnapshotV1 &best) noexcept {
-  bool found = false;
-  double best_distance_sq = (std::numeric_limits<double>::max)();
-  const auto scan = [&](const auto *service) {
-    if (service == nullptr || service->page == nullptr) {
-      return;
-    }
-    constexpr std::uint32_t kPageCapacity = 128;
-    constexpr std::uint32_t kMaximumScanEntries = 4096;
-    std::array<AnomalyNteEntitySnapshotV1, kPageCapacity> page{};
-    std::uint64_t generation = 0;
-    std::uint32_t offset = 0;
-    std::uint32_t total = 0;
-    std::uint32_t scanned = 0;
-    while (scanned < kMaximumScanEntries) {
-      AnomalyNteEntityPageRequestV1 request{sizeof(request)};
-      request.generation = generation;
-      request.offset = offset;
-      request.capacity = kPageCapacity;
-      for (auto &entry : page) {
-        entry = AnomalyNteEntitySnapshotV1{sizeof(entry)};
-      }
-      AnomalyNteEntityPageResultV1 result{sizeof(result)};
-      if (service->page(service->user, &request, page.data(), &result).code !=
-              ANOMALY_STATUS_V1_OK ||
-          result.generation == 0 || result.returned > kPageCapacity) {
-        return;
-      }
-      generation = result.generation;
-      total = result.total_matches;
-      for (std::uint32_t i = 0; i < result.returned; ++i) {
-        const AnomalyNteEntitySnapshotV1 &candidate = page[i];
-        if (candidate.entity_id == 0 ||
-            (candidate.flags & ANOMALY_NTE_ENTITY_V1_LOCAL_PLAYER) != 0 ||
-            !PlausibleVehicleBounds(candidate.bounds_center,
-                                    candidate.bounds_extent)) {
-          continue;
-        }
-        const double dx =
-            candidate.bounds_center[0] - player_position_cm[0];
-        const double dy =
-            candidate.bounds_center[1] - player_position_cm[1];
-        const double dz =
-            candidate.bounds_center[2] - player_position_cm[2];
-        const double distance_sq = dx * dx + dy * dy + dz * dz;
-        if (distance_sq < best_distance_sq) {
-          best_distance_sq = distance_sq;
-          best = candidate;
-          found = true;
-        }
-      }
-      scanned += result.returned;
-      if (result.returned == 0 || result.next_offset <= offset ||
-          result.next_offset >= total) {
-        return;
-      }
-      offset = result.next_offset;
-    }
-  };
-  scan(context.entities);
-  scan(context.actors);
-  constexpr double kMaximumDistanceCm = 1500.0;
-  return found &&
-         best_distance_sq <= kMaximumDistanceCm * kMaximumDistanceCm;
-}
-
-// The player service's bounds come from the Pawn root component, while the
-// rendered car body is the vehicle actor's root/VehicleMesh. Prefer the
-// vehicle actor transform so a Pawn that stays a character while driving (or
-// a root-vs-body offset) cannot move the car relative to the camera.
-CameraBaseSource QueryVehicleBase(
-    Context &context, const AnomalyGenerationHandleV1 &vehicle_handle,
-    const AnomalyGenerationHandleV1 &player_handle,
-    const std::uint64_t vehicle_entity_id,
-    const double player_position_cm[3], const bool allow_fallback,
-    double center_cm[3], double extent_cm[3]) noexcept {
-  AnomalyNteEntitySnapshotV1 vehicle_entity{};
-  std::uint32_t vehicle_entity_index = 0;
-  if (FindVehicleEntity(context, vehicle_entity_id, vehicle_entity,
-                        vehicle_entity_index)) {
-    CameraBaseSource source = CameraBaseSource::pawn_root;
-    if (ReadVehicleBase(context, vehicle_entity.handle, center_cm, extent_cm,
-                        source)) {
-      return source;
-    }
-    if (CopyEntityBounds(vehicle_entity, center_cm, extent_cm)) {
-      return CameraBaseSource::vehicle_root;
-    }
-  }
-
-  if (!allow_fallback) {
-    return CameraBaseSource::pawn_root;
-  }
-
-  AnomalyNteEntitySnapshotV1 player_entity{};
-  // A generic Mesh on the player entity could be the character, so only the
-  // vehicle-specific property is accepted here.
-  if (FindLocalPlayerEntity(context, player_entity) &&
-      ReadEntityMesh(context, player_entity.handle, center_cm, extent_cm,
-                     false)) {
-    return CameraBaseSource::vehicle_mesh;
-  }
-
-  if (context.scanned_vehicle_entity.id != 0) {
-    CameraBaseSource source = CameraBaseSource::pawn_root;
-    if (ReadVehicleBase(context, context.scanned_vehicle_entity, center_cm,
-                        extent_cm, source)) {
-      return source;
-    }
-    context.scanned_vehicle_entity = {};
-  }
-
-  if (context.elapsed >= context.next_vehicle_scan_elapsed) {
-    context.next_vehicle_scan_elapsed = context.elapsed + 2.0;
-    AnomalyNteEntitySnapshotV1 scanned{};
-    if (ScanVehicleEntity(context, player_position_cm, scanned)) {
-      CameraBaseSource source = CameraBaseSource::pawn_root;
-      if (ReadVehicleBase(context, scanned.handle, center_cm, extent_cm,
-                          source)) {
-        context.scanned_vehicle_entity = scanned.handle;
-        return source;
-      }
-      if (CopyEntityBounds(scanned, center_cm, extent_cm)) {
-        context.scanned_vehicle_entity = scanned.handle;
-        return CameraBaseSource::vehicle_root;
-      }
-    }
-  }
-
-  struct Candidate {
-    AnomalyGenerationHandleV1 handle;
-    CameraBaseSource source;
-  };
-  const Candidate candidates[] = {
-      {vehicle_handle, CameraBaseSource::vehicle_mesh},
-      {player_handle, CameraBaseSource::vehicle_mesh},
-      {vehicle_handle, CameraBaseSource::vehicle_root},
-      {player_handle, CameraBaseSource::vehicle_root},
-  };
-  for (const Candidate &candidate : candidates) {
-    if (candidate.handle.id == 0 || candidate.handle.generation == 0) {
-      continue;
-    }
-    if (!allow_fallback && candidate.handle.id == player_handle.id &&
-        candidate.handle.generation == player_handle.generation) {
-      continue;
-    }
-    if (candidate.source == CameraBaseSource::vehicle_mesh) {
-      const bool generic_names =
-          candidate.handle.id != player_handle.id ||
-          candidate.handle.generation != player_handle.generation;
-      if (ReadEntityMesh(context, candidate.handle, center_cm, extent_cm,
-                         generic_names)) {
-        return CameraBaseSource::vehicle_mesh;
-      }
-    } else if (ReadVehicleRoot(context, candidate.handle, center_cm,
-                              extent_cm)) {
-      return CameraBaseSource::vehicle_root;
-    }
-  }
-  return CameraBaseSource::pawn_root;
-}
-
-// The vehicle service exposes an object handle plus the entity-cache id. Find
-// the matching entity snapshot so component_bounds can read the live vehicle
-// transform; the object handle alone is not guaranteed to be in that cache.
-bool FindVehicleEntity(Context &context, const std::uint64_t entity_id,
-                       AnomalyNteEntitySnapshotV1 &snapshot,
-                       std::uint32_t &index) noexcept {
-  if (!ComponentBoundsReady(context.entities) || entity_id == 0 ||
-      context.entities->frame == nullptr ||
-      context.entities->snapshot_at == nullptr) {
-    return false;
-  }
-  AnomalyNteEntityFrameV1 frame{sizeof(frame)};
-  if (context.entities->frame(context.entities->user, &frame).code !=
-          ANOMALY_STATUS_V1_OK ||
-      frame.generation == 0) {
-    return false;
-  }
-  if (context.vehicle_entity_frame_generation == frame.generation &&
-      context.vehicle_entity_index < frame.entity_count &&
-      context.vehicle_entity.id != 0) {
-    AnomalyNteEntitySnapshotV1 cached{sizeof(cached)};
-    if (context.entities
-                ->snapshot_at(context.entities->user, frame.generation,
-                              context.vehicle_entity_index, &cached)
-                .code == ANOMALY_STATUS_V1_OK &&
-        cached.entity_id == entity_id &&
-        cached.handle.id != 0 && cached.handle.generation != 0) {
-      snapshot = cached;
-      index = context.vehicle_entity_index;
-      context.vehicle_entity = cached.handle;
-      return true;
-    }
-  }
-
-  constexpr std::uint32_t kPageCapacity = 128;
-  std::array<AnomalyNteEntitySnapshotV1, kPageCapacity> page{};
-  std::uint32_t offset = 0;
-  while (offset < frame.entity_count) {
-    AnomalyNteEntityPageRequestV1 request{sizeof(request)};
-    request.generation = frame.generation;
-    request.offset = offset;
-    request.capacity = kPageCapacity;
-    for (auto &entry : page) {
-      entry = AnomalyNteEntitySnapshotV1{sizeof(entry)};
-    }
-    AnomalyNteEntityPageResultV1 result{sizeof(result)};
-    if (context.entities
-                ->page(context.entities->user, &request, page.data(), &result)
-                .code != ANOMALY_STATUS_V1_OK ||
-        result.generation != frame.generation || result.returned == 0 ||
-        result.returned > kPageCapacity || result.next_offset <= offset) {
-      break;
-    }
-    for (std::uint32_t i = 0; i < result.returned; ++i) {
-      if (page[i].entity_id == entity_id && page[i].handle.id != 0 &&
-          page[i].handle.generation != 0) {
-        snapshot = page[i];
-        index = offset + i;
-        context.vehicle_entity_id = entity_id;
-        context.vehicle_entity_frame_generation = frame.generation;
-        context.vehicle_entity_index = index;
-        context.vehicle_entity = page[i].handle;
-        return true;
-      }
-    }
-    offset = result.next_offset;
-  }
-  return false;
 }
 
 double WrappedAngle(const double angle) noexcept {
@@ -1881,7 +1656,8 @@ bool WorldChanged(Context &context) noexcept {
 }
 
 void ResetMotion(Context &context) noexcept {
-  context.view_snap = true;
+  NoteViewSnap(context, kSnapReasonMotion);
+  context.yaw_source = kYawSourceNone;
   context.have_last_position = false;
   context.have_last_yaw = false;
   context.last_vehicle_valid_elapsed = -1.0;
@@ -1891,9 +1667,6 @@ void ResetMotion(Context &context) noexcept {
   context.brake_input = 0.0;
   context.brake_hold_until = 0.0;
   context.vehicle_acceleration_mps2 = 0.0;
-  context.smoothed_view_distance_cm = 0.0;
-  context.raw_view_distance_cm = 0.0;
-  context.have_view_distance = false;
   context.last_player_sequence = 0;
   context.last_player_time = context.elapsed;
   for (std::size_t axis = 0; axis < 3; ++axis) {
@@ -1901,18 +1674,31 @@ void ResetMotion(Context &context) noexcept {
     context.acceleration_cmps2[axis] = 0.0;
   }
   context.yaw_rate = 0.0;
-  context.chase_initialized = false;
+  RequestPresenterReset(context);
 }
 
 void UpdateBrakeInput(Context &context, const bool vehicle_valid,
-                      const bool speed_valid, const double speed_kmh,
-                      const double dt) noexcept {
+                      const bool speed_valid, const bool speed_fresh,
+                      const double speed_kmh, const double dt) noexcept {
   if (!vehicle_valid || !speed_valid) {
     context.brake_input = nfs2015_chase::Damp(
         context.brake_input, 0.0, kBrakingInputSmoothing, dt);
     context.vehicle_acceleration_mps2 = nfs2015_chase::Damp(
         context.vehicle_acceleration_mps2, 0.0,
         kBrakingDecelerationSmoothing, dt);
+    return;
+  }
+  if (!speed_fresh) {
+    // The sample is held between polls, so there is no new speed delta to
+    // differentiate. Differentiating it at tick rate would read as zero
+    // acceleration on the held ticks and a spike on the sampled one, i.e. a
+    // sawtooth in the braking pitch.
+    context.brake_input = nfs2015_chase::Damp(
+        context.brake_input,
+        context.elapsed <= context.brake_hold_until
+            ? context.brake_last_target
+            : 0.0,
+        kBrakingInputSmoothing, dt);
     return;
   }
   const double speed_mps = speed_kmh / 3.6;
@@ -1948,13 +1734,22 @@ void UpdateBrakeInput(Context &context, const bool vehicle_valid,
   }
   const double gated =
       context.elapsed <= context.brake_hold_until ? target : 0.0;
+  context.brake_last_target = gated;
   context.brake_input = nfs2015_chase::Damp(
       context.brake_input, gated, kBrakingInputSmoothing, dt);
 }
 
 void UpdateMotion(Context &context, const double origin_cm[3],
-                  const std::uint64_t sequence, const double dt) noexcept {
+                  const std::uint64_t sequence) noexcept {
   if (!context.have_last_position || sequence != context.last_player_sequence) {
+    // Q5: does the player sequence advance once per tick? A jump means the
+    // position derivative below is divided by the wrong elapsed time.
+    if (context.last_player_sequence != 0 &&
+        sequence != context.last_player_sequence &&
+        sequence != context.last_player_sequence + 1U) {
+      context.diag.player_sequence_jumps.fetch_add(1,
+                                                  std::memory_order_relaxed);
+    }
     if (context.have_last_position && sequence != context.last_player_sequence) {
       const double elapsed = context.elapsed - context.last_player_time;
       if (elapsed > 1e-4) {
@@ -1982,7 +1777,7 @@ void UpdateMotion(Context &context, const double origin_cm[3],
                 kAccelerationSmoothing, elapsed);
           }
         } else {
-          context.view_snap = true;
+          NoteViewSnap(context, kSnapReasonTeleport);
           for (std::size_t axis = 0; axis < 3; ++axis) {
             context.velocity_cmps[axis] = 0.0;
             context.acceleration_cmps2[axis] = 0.0;
@@ -2011,7 +1806,6 @@ void UpdateMotion(Context &context, const double origin_cm[3],
       value *= scale;
     }
   }
-  (void)dt;
 }
 
 struct ObservedPose final {
@@ -2045,27 +1839,60 @@ struct ObservedPose final {
       return true;
     }
   }
+  context.diag.observed_read_failures.fetch_add(1,
+                                                std::memory_order_relaxed);
   return false;
 }
 
 double SelectCarYaw(Context &context, const double velocity_yaw,
+                    const double velocity_mps,
                     const bool have_velocity) noexcept {
-  ObservedPose observed{};
-  if (!ReadObservedPose(context, observed)) {
+  // Prefer the Game-tick camera yaw: same clock as the car position, so the
+  // reference cannot alias against a faster writer. The detour's render-thread
+  // observation is only a fallback for profiles without the ESP tail.
+  double camera_yaw = 0.0;
+  bool have_camera_yaw = false;
+  if (context.camera_yaw_valid) {
+    camera_yaw = context.camera_yaw_radians;
+    have_camera_yaw = true;
+  } else {
+    ObservedPose observed{};
+    if (ReadObservedPose(context, observed)) {
+      const double raw = observed.rotation[1];
+      if (std::isfinite(raw)) {
+        camera_yaw = raw * kDegreesToRadians;
+        have_camera_yaw = true;
+      }
+    }
+    context.diag.camera_yaw_esp_misses.fetch_add(1,
+                                                std::memory_order_relaxed);
+  }
+  if (!have_camera_yaw) {
+    NoteYawSource(context, kYawSourceNoObservation);
     return have_velocity ? velocity_yaw : 0.0;
   }
-  const double raw = observed.rotation[1];
-  if (!std::isfinite(raw)) {
-    return have_velocity ? velocity_yaw : 0.0;
-  }
-  const double camera_yaw = raw * kDegreesToRadians;
   if (!have_velocity) {
+    // Too slow for the travel direction to mean anything: the camera is the
+    // only continuous reference left.
+    NoteYawSource(context, kYawSourceObserved);
     return camera_yaw;
   }
-  const double difference = WrappedAngle(camera_yaw - velocity_yaw);
-  if (std::fabs(difference) > kMaximumCameraYawDifference) {
-    return velocity_yaw;
+  // Reversing travels along the nose plus 180 degrees, so the camera stays
+  // aligned with the nose instead of ending up in front of the car. The host's
+  // forward speed is signed, which makes this stateless: an earlier version
+  // derived it from the previous tick's own output and latched into reverse,
+  // parking the camera in front of the car for the rest of the session.
+  const bool reversing =
+      context.vehicle_speed_signed_kmh < -kReverseSpeedKmh;
+  const double travel_yaw =
+      reversing ? WrappedAngle(velocity_yaw + nfs2015_chase::kPi)
+                : velocity_yaw;
+  if (std::fabs(WrappedAngle(camera_yaw - travel_yaw)) >
+      kMaximumCameraYawDifference) {
+    NoteYawSource(context, kYawSourceVelocity);
+    return travel_yaw;
   }
+  NoteYawSource(context, kYawSourceObserved);
   return camera_yaw;
 }
 
@@ -2074,12 +1901,10 @@ void PublishInactive(Context &context) noexcept {
       context.view_sequence.load(std::memory_order_relaxed);
   context.view_sequence.store(sequence + 1U, std::memory_order_release);
   context.view_active.store(false, std::memory_order_release);
-  context.view_has_previous.store(false, std::memory_order_release);
-  context.view_game_camera_valid.store(false, std::memory_order_relaxed);
   context.view_sequence.store(sequence + 2U, std::memory_order_release);
   // Re-entering the camera must not blend from the view that was active
   // before the player stopped driving.
-  context.view_snap = true;
+  NoteViewSnap(context, kSnapReasonInactive);
   if (context.last_view_active && context.last_fov_enabled) {
     context.fov_restore.store(true, std::memory_order_release);
   }
@@ -2115,154 +1940,193 @@ void PublishInactive(Context &context) noexcept {
   return false;
 }
 
-void PublishView(Context &context, const nfs2015_chase::CameraState &view,
-                 const double origin_cm[3], const double base_cm[3],
-                 const double update_hz, const double camera_scale,
-                 const double aspect_ratio, const bool fov_enabled,
-                 const double dt) noexcept {
-  const double scale = nfs2015_chase::Clamp(camera_scale, kMinimumCameraScale,
-                                            kMaximumCameraScale);
-  const nfs2015_chase::Vec3 origin{origin_cm[0], origin_cm[1], origin_cm[2]};
-  const nfs2015_chase::Vec3 base{base_cm[0], base_cm[1], base_cm[2]};
-  // Scale the camera around the NFS model origin (bounds bottom + offset),
-  // not around the pawn root: the two differ by the vehicle bounds height.
-  const nfs2015_chase::Vec3 scaled_position = nfs2015_chase::Add(
-      origin, nfs2015_chase::Mul(
-                  nfs2015_chase::Sub(
-                      nfs2015_chase::Mul(view.position, 100.0), origin),
-                  scale));
-  // Publish the eye offset from the pawn root used by the renderer. ESP bounds
-  // are only a model-height reference and can jitter with bounds/LOD changes;
-  // they must not drive the camera-car distance.
-  const nfs2015_chase::Vec3 offset =
-      nfs2015_chase::Sub(scaled_position, base);
-  std::array<double, 3> next_location{offset.x, offset.y, offset.z};
-  const double raw_distance_cm = nfs2015_chase::Length(offset);
-  context.raw_view_distance_cm = raw_distance_cm;
-  const std::array<double, 3> next_rotation{view.pitch_degrees,
-                                            view.yaw_degrees,
-                                            view.roll_degrees};
-  const float next_fov =
-      fov_enabled
-          ? static_cast<float>(view.HorizontalFovDegrees(aspect_ratio))
-          : 0.0F;
-  const std::int64_t now_ns = NowNanoseconds();
+// ---- T2 presenter -----------------------------------------------------------
+//
+// The model used to be advanced on the Game tick and then blended on the render
+// thread. That cannot be made smooth: blending only interpolates between two
+// tick poses, so the camera's *velocity* still jumps at every tick boundary.
+// Measured against the car, the eye sat one tick of travel behind and caught up
+// in bursts (655 m/s against a 670 mm tick step).
+//
+// Now the Game tick only publishes samples and the render thread advances the
+// springs, so velocity is continuous by construction.
 
-  // The Game thread is the only writer. Read the old current offset/rotation
-  // before the odd sequence so it can become the interpolation start point.
-  const bool had_current =
-      context.view_active.load(std::memory_order_acquire);
-  std::array<double, 3> old_base_location{};
-  std::array<double, 3> old_location{};
-  std::array<double, 3> old_rotation{};
-  std::int64_t old_time_ns = 0;
-  float old_fov = 0.0F;
-  bool old_fov_enabled = false;
-  if (had_current) {
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      old_base_location[axis] =
-          context.view_car_location[axis].load(std::memory_order_relaxed);
-      old_location[axis] =
-          context.view_location[axis].load(std::memory_order_relaxed);
-      old_rotation[axis] =
-          context.view_rotation[axis].load(std::memory_order_relaxed);
-    }
-    old_time_ns =
-        context.view_current_time_ns.load(std::memory_order_relaxed);
-    old_fov = context.view_fov.load(std::memory_order_relaxed);
-    old_fov_enabled =
-        context.view_fov_enabled.load(std::memory_order_relaxed);
-  }
-  const bool force_snap = context.view_snap;
-  context.view_snap = false;
-  const double gap_seconds =
-      had_current && old_time_ns > 0
-          ? static_cast<double>(now_ns - old_time_ns) * 1e-9
-          : 0.0;
-  const bool car_jumped =
-      had_current &&
-      nfs2015_chase::Length(nfs2015_chase::Sub(
-          {base_cm[0], base_cm[1], base_cm[2]},
-          {old_base_location[0], old_base_location[1],
-           old_base_location[2]})) > kViewHistorySnapDistanceCm;
-  const bool previous_valid =
-      had_current && old_time_ns > 0 && !force_snap && !car_jumped &&
-      gap_seconds <= kMaximumViewInterpolationGapSeconds &&
-      !ViewHistoryJumped(old_location, old_rotation, next_location,
-                         next_rotation);
-
-  double old_distance_cm = 0.0;
-  if (had_current) {
-    old_distance_cm =
-        context.view_distance_cm.load(std::memory_order_relaxed);
-  }
-  if (!context.have_view_distance || !previous_valid) {
-    context.smoothed_view_distance_cm = raw_distance_cm;
-    context.have_view_distance = true;
-  } else {
-    context.smoothed_view_distance_cm = nfs2015_chase::Damp(
-        context.smoothed_view_distance_cm, raw_distance_cm,
-        kViewDistanceSmoothing, dt);
-  }
-  if (raw_distance_cm > 1e-6) {
-    const double factor =
-        context.smoothed_view_distance_cm / raw_distance_cm;
-    for (double &component : next_location) {
-      component *= factor;
-    }
-  }
-
-  ObservedPose observed{};
-  const bool observed_valid = ReadObservedPose(context, observed);
-  const std::uint64_t sequence =
-      context.view_sequence.load(std::memory_order_relaxed);
-  context.view_sequence.store(sequence + 1U, std::memory_order_release);
-  if (previous_valid) {
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      context.view_previous_location[axis].store(
-          old_location[axis], std::memory_order_relaxed);
-      context.view_previous_rotation[axis].store(
-          old_rotation[axis], std::memory_order_relaxed);
-    }
-    context.view_previous_time_ns.store(old_time_ns,
-                                        std::memory_order_relaxed);
-    context.view_previous_fov.store(old_fov, std::memory_order_relaxed);
-    context.view_previous_fov_enabled.store(
-        old_fov_enabled, std::memory_order_relaxed);
-    context.view_previous_distance_cm.store(old_distance_cm,
-                                            std::memory_order_relaxed);
-  }
-  context.view_has_previous.store(previous_valid, std::memory_order_relaxed);
-  for (std::size_t axis = 0; axis < 3; ++axis) {
-    context.view_car_location[axis].store(base_cm[axis],
-                                          std::memory_order_relaxed);
-    context.view_game_camera_location[axis].store(
-        observed_valid ? observed.location[axis] : 0.0,
-        std::memory_order_relaxed);
-    context.view_location[axis].store(next_location[axis],
-                                      std::memory_order_relaxed);
-    context.view_rotation[axis].store(next_rotation[axis],
-                                      std::memory_order_relaxed);
-  }
-  context.view_current_time_ns.store(now_ns, std::memory_order_relaxed);
-  context.view_game_camera_valid.store(observed_valid,
-                                       std::memory_order_relaxed);
-  context.view_update_hz.store(update_hz, std::memory_order_relaxed);
-  context.view_fov.store(next_fov, std::memory_order_relaxed);
-  context.view_fov_enabled.store(fov_enabled, std::memory_order_relaxed);
-  context.view_active.store(true, std::memory_order_release);
-  context.view_sequence.store(sequence + 2U, std::memory_order_release);
-  if (fov_enabled) {
-    // This frame writes the NFS lens, so no game-lens restore is pending.
-    context.fov_restore.store(false, std::memory_order_release);
-  } else if (context.last_view_active && context.last_fov_enabled) {
-    context.fov_restore.store(true, std::memory_order_release);
-  }
-  // When disabled, keep an already pending restore (e.g. after PublishInactive)
-  // so the next detour can put the game lens back.
-  context.last_view_active = true;
-  context.last_fov_enabled = fov_enabled;
+bool TryLockPresenter(Context &context) noexcept {
+  return !context.presenter_lock.test_and_set(std::memory_order_acquire);
 }
+
+void UnlockPresenter(Context &context) noexcept {
+  context.presenter_lock.clear(std::memory_order_release);
+}
+
+// The Game tick may block briefly: the render side only holds the lock for a
+// handful of spring steps.
+void LockPresenter(Context &context) noexcept {
+  while (!TryLockPresenter(context)) {
+    std::this_thread::yield();
+  }
+}
+
+// Ask the render side to restart the model. The epoch travels with the samples,
+// so the renderer notices even if it was not running at the time.
+void RequestPresenterReset(Context &context) noexcept {
+  context.chase_initialized = false;
+  ++context.sample_epoch;
+}
+
+// The model owns its state; other render threads must read a consistent pose.
+void PublishPresenterPose(Context &context, const double location[3],
+                          const double rotation[3], const float lens,
+                          const bool fov_enabled) noexcept {
+  const std::uint64_t sequence =
+      context.presenter_pose_sequence.load(std::memory_order_relaxed);
+  context.presenter_pose_sequence.store(sequence + 1U,
+                                        std::memory_order_release);
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    context.presenter_pose_location[axis].store(location[axis],
+                                                std::memory_order_relaxed);
+    context.presenter_pose_rotation[axis].store(rotation[axis],
+                                               std::memory_order_relaxed);
+  }
+  context.presenter_pose_lens.store(lens, std::memory_order_relaxed);
+  context.presenter_pose_fov.store(fov_enabled, std::memory_order_relaxed);
+  context.presenter_pose_valid.store(true, std::memory_order_relaxed);
+  context.presenter_pose_sequence.store(sequence + 2U,
+                                        std::memory_order_release);
+}
+
+[[nodiscard]] bool ReadPresenterPose(const Context &context, double location[3],
+                                     double rotation[3], float *lens,
+                                     bool *fov_enabled) noexcept {
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    const std::uint64_t before =
+        context.presenter_pose_sequence.load(std::memory_order_acquire);
+    if ((before & 1U) != 0U) {
+      continue;
+    }
+    if (!context.presenter_pose_valid.load(std::memory_order_relaxed)) {
+      return false;
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      location[axis] = context.presenter_pose_location[axis].load(
+          std::memory_order_relaxed);
+      rotation[axis] = context.presenter_pose_rotation[axis].load(
+          std::memory_order_relaxed);
+    }
+    *lens = context.presenter_pose_lens.load(std::memory_order_relaxed);
+    *fov_enabled =
+        context.presenter_pose_fov.load(std::memory_order_relaxed);
+    if (context.presenter_pose_sequence.load(std::memory_order_relaxed) ==
+        before) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Advance the model to `now_ns` and produce the pose for this render call.
+// Returns false when there is nothing to present (no sample yet, or another
+// thread is advancing and no cached pose exists).
+bool AdvancePresenter(Context &context, const std::int64_t now_ns,
+                      double location[3], double rotation[3], float *lens,
+                      bool *fov_enabled) noexcept {
+  if (!TryLockPresenter(context)) {
+    return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
+  }
+  struct Unlock final {
+    Context &context;
+    ~Unlock() { UnlockPresenter(context); }
+  } unlock{context};
+
+  if (context.presenter_pose_valid.load(std::memory_order_relaxed) &&
+      now_ns == context.presenter_pose_ns) {
+    // A second pass of the same frame: the model must not advance twice.
+    return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
+  }
+
+  const std::int64_t interval_ns =
+      context.sample_interval_ns.load(std::memory_order_relaxed);
+  const double delay_seconds = nfs2015_chase::Clamp(
+      static_cast<double>(interval_ns) * 1e-9, 0.0, kSampleMaximumDelaySeconds);
+  nfs2015_chase::CarSample sample;
+  if (!context.car_ring.At(
+          now_ns - static_cast<std::int64_t>(delay_seconds * 1e9), sample)) {
+    return false;
+  }
+  if (!sample.driving) {
+    return false;
+  }
+
+  if (!context.presenter_initialized || context.presenter_epoch != sample.epoch ||
+      !context.chase.initialized()) {
+    context.chase.Reset(sample.car);
+    context.presenter_initialized = true;
+    context.presenter_epoch = sample.epoch;
+    context.presenter_last_ns = now_ns;
+    context.presenter_accumulator = 0.0;
+  }
+
+  double elapsed =
+      static_cast<double>(now_ns - context.presenter_last_ns) * 1e-9;
+  if (!(elapsed > 0.0) || elapsed > kMaximumPresenterStepSeconds) {
+    elapsed = 0.0;
+  }
+  context.presenter_last_ns = now_ns;
+  context.presenter_accumulator += elapsed;
+  // Fixed substeps keep the springs frame-rate independent. The car sample is
+  // the one for this instant, so using it for every substep of the frame is
+  // exact: the sample does not change inside one render call.
+  constexpr double kSubstepSeconds = 1.0 / 120.0;
+  int steps = 0;
+  nfs2015_chase::CameraState view{};
+  while (context.presenter_accumulator >= kSubstepSeconds &&
+         steps < kMaximumPresenterSubsteps) {
+    view = context.chase.Update(kSubstepSeconds, sample.car);
+    context.presenter_accumulator -= kSubstepSeconds;
+    ++steps;
+  }
+  if (steps == 0) {
+    // Same frame or a stall: reuse the model's current pose without stepping.
+    view = context.chase.Update(0.0, sample.car);
+  }
+
+  // Scale around the model origin, exactly as the old publish path did, and
+  // report the result in world centimetres. The anchor cancels out of this
+  // transform; it is kept in the sample for diagnostics.
+  const double scale = nfs2015_chase::Clamp(
+      sample.camera_scale, kMinimumCameraScale, kMaximumCameraScale);
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double origin = sample.origin_cm[axis];
+    const double model = (&view.position.x)[axis] * 100.0;
+    location[axis] = origin + (model - origin) * scale;
+  }
+  rotation[0] = view.pitch_degrees;
+  rotation[1] = view.yaw_degrees;
+  rotation[2] = view.roll_degrees;
+  *fov_enabled = sample.fov_enabled;
+  *lens = sample.fov_enabled
+              ? static_cast<float>(
+                    view.HorizontalFovDegrees(sample.aspect_ratio))
+              : 0.0F;
+
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    context.presenter_anchor[axis].store(sample.anchor_cm[axis],
+                                         std::memory_order_relaxed);
+  }
+  PublishPresenterPose(context, location, rotation, *lens, *fov_enabled);
+  context.presenter_pose_ns = now_ns;
+  context.presenter_drift.store(context.chase.drift(),
+                                std::memory_order_relaxed);
+  double distance2 = 0.0;
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double delta = location[axis] - sample.anchor_cm[axis];
+    distance2 += delta * delta;
+  }
+  context.presenter_distance_cm.store(std::sqrt(distance2),
+                                      std::memory_order_relaxed);
+  return true;
+}
+
 
 void UpdateCamera(Context &context, const double dt) noexcept {
   const bool enabled = context.enabled.load(std::memory_order_acquire);
@@ -2283,12 +2147,15 @@ void UpdateCamera(Context &context, const double dt) noexcept {
       context.shake_scale.load(std::memory_order_acquire);
   const bool roll_only_in_drift =
       context.roll_only_in_drift.load(std::memory_order_acquire);
+  // The model lives on the render clock now, so configuration changes are made
+  // under its lock.
+  LockPresenter(context);
   if (preset != context.configured_preset) {
     context.configured_preset = preset;
     context.chase.SetConfig(preset == 0 ? nfs2015_chase::GamePreset()
                                         : nfs2015_chase::CinematicPreset());
-    context.chase_initialized = false;
-    context.view_snap = true;
+    RequestPresenterReset(context);
+    NoteViewSnap(context, kSnapReasonPreset);
   }
   // These are cheap setters that do not reset the springs.
   context.chase.SetSpeedDistanceScale(speed_distance_scale);
@@ -2296,15 +2163,14 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   context.chase.SetPitchScale(pitch_scale);
   context.chase.SetShakeScale(shake_scale);
   context.chase.SetRollOnlyInDrift(roll_only_in_drift);
+  UnlockPresenter(context);
   if (context.reset_requested.exchange(false, std::memory_order_acq_rel)) {
-    context.chase_initialized = false;
+    RequestPresenterReset(context);
     context.have_last_yaw = false;
-    context.view_snap = true;
+    NoteViewSnap(context, kSnapReasonUserReset);
   }
   if (WorldChanged(context)) {
     ResetMotion(context);
-    context.scanned_vehicle_entity = {};
-    context.next_vehicle_scan_elapsed = 0.0;
   }
 
   double origin_cm[3]{};
@@ -2313,55 +2179,21 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   AnomalyGenerationHandleV1 player_handle{};
   const bool player_valid = QueryPlayer(context, origin_cm, base_cm,
                                         player_sequence, player_handle);
-  bool vehicle_valid = false;
-  bool vehicle_speed_valid = false;
-  double vehicle_speed_kmh = 0.0;
-  AnomalyGenerationHandleV1 vehicle_handle{};
-  std::uint64_t vehicle_entity_id = 0;
-  char vehicle_class_name[ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES + 1]{};
-  const bool vehicle_service =
-      QueryVehicle(context, vehicle_valid, vehicle_speed_valid,
-                   vehicle_speed_kmh, vehicle_handle, vehicle_entity_id,
-                   vehicle_class_name);
-  std::uint32_t camera_base_source = 0;
-  if (vehicle_valid || player_valid) {
-    double mesh_center[3]{};
-    double mesh_extent[3]{};
-    const bool allow_base_fallback = vehicle_valid || !vehicle_service;
-    const CameraBaseSource source = QueryVehicleBase(
-        context, vehicle_handle, player_handle, vehicle_entity_id, base_cm,
-        allow_base_fallback, mesh_center, mesh_extent);
-    if (source != CameraBaseSource::pawn_root) {
-      camera_base_source = static_cast<std::uint32_t>(source);
-      const double origin_offset_cm =
-          context.origin_offset_cm.load(std::memory_order_acquire);
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        base_cm[axis] = mesh_center[axis];
-      }
-      origin_cm[0] = mesh_center[0];
-      origin_cm[1] = mesh_center[1];
-      origin_cm[2] = mesh_center[2] - mesh_extent[2] + origin_offset_cm;
-    }
-  }
-  if (camera_base_source != context.camera_base_source) {
-    context.camera_base_source = camera_base_source;
-    context.view_snap = true;
-  }
-  if (!context.base_diagnostic_logged && vehicle_valid) {
-    context.base_diagnostic_logged = true;
-    char detail[320]{};
-    std::snprintf(
-        detail, sizeof(detail),
-        "camera base source=%u vehicle_id=%llu class=%s entities=%d "
-        "actors=%d vehicle_service_version=%u",
-        camera_base_source,
-        static_cast<unsigned long long>(vehicle_entity_id),
-        vehicle_class_name[0] != '\0' ? vehicle_class_name : "-",
-        context.entities != nullptr ? 1 : 0,
-        context.actors != nullptr ? 1 : 0,
-        context.vehicle != nullptr ? context.vehicle->service_version : 0);
-    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, detail);
-  }
+  // The camera anchor is the Pawn root location that `QueryPlayer` already
+  // fills. `base_cm` cancels out of the published world position (the detour
+  // adds it back), so it only has to be stable and cheap. Resolving the
+  // rendered body through `component_bounds` used to cost ~2 ms of the Game
+  // tick: the host walks the class's whole reflected property list by name on
+  // every call, decoding an FName twice per property and reading it through
+  // ReadProcessMemory. Nothing about the camera needs that.
+  RefreshVehicleSample(context);
+  const bool vehicle_service = VehicleReady(context.vehicle);
+  const bool vehicle_valid = context.vehicle_cached_valid;
+  const bool vehicle_speed_valid = context.vehicle_cached_speed_valid;
+  const bool vehicle_speed_fresh = context.vehicle_cached_fresh;
+  const double vehicle_speed_kmh = context.vehicle_cached_speed_kmh;
+  const AnomalyGenerationHandleV1 vehicle_handle =
+      context.vehicle_cached_handle;
 
   bool identity_changed = false;
   if (player_valid && player_handle.id != 0 &&
@@ -2378,9 +2210,7 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   }
   if (identity_changed) {
     ResetMotion(context);
-    context.chase_initialized = false;
-    context.scanned_vehicle_entity = {};
-    context.next_vehicle_scan_elapsed = 0.0;
+    RequestPresenterReset(context);
   }
 
   if (vehicle_valid) {
@@ -2395,11 +2225,10 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.driving = false;
     context.display.player_valid = player_valid;
     context.display.vehicle_service_available = vehicle_service;
-    context.display.camera_base_source = 0;
     return;
   }
 
-  UpdateMotion(context, origin_cm, player_sequence, dt);
+  UpdateMotion(context, origin_cm, player_sequence);
 
   const double velocity_length =
       std::hypot(context.velocity_cmps[0], context.velocity_cmps[1]);
@@ -2415,6 +2244,12 @@ void UpdateCamera(Context &context, const double dt) noexcept {
       (context.last_vehicle_valid_elapsed >= 0.0 &&
        context.elapsed - context.last_vehicle_valid_elapsed <=
            kDrivingGraceSeconds);
+  // Q6: ticks the camera kept driving on a stale vehicle snapshot. The grace
+  // path absorbs a streaming gap, so counting it separates "the drop is
+  // invisible" from "the drop tears the view down".
+  if (!vehicle_valid && vehicle_service && vehicle_recent) {
+    context.diag.vehicle_gap_ticks.fetch_add(1, std::memory_order_relaxed);
+  }
   const bool driving =
       vehicle_recent || (!vehicle_service && speed_plausible);
   if (!driving) {
@@ -2425,7 +2260,6 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.driving = false;
     context.display.player_valid = true;
     context.display.vehicle_service_available = vehicle_service;
-    context.display.camera_base_source = 0;
     context.display.speed_kmh = vehicle_speed_kmh;
     return;
   }
@@ -2449,8 +2283,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
       velocity_length > 1.0
           ? std::atan2(context.velocity_cmps[1], context.velocity_cmps[0])
           : (context.have_last_yaw ? context.last_car_yaw : 0.0);
-  double car_yaw =
-      SelectCarYaw(context, velocity_yaw, velocity_length > 50.0);
+  double car_yaw = SelectCarYaw(context, velocity_yaw, velocity_length / 100.0,
+                                velocity_length > 50.0);
   if (context.have_last_yaw && dt > 1e-5) {
     const double maximum_step = kMaximumBodyYawRate * dt;
     car_yaw =
@@ -2481,10 +2315,65 @@ void UpdateCamera(Context &context, const double dt) noexcept {
         WrappedAngle(velocity_yaw - car_yaw), -nfs2015_chase::kPi * 0.5,
         nfs2015_chase::kPi * 0.5);
   }
+  // Experiment (T3.4): the slip angle twice, on the same tick. `position` is
+  // what the model uses today, differentiated from the Pawn root's bounds
+  // origin. `speed` comes straight from the host's forward speed over the
+  // travel speed, so it needs no differentiation at all. If the second one is
+  // steady while the first flickers, the derivative is the twitch.
+  const double slip_position_degrees =
+      slip_angle * kRadiansToDegrees;
+  double slip_speed_degrees = 0.0;
+  if (vehicle_speed_valid && speed_mps > 0.5) {
+    const double forward_mps = std::fabs(
+        context.diag.slip_signed_speed_kmh.load(std::memory_order_relaxed) /
+        3.6);
+    const double ratio =
+        nfs2015_chase::Clamp(forward_mps / speed_mps, 0.0, 1.0);
+    slip_speed_degrees = std::acos(ratio) * kRadiansToDegrees;
+  }
+  context.diag.slip_from_position_degrees.store(
+      slip_position_degrees, std::memory_order_relaxed);
+  context.diag.slip_from_speed_degrees.store(slip_speed_degrees,
+                                             std::memory_order_relaxed);
+  {
+    // A real drift holds one slip sign for as long as it lasts. Counting the
+    // sign changes is an objective proxy for "the drift reading flickers",
+    // which is what a twitch in the push-in and roll would come from.
+    const int sign =
+        slip_position_degrees > 3.0 ? 1
+                                    : (slip_position_degrees < -3.0 ? -1 : 0);
+    const int previous = context.diag.slip_last_sign.load(
+        std::memory_order_relaxed);
+    if (sign != 0 && previous != 0 && sign != previous) {
+      context.diag.slip_sign_changes.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (sign != 0) {
+      context.diag.slip_last_sign.store(sign, std::memory_order_relaxed);
+    }
+  }
+  {
+    // Experiment (T3.4): how far the slip angle moves in a single tick. The
+    // camera model consumes this number for the drift blend, the roll and the
+    // push-in, so a step here becomes a visible twitch.
+    const double step = context.have_last_slip
+                            ? std::fabs(slip_position_degrees -
+                                        context.last_slip_degrees)
+                            : 0.0;
+    context.last_slip_degrees = slip_position_degrees;
+    context.have_last_slip = true;
+    const std::uint64_t step_ddeg =
+        static_cast<std::uint64_t>(step * 10.0);
+    std::uint64_t previous_peak =
+        context.diag.slip_max_step_ddeg.load(std::memory_order_relaxed);
+    while (step_ddeg > previous_peak &&
+           !context.diag.slip_max_step_ddeg.compare_exchange_weak(
+               previous_peak, step_ddeg, std::memory_order_relaxed)) {
+    }
+  }
 
   if (vehicle_valid) {
     UpdateBrakeInput(context, vehicle_valid, vehicle_speed_valid,
-                     vehicle_speed_kmh, dt);
+                     vehicle_speed_fresh, vehicle_speed_kmh, dt);
   }
 
   nfs2015_chase::CarState car;
@@ -2516,14 +2405,35 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   car.brake = context.brake_input;
   car.on_ground = true;
 
-  nfs2015_chase::CameraState view;
-  if (!context.chase_initialized || !context.chase.initialized()) {
-    context.chase.Reset(car);
-    context.chase_initialized = true;
+  // T2: the tick no longer advances the model - it publishes a car sample and
+  // the render thread integrates the springs on its own clock.
+  {
+    nfs2015_chase::CarSample sample;
+    sample.time_ns = NowNanoseconds();
+    sample.car = car;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      sample.anchor_cm[axis] = base_cm[axis];
+      sample.origin_cm[axis] = origin_cm[axis];
+    }
+    sample.camera_scale = camera_scale;
+    sample.aspect_ratio = aspect_ratio;
+    sample.fov_enabled = fov_enabled;
+    sample.driving = true;
+    sample.epoch = context.sample_epoch;
+    if (context.sample_last_ns > 0 && sample.time_ns > context.sample_last_ns) {
+      context.sample_interval_ns.store(sample.time_ns - context.sample_last_ns,
+                                       std::memory_order_relaxed);
+    }
+    context.sample_last_ns = sample.time_ns;
+    context.car_ring.Write(sample);
+    // The detour gates on this: without it the game camera shows through.
+    context.last_view_active = true;
+    context.last_fov_enabled = fov_enabled;
+    context.view_active.store(true, std::memory_order_release);
   }
-  view = context.chase.Update(dt, car);
-  PublishView(context, view, origin_cm, base_cm, context.update_hz,
-              camera_scale, aspect_ratio, fov_enabled, dt);
+  // The tick no longer advances the model, so `delta_seconds` is unused here;
+  // keep taking it because the ABI defines the signature.
+  (void)dt;
 
   {
     std::scoped_lock lock(context.display_mutex);
@@ -2531,18 +2441,17 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.driving = true;
     context.display.player_valid = true;
     context.display.vehicle_service_available = vehicle_service;
-    context.display.camera_base_source = camera_base_source;
     context.display.speed_kmh = vehicle_speed_kmh > 0.5
                                     ? vehicle_speed_kmh
                                     : speed_mps * 3.6;
     context.display.slip_degrees = slip_angle * kRadiansToDegrees;
-    context.display.drift = context.chase.drift();
-    context.display.fov_horizontal =
-        fov_enabled ? view.HorizontalFovDegrees(aspect_ratio) : 0.0;
+    context.display.drift =
+        context.presenter_drift.load(std::memory_order_relaxed);
+    context.display.fov_horizontal = 0.0;
     context.display.camera_distance_m =
-        context.smoothed_view_distance_cm / 100.0;
+        context.presenter_distance_cm.load(std::memory_order_relaxed) / 100.0;
     context.display.camera_distance_raw_m =
-        context.raw_view_distance_cm / 100.0;
+        context.display.camera_distance_m;
   }
 }
 
@@ -2560,6 +2469,81 @@ void UpdateDisplay(Context &context) noexcept {
   context.display.update_hz = context.update_hz;
   context.display.view_output_hz = context.view_output_hz;
   context.display.interpolation_ratio = context.interpolation_ratio;
+  context.display.detour_hz = context.detour_hz;
+  context.display.tick_ms_last = context.camera_ms_last;
+  context.display.tick_ms_avg = context.camera_cost.Average();
+  context.display.tick_ms_p99 = context.camera_cost.Percentile(0.99);
+  context.display.tick_ms_max = context.camera_cost.Maximum();
+  const Diagnostics &diag = context.diag;
+  std::uint64_t snap_total = 0;
+  for (std::size_t index = 0; index < kSnapReasonCount; ++index) {
+    const std::uint64_t count =
+        diag.snap_by_reason[index].load(std::memory_order_relaxed);
+    context.display.snap_by_reason[index] = count;
+    snap_total += count;
+  }
+  context.display.snap_total = snap_total;
+  context.display.yaw_source_switches =
+      diag.yaw_source_switches.load(std::memory_order_relaxed);
+  context.display.observed_read_failures =
+      diag.observed_read_failures.load(std::memory_order_relaxed);
+  context.display.lease_failures =
+      diag.lease_failures.load(std::memory_order_relaxed);
+  context.display.view_read_torn =
+      diag.view_read_torn.load(std::memory_order_relaxed);
+  context.display.detour_calls =
+      diag.detour_calls.load(std::memory_order_relaxed);
+  context.display.detour_no_publish =
+      diag.detour_no_publish.load(std::memory_order_relaxed);
+  context.display.detour_thread_count =
+      diag.detour_thread_count.load(std::memory_order_relaxed);
+  context.display.vehicle_gap_ticks =
+      diag.vehicle_gap_ticks.load(std::memory_order_relaxed);
+  context.display.player_sequence_jumps =
+      diag.player_sequence_jumps.load(std::memory_order_relaxed);
+  context.display.vehicle_polls =
+      diag.vehicle_polls.load(std::memory_order_relaxed);
+  context.display.camera_yaw_esp_misses =
+      diag.camera_yaw_esp_misses.load(std::memory_order_relaxed);
+  context.display.slip_signed_speed_kmh =
+      diag.slip_signed_speed_kmh.load(std::memory_order_relaxed);
+  context.display.slip_from_position_degrees =
+      diag.slip_from_position_degrees.load(std::memory_order_relaxed);
+  context.display.slip_from_speed_degrees =
+      diag.slip_from_speed_degrees.load(std::memory_order_relaxed);
+  context.display.slip_sign_changes =
+      diag.slip_sign_changes.load(std::memory_order_relaxed);
+  context.display.slip_max_step_degrees =
+      static_cast<double>(
+          diag.slip_max_step_ddeg.load(std::memory_order_relaxed)) /
+      10.0;
+  const std::uint64_t speed_floor_raw =
+      diag.render_speed_floor_mmps.load(std::memory_order_relaxed);
+  // The floor starts at UINT64_MAX so the first sample sets it; an untouched
+  // window must not print that sentinel.
+  context.display.render_speed_floor_mps =
+      speed_floor_raw == UINT64_MAX
+          ? 0.0
+          : static_cast<double>(speed_floor_raw) / 1000.0;
+  context.display.render_speed_valid = speed_floor_raw != UINT64_MAX;
+  context.display.render_speed_peak_mps =
+      static_cast<double>(
+          diag.render_speed_peak_mmps.load(std::memory_order_relaxed)) /
+      1000.0;
+  const std::uint64_t turn_floor_raw =
+      diag.render_turn_floor_cdps.load(std::memory_order_relaxed);
+  context.display.render_turn_floor_dps =
+      turn_floor_raw == UINT64_MAX
+          ? 0.0
+          : static_cast<double>(turn_floor_raw) / 100.0;
+  context.display.render_turn_valid = turn_floor_raw != UINT64_MAX;
+  context.display.render_turn_peak_dps =
+      static_cast<double>(
+          diag.render_turn_peak_cdps.load(std::memory_order_relaxed)) /
+      100.0;
+  context.display.car_step_cm =
+      static_cast<double>(diag.car_step_dcm.load(std::memory_order_relaxed)) /
+      10.0;
   context.display.preset = context.preset.load(std::memory_order_acquire);
   context.display.fov_enabled =
       context.fov_enabled.load(std::memory_order_acquire);
@@ -2634,12 +2618,11 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
       ANOMALY_NTE_PLAYER_SERVICE_V1_VERSION);
   context->vehicle = Query<AnomalyNteVehicleServiceV1>(
       host, ANOMALY_NTE_VEHICLE_SERVICE_V1_ID, 1U);
-  context->entities = Query<AnomalyNteEntitiesServiceV1>(
-      host, ANOMALY_NTE_ENTITIES_SERVICE_V1_ID,
-      ANOMALY_NTE_ENTITIES_SERVICE_V1_VERSION);
-  context->actors = Query<AnomalyNteActorsServiceV1>(
-      host, ANOMALY_NTE_ACTORS_SERVICE_V1_ID,
-      ANOMALY_NTE_ACTORS_SERVICE_V1_VERSION);
+  // The entities/actors services are deliberately not leased. Every one of
+  // their reflection calls (`component_bounds`, `frame`, `page`) runs a
+  // name-keyed walk inside the host on every call, and the camera needs none
+  // of them: the Pawn root is the vehicle actor while driving, and its
+  // position and bounds arrive through the player service's cached snapshots.
   if (!CoreReady(context->core) || !ConfigReady(context->config) ||
       !UiReady(context->ui) || !SignatureReady(context->signature) ||
       !HookReady(context->hook)) {
@@ -2672,13 +2655,11 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   context->view_output_hz = 0.0;
   context->interpolation_ratio = 0.0;
   context->view_output_frames.store(0, std::memory_order_relaxed);
-  context->view_interpolated_frames.store(0, std::memory_order_relaxed);
   context->configured_preset =
       context->preset.load(std::memory_order_acquire);
   context->chase.SetConfig(context->configured_preset == 0
                                ? nfs2015_chase::GamePreset()
                                : nfs2015_chase::CinematicPreset());
-  context->chase_initialized = false;
   context->reset_requested.store(true, std::memory_order_release);
   // Signature learning is a Lifecycle-domain operation; cache the target here
   // so the Game tick only has to create the hook.
@@ -2689,6 +2670,50 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   ResetMotion(*context);
   context->observed_valid.store(false, std::memory_order_release);
   PublishInactive(*context);
+  // T0: a new session starts from a clean counter baseline so the recorded
+  // numbers describe this run only.
+  for (std::size_t index = 0; index < kSnapReasonCount; ++index) {
+    context->diag.snap_by_reason[index].store(0, std::memory_order_relaxed);
+  }
+  context->diag.yaw_source_switches.store(0, std::memory_order_relaxed);
+  context->diag.observed_read_failures.store(0, std::memory_order_relaxed);
+  context->diag.lease_failures.store(0, std::memory_order_relaxed);
+  context->diag.view_read_torn.store(0, std::memory_order_relaxed);
+  context->diag.detour_calls.store(0, std::memory_order_relaxed);
+  context->diag.detour_calls_window.store(0, std::memory_order_relaxed);
+  context->diag.detour_no_publish.store(0, std::memory_order_relaxed);
+  context->diag.vehicle_gap_ticks.store(0, std::memory_order_relaxed);
+  context->diag.player_sequence_jumps.store(0, std::memory_order_relaxed);
+  context->diag.vehicle_polls.store(0, std::memory_order_relaxed);
+  context->diag.camera_yaw_esp_misses.store(0, std::memory_order_relaxed);
+  context->diag.slip_signed_speed_kmh.store(0.0, std::memory_order_relaxed);
+  context->diag.slip_from_position_degrees.store(0.0,
+                                                 std::memory_order_relaxed);
+  context->diag.slip_from_speed_degrees.store(0.0,
+                                              std::memory_order_relaxed);
+  context->diag.slip_sign_changes.store(0, std::memory_order_relaxed);
+  context->diag.slip_last_sign.store(0, std::memory_order_relaxed);
+  context->diag.slip_max_step_ddeg.store(0, std::memory_order_relaxed);
+  context->last_slip_degrees = 0.0;
+  context->have_last_slip = false;
+  context->diag.render_speed_floor_mmps.store(UINT64_MAX,
+                                              std::memory_order_relaxed);
+  context->diag.render_speed_peak_mmps.store(0, std::memory_order_relaxed);
+  context->diag.render_turn_floor_cdps.store(UINT64_MAX,
+                                             std::memory_order_relaxed);
+  context->diag.render_turn_peak_cdps.store(0, std::memory_order_relaxed);
+  context->diag.car_step_dcm.store(0, std::memory_order_relaxed);
+  context->camera_cost.Reset();
+  context->camera_ms_last = 0.0;
+  context->detour_hz = 0.0;
+  context->next_vehicle_query_elapsed = 0.0;
+  context->vehicle_cached_valid = false;
+  context->vehicle_cached_speed_valid = false;
+  context->vehicle_cached_speed_kmh = 0.0;
+  context->vehicle_cached_fresh = false;
+  context->brake_last_target = 0.0;
+  context->vehicle_cached_handle = {};
+  context->base_diagnostic_logged = false;
   static_cast<void>(RegisterToggleHotkey(*context));
   // Install the hook from the Game tick, not from this lifecycle callback: the
   // target function is called on the Game thread, so create/enable cannot
@@ -2706,6 +2731,8 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   }
   context->started.store(false, std::memory_order_release);
   context->chase_initialized = false;
+  ++context->sample_epoch;
+  context->car_ring.Clear();
   PublishInactive(*context);
   ReleaseToggleHotkey(*context);
   ReleaseHook(*context);
@@ -2755,9 +2782,9 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
             context->update_rate_window;
         const std::uint64_t outputs =
             context->view_output_frames.exchange(0, std::memory_order_relaxed);
-        const std::uint64_t interpolated =
-            context->view_interpolated_frames.exchange(
-                0, std::memory_order_relaxed);
+        // Every detour call that produced a pose is now a render-clock model
+        // step, so the "interpolated" share is simply the presented share.
+        const std::uint64_t interpolated = outputs;
         context->view_output_hz =
             static_cast<double>(outputs) / context->update_rate_window;
         context->interpolation_ratio =
@@ -2765,13 +2792,37 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
                 ? static_cast<double>(interpolated) /
                       static_cast<double>(outputs)
                 : 0.0;
+        // Q1/Q4: how often the presenter is actually asked for a pose, next
+        // to the Game tick rate. These two should track the render rate once
+        // T2 moves the model off the Game tick.
+        const std::uint64_t detour_calls =
+            context->diag.detour_calls_window.exchange(
+                0, std::memory_order_relaxed);
+        context->detour_hz =
+            static_cast<double>(detour_calls) / context->update_rate_window;
+        context->diag.render_speed_floor_mmps.store(
+            UINT64_MAX, std::memory_order_relaxed);
+        context->diag.render_speed_peak_mmps.store(0, std::memory_order_relaxed);
+        context->diag.render_turn_floor_cdps.store(UINT64_MAX,
+                                                   std::memory_order_relaxed);
+        context->diag.render_turn_peak_cdps.store(0, std::memory_order_relaxed);
+        context->diag.car_step_dcm.store(0, std::memory_order_relaxed);
+        context->diag.slip_max_step_ddeg.store(0,
+                                               std::memory_order_relaxed);
         context->update_rate_window = 0.0;
         context->update_rate_frames = 0;
       }
     }
     RetryHookIfNeeded(*context);
     static_cast<void>(ResolveCameraPov(*context));
+    // T0: time the Game-tick work that the camera itself owns. The host
+    // callback as a whole also persists settings and resolves the POV, so only
+    // UpdateCamera is bracketed here.
+    const std::int64_t camera_begin_ns = NowNanoseconds();
     UpdateCamera(*context, dt);
+    context->camera_ms_last =
+        static_cast<double>(NowNanoseconds() - camera_begin_ns) * 1e-6;
+    context->camera_cost.Add(context->camera_ms_last);
     UpdateDisplay(*context);
     const auto revision =
         context->settings_revision.load(std::memory_order_acquire);
@@ -2812,6 +2863,112 @@ void DrawStatusLine(const AnomalyUiServiceV1 *ui,
   line.reserve(label.size() + value.size() + 3U);
   line.append(label).append(": ").append(value);
   ui->text(ui->user, StringView(line));
+}
+
+void DrawCountLine(const AnomalyUiServiceV1 *ui,
+                   const nfs2015_chase_cam::Localizer &localizer,
+                   const char *key, const char *fallback,
+                   const std::uint64_t value) {
+  char buffer[32]{};
+  std::snprintf(buffer, sizeof(buffer), "%llu",
+                static_cast<unsigned long long>(value));
+  DrawStatusLine(ui, localizer, key, fallback, buffer);
+}
+
+// T0: the counters behind PLAN-camera-timing.md. Collapsed by default so they
+// do not compete with the settings, but they are the only way to tell a silent
+// degradation (source flip, torn read, dropped tick) from a tuning issue.
+void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
+                     const nfs2015_chase_cam::Localizer &localizer,
+                     const DisplayState &display) {
+  char line[128]{};
+  std::snprintf(line, sizeof(line), "%.1f / %.1f Hz", display.detour_hz,
+                display.update_hz);
+  DrawStatusLine(ui, localizer, "diag.detour_rate",
+                 "Presenter / Game tick", line);
+  std::snprintf(line, sizeof(line), "%.2f / %.2f / %.2f / %.2f ms",
+                display.tick_ms_last, display.tick_ms_avg, display.tick_ms_p99,
+                display.tick_ms_max);
+  DrawStatusLine(ui, localizer, "diag.tick_cost",
+                 "Camera tick (last/avg/p99/max)", line);
+  // The presentation numbers come first: the diagnostics body scrolls, so
+  // anything appended after the counters is off screen on a small window.
+  if (display.render_speed_valid) {
+    std::snprintf(line, sizeof(line), "%.1f / %.1f m/s",
+                  display.render_speed_floor_mps,
+                  display.render_speed_peak_mps);
+  } else {
+    std::snprintf(line, sizeof(line), "-- / -- m/s");
+  }
+  DrawStatusLine(ui, localizer, "diag.render_speed",
+                 "Camera-vs-car speed, 0.5 s, <3 m/s", line);
+  if (display.render_turn_valid) {
+    std::snprintf(line, sizeof(line), "%.1f / %.1f deg/s",
+                  display.render_turn_floor_dps, display.render_turn_peak_dps);
+  } else {
+    std::snprintf(line, sizeof(line), "-- / -- deg/s");
+  }
+  DrawStatusLine(ui, localizer, "diag.render_turn",
+                 "Camera-vs-car turn rate, 0.5 s, should match", line);
+  std::snprintf(line, sizeof(line), "%.1f cm", display.car_step_cm);
+  DrawStatusLine(ui, localizer, "diag.car_step",
+                 "Anchor step per tick, the scale for the two above", line);
+  DrawCountLine(ui, localizer, "diag.snap", "View snaps",
+                display.snap_total);
+  static constexpr const char *kSnapKeys[kSnapReasonCount] = {
+      "diag.snap_motion", "diag.snap_teleport", "diag.snap_inactive",
+      "diag.snap_preset", "diag.snap_user_reset"};
+  static constexpr const char *kSnapFallbacks[kSnapReasonCount] = {
+      "  motion reset", "  teleport step", "  camera idle",
+      "  preset switch", "  user reset"};
+  for (std::size_t index = 0; index < kSnapReasonCount; ++index) {
+    if (display.snap_by_reason[index] == 0) {
+      continue;
+    }
+    DrawCountLine(ui, localizer, kSnapKeys[index], kSnapFallbacks[index],
+                  display.snap_by_reason[index]);
+  }
+  DrawCountLine(ui, localizer, "diag.yaw_switches",
+                "Car yaw: camera vs slip-limit", display.yaw_source_switches);
+  DrawCountLine(ui, localizer, "diag.observed_failures",
+                "Observed pose read failures",
+                display.observed_read_failures);
+  DrawCountLine(ui, localizer, "diag.lease_failures", "Hook lease failures",
+                display.lease_failures);
+  DrawCountLine(ui, localizer, "diag.torn_reads", "Torn view reads",
+                display.view_read_torn);
+  DrawCountLine(ui, localizer, "diag.detour_missing",
+                "Detour calls without a pose", display.detour_no_publish);
+  DrawCountLine(ui, localizer, "diag.detour_threads", "Detour threads",
+                display.detour_thread_count);
+  DrawCountLine(ui, localizer, "diag.vehicle_polls",
+                "Vehicle service polls", display.vehicle_polls);
+  DrawCountLine(ui, localizer, "diag.camera_yaw_fallback",
+                "Ticks without the Game-tick car yaw",
+                display.camera_yaw_esp_misses);
+  std::snprintf(line, sizeof(line), "%.1f km/h",
+                display.slip_signed_speed_kmh);
+  DrawStatusLine(ui, localizer, "diag.signed_speed",
+                 "Vehicle forward speed (signed)", line);
+  std::snprintf(line, sizeof(line), "%.1f / %.1f deg",
+                display.slip_from_position_degrees,
+                display.slip_from_speed_degrees);
+  DrawStatusLine(ui, localizer, "diag.slip_compare",
+                 "Slip: from position / from speed, <3 deg apart", line);
+  DrawCountLine(ui, localizer, "diag.slip_flips",
+                "Slip sign changes, >3 suspicious",
+                display.slip_sign_changes);
+  // The thresholds are printed next to the values so the panel can be read
+  // without knowing what "large" means for each number.
+  std::snprintf(line, sizeof(line), "%.1f deg",
+                display.slip_max_step_degrees);
+  DrawStatusLine(ui, localizer, "diag.slip_step",
+                 "Largest slip step per tick, 0.5 s, <2 deg", line);
+  DrawCountLine(ui, localizer, "diag.vehicle_gaps",
+                "Ticks on a stale vehicle snapshot",
+                display.vehicle_gap_ticks);
+  DrawCountLine(ui, localizer, "diag.sequence_jumps",
+                "Player sequence jumps", display.player_sequence_jumps);
 }
 
 void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
@@ -3055,15 +3212,6 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                       display.camera_distance_raw_m);
         DrawStatusLine(ui, context->localizer, "status.distance",
                        "Camera-car distance", distance_line);
-        DrawStatusLine(
-            ui, context->localizer, "status.car_base", "Camera base",
-            display.camera_base_source == 2
-                ? context->localizer.Text("base.vehicle_mesh", "VehicleMesh")
-                : display.camera_base_source == 1
-                      ? context->localizer.Text("base.vehicle_root",
-                                                "Vehicle root")
-                      : context->localizer.Text("base.pawn_root",
-                                                "Pawn root"));
         char speed_distance_line[32]{};
         std::snprintf(speed_distance_line, sizeof(speed_distance_line),
                       "%.2f", display.speed_distance_scale);
@@ -3098,6 +3246,17 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                  StringView(context->localizer.Text(
                      "hint.reset_done",
                      "Camera re-centered on the car.")));
+      }
+      ui->separator(ui->user);
+      const std::string diagnostics_label = context->localizer.Label(
+          "setting.diagnostics", "Diagnostics", "chase-diagnostics");
+      int diagnostics_open = context->diagnostics_open ? 1 : 0;
+      if (ui->checkbox(ui->user, StringView(diagnostics_label),
+                       &diagnostics_open) != 0) {
+        context->diagnostics_open = diagnostics_open != 0;
+      }
+      if (context->diagnostics_open) {
+        DrawDiagnostics(ui, context->localizer, display);
       }
       ui->separator(ui->user);
       ui->text(ui->user,

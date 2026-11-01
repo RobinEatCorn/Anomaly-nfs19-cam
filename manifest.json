@@ -68,16 +68,6 @@
       "id": "anomaly.nte.vehicle",
       "minVersion": 1,
       "optional": true
-    },
-    {
-      "id": "anomaly.nte.entities",
-      "minVersion": 1,
-      "optional": true
-    },
-    {
-      "id": "anomaly.nte.actors",
-      "minVersion": 1,
-      "optional": true
     }
   ],
   "capabilities": [
@@ -91,8 +81,6 @@
     "memory-write",
     "nte-session-snapshot",
     "nte-player-snapshot",
-    "nte-vehicle",
-    "nte-entity-snapshot",
-    "nte-actor-snapshot"
+    "nte-vehicle"
   ]
 }

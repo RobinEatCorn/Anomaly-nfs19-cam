@@ -31,7 +31,8 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 也不包含宿主内部头文件或对 Runtime 的修改。插件通过公开的纯 C ABI v1 服务工作：
 
 - `anomaly.interop.signature` + `anomaly.interop.hook` 接管 CameraManager 的视点函数；
-- `anomaly.nte.player` / `anomaly.nte.vehicle` / `anomaly.nte.entities` / `anomaly.nte.actors` 读取相机所需的快照；
+- `anomaly.nte.player` / `anomaly.nte.vehicle` 读取相机所需的快照（两者在宿主侧都是缓存拷贝或
+  低频轮询；不租用 `anomaly.nte.entities` / `anomaly.nte.actors`）；
 - `anomaly.config` + `anomaly.json` 持久化并解析设置（不依赖第三方 JSON 库）；
 - `anomaly.ui` / `anomaly.localization` / `anomaly.input` 提供窗口、翻译和 F7 快捷键。
 
@@ -151,19 +152,19 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
   显示视点 detour 的输出频率和命中渲染帧插值的比例。低于 60 Hz 时 detour 会用最近两次快照
   插值，不再对车辆基准做前向预测；同时会用原始游戏相机位姿的帧间位移把机位补到当前渲染帧，
   避免车身和机位差一帧。
-- 车辆基准优先读 `VehicleMesh` 的 bounds（实际渲染的车身），再回退到 `RootComponent`，最后
-  才是 Pawn root。正常驾驶时窗口里的 `Camera base` 应显示 **VehicleMesh**；如果显示
-  **Pawn root**，说明 vehicle entity 或 `component_bounds` 不可用，相机跟的是角色而不是车身。
+- 相机基准是 Pawn 根位置（驾驶时它就是载具 actor 的根组件）。它在发布时被 `render_offset`
+  减掉、又被 detour 加回来，因此不参与世界坐标，只需要稳定——固定用它换掉了原来每 tick
+  一次的 `component_bounds` 反射查找（那是 tick 耗时的主要来源）。
 
 ## 冲突与限制
 
 - 与 **Camera Tools**、**BetterPose** 的相机 Hook 互斥：CameraManager 的视点函数同一时间只能有一个
   所有者。先停用其他相机插件，或在窗口里点 **Retry hook**。
 - 插件不做镜头碰撞射线，贴墙时可能穿模。
-- 如果 `Camera base` 显示 **Pawn root**，相机会跟玩家角色而不是渲染车身，高速时车身可能在
-  画面里前后滑动。先确认 Runtime 发布了 `anomaly.nte.vehicle` 和 `anomaly.nte.entities`；
-  插件优先用 vehicle service 的 entity id 读取 `VehicleMesh`，找不到时才回退。日志
-  `anomaly-platform.log` 里的 `camera base source=...` 可用于定位。
+- 相机模型的原点是「根组件 bounds 底面 + 车身原点偏移」。根组件覆盖整车（含轮胎），所以它
+  比车身网格底面更贴近地面；若希望相机相对车身更高，把 `Car origin offset (cm)` 调大即可
+  （±150 cm）。日志 `anomaly-platform.log` 里的 `vehicle snapshot available: ...` 记录了载具
+  服务是否可用及其轮询间隔。
 - 前向运动预测已移除（它会把逐帧变化的 `velocity * dt` 叠到机位上，反而放大抖动）；detour
   仍用原始游戏相机位姿的帧间位移补偿发布延迟，这是测得位移而不是速度外推。
 - 插件只读取公开快照，不修改游戏内存中的相机状态（`FOV` 复选框用于把 NFS 镜头写回 CameraManager

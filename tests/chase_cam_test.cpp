@@ -14,7 +14,9 @@
 // significant lateral offset, the correct roll/FOV, and a car body visibly
 // off-axis, without copying the reference's unrotated-offset numbers.
 
+#include "../car_sample.hpp"
 #include "../chase_cam.hpp"
+#include "../latency_window.hpp"
 #include "../view_blend.hpp"
 
 #include <cmath>
@@ -88,6 +90,14 @@ void Fail(const char* label, const char* detail, const double actual,
   std::fprintf(stderr, "FAIL %s: %s, got %.3f (expected %.3f)\n", label,
                detail, actual, expected);
   std::exit(1);
+}
+
+void Expect(const char* label, const bool condition) {
+  if (!condition) {
+    std::fprintf(stderr, "FAIL %s: condition was false\n", label);
+    std::exit(1);
+  }
+  std::printf("ok   %s\n", label);
 }
 
 void ExpectNear(const char* label, const double actual, const double expected,
@@ -416,6 +426,138 @@ int main() {
                10.0, 0.05);
   }
 
+  // --- T0 diagnostics: the rolling latency window -------------------------
+  // The camera tick cost is judged by p99 and max, not by an average: a tick
+  // that is usually 0.2 ms but sometimes 9 ms is a different bug from one that
+  // is uniformly 4 ms. The histogram must separate the two.
+  {
+    using nfs2015_chase_cam::LatencyWindow;
+    constexpr double kWidth = LatencyWindow::kBucketMilliseconds;
+    LatencyWindow window;
+    ExpectNear("empty latency average", window.Average(), 0.0, 1e-12);
+    ExpectNear("empty latency p99", window.Percentile(0.99), 0.0, 1e-12);
+
+    for (int sample = 0; sample < 95; ++sample) {
+      window.Add(0.20);
+    }
+    for (int sample = 0; sample < 5; ++sample) {
+      window.Add(9.0);
+    }
+    ExpectNear("latency average ignores rank", window.Average(),
+               (0.20 * 95.0 + 9.0 * 5.0) / 100.0, 1e-9);
+    ExpectNear("latency max is the peak", window.Maximum(),
+               static_cast<double>(LatencyWindow::kBuckets) * kWidth, 1e-9);
+    if (!(window.Percentile(0.99) > 1.0)) {
+      std::fprintf(stderr, "FAIL latency p99 missed the peak: %.3f\n",
+                   window.Percentile(0.99));
+      return 1;
+    }
+    std::printf("ok   %-34s p99=%.2f max=%.2f ms\n", "latency p99 catches a spike",
+                window.Percentile(0.99), window.Maximum());
+
+    // Filling the window past its capacity must evict the spike entirely, not
+    // leave it in the histogram forever: the numbers describe the last N
+    // ticks, which is what makes them usable for a live diagnosis.
+    for (int sample = 0; sample < static_cast<int>(LatencyWindow::kCapacity);
+         ++sample) {
+      window.Add(0.10);
+    }
+    ExpectNear("evicted latency average", window.Average(), 0.10, 1e-9);
+    ExpectNear("evicted latency max", window.Maximum(), 3.0 * kWidth, 0.03);
+    if (window.Percentile(0.99) > 1.0) {
+      std::fprintf(stderr, "FAIL latency spike was not evicted: %.3f\n",
+                   window.Percentile(0.99));
+      return 1;
+    }
+    std::printf("ok   %-34s p99=%.2f ms\n", "latency window evicts spikes",
+                window.Percentile(0.99));
+
+    window.Reset();
+    if (window.Count() != 0) {
+      std::fprintf(stderr, "FAIL latency reset kept %zu samples\n",
+                   window.Count());
+      return 1;
+    }
+    std::printf("ok   %-34s count=%zu\n", "latency reset clears the window",
+                window.Count());
+  }
+
   std::printf("all chase-camera checks passed\n");
-  return 0;
+    {
+    nfs2015_chase::CarSample a;
+    a.time_ns = 1000;
+    a.car.position = {0.0, 0.0, 0.0};
+    a.car.yaw = 0.0;
+    a.anchor_cm[0] = 0.0;
+    nfs2015_chase::CarSample b;
+    b.time_ns = 3000;
+    b.car.position = {10.0, 20.0, 0.0};
+    b.car.speed = 30.0;
+    b.anchor_cm[0] = 10.0;
+    nfs2015_chase::SampleRing ring;
+    ring.Write(a);
+    ring.Write(b);
+    nfs2015_chase::CarSample mid;
+    Expect("ring interpolates between samples", ring.At(2000, mid));
+    ExpectNear("ring position midpoint x", mid.car.position.x, 5.0, 1e-9);
+    ExpectNear("ring position midpoint y", mid.car.position.y, 10.0, 1e-9);
+    ExpectNear("ring speed midpoint", mid.car.speed, 15.0, 1e-9);
+    ExpectNear("ring anchor midpoint", mid.anchor_cm[0], 5.0, 1e-9);
+    ExpectNear("ring time midpoint", static_cast<double>(mid.time_ns), 2000.0, 1.0);
+  }
+  {
+    // The oldest sample carries the car past the +-180 degree seam; the blend
+    // must go through 180, not back through 0.
+    nfs2015_chase::CarSample a;
+    a.time_ns = 0;
+    a.car.yaw = 179.0 * nfs2015_chase::kRadiansPerDegree;
+    nfs2015_chase::CarSample b;
+    b.time_ns = 1000;
+    b.car.yaw = -179.0 * nfs2015_chase::kRadiansPerDegree;
+    nfs2015_chase::SampleRing ring;
+    ring.Write(a);
+    ring.Write(b);
+    nfs2015_chase::CarSample mid;
+    Expect("ring interpolates across the yaw seam", ring.At(500, mid));
+    const double degrees =
+        std::remainder(mid.car.yaw, 2.0 * nfs2015_chase::kPi) *
+        nfs2015_chase::kDegreesPerRadian;
+    ExpectNear("yaw seam stays at 180", std::fabs(degrees), 180.0, 0.5);
+  }
+  {
+    nfs2015_chase::SampleRing ring;
+    nfs2015_chase::CarSample out;
+    Expect("empty ring reports no sample", !ring.At(0, out));
+    nfs2015_chase::CarSample a;
+    a.time_ns = 5000;
+    a.car.position = {1.0, 2.0, 3.0};
+    ring.Write(a);
+    Expect("single sample answers any time", ring.At(0, out));
+    ExpectNear("single sample clamps", out.car.position.z, 3.0, 1e-9);
+    nfs2015_chase::CarSample b = a;
+    b.time_ns = 6000;
+    b.car.position = {2.0, 2.0, 3.0};
+    ring.Write(b);
+    Expect("time past the newest clamps", ring.At(999999, out));
+    ExpectNear("past newest uses the newest", out.car.position.x, 2.0, 1e-9);
+    ring.Clear();
+    Expect("cleared ring reports no sample", !ring.At(5500, out));
+  }
+  {
+    // Wrap-around: more writes than slots must keep the newest kCapacity.
+    nfs2015_chase::SampleRing ring;
+    for (int index = 0; index < 20; ++index) {
+      nfs2015_chase::CarSample sample;
+      sample.time_ns = index * 1000;
+      sample.car.speed = static_cast<double>(index);
+      ring.Write(sample);
+    }
+    nfs2015_chase::CarSample newest;
+    Expect("ring latest after wrap", ring.Latest(newest));
+    ExpectNear("ring latest is the last write", newest.car.speed, 19.0, 1e-9);
+    nfs2015_chase::CarSample older;
+    Expect("ring still holds the oldest retained slot", ring.At(15000, older));
+    ExpectNear("ring wraps at capacity", older.car.speed, 15.0, 1e-9);
+  }
+return 0;
 }
