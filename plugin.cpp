@@ -127,6 +127,9 @@ constexpr double kUpdateRateWindowSeconds = 0.5;
 // instead of blending across it (which would both trail and step at the end).
 // T2 presenter: how far behind the newest sample the model is fed, and the
 // largest step the springs are allowed to take in one frame.
+// Below this the eye is too close to the anchor for an angle to mean
+// anything; the second difference is divided by this distance.
+constexpr double kMinimumJerkRadiusCm = 100.0;
 constexpr double kSampleMaximumDelaySeconds = 0.05;
 constexpr double kMaximumPresenterStepSeconds = 0.1;
 constexpr int kMaximumPresenterSubsteps = 12;
@@ -410,6 +413,19 @@ struct Diagnostics final {
   // How far the anchor moves in one Game tick, in tenths of a centimetre. The
   // scale the two jitter numbers must be compared against.
   std::atomic<std::uint64_t> car_step_dcm{};
+  // Judder instrument. The second difference of the eye's offset from the car,
+  // divided by the distance to the car and reported as an angle: how far this
+  // frame's motion departs from a straight continuation of the previous two.
+  // A smooth orbit still produces a small, slowly varying value, so the panel
+  // shows the peak next to the average. Judder makes the peak run away from the
+  // average; smooth-but-fast motion does not. Tenths of a degree.
+  std::atomic<std::uint64_t> render_jerk_peak_ddeg{};
+  std::atomic<std::uint64_t> render_jerk_sum_ddeg{};
+  std::atomic<std::uint64_t> render_jerk_count{};
+  // Game-tick interval in nanoseconds, floor and peak over the window. The host
+  // ticks once per frame on this build, so this is also the frame interval.
+  std::atomic<std::uint64_t> tick_interval_min_ns{};
+  std::atomic<std::uint64_t> tick_interval_max_ns{};
 };
 
 // ---------------------------------------------------------------------------
@@ -474,6 +490,10 @@ struct Probe final {
   bool camera_yaw_valid{};
   double camera_minus_bounds_degrees{};
   bool camera_minus_bounds_valid{};
+  // Largest one-tick change of the mesh bound radius the plugin subtracts to
+  // build its "ground point". That subtraction is the only place a mesh bound
+  // still reaches the eye on this game, and only on the vertical axis.
+  double height_step_cm{};
 };
 
 struct DisplayState final {
@@ -550,6 +570,13 @@ struct DisplayState final {
   double probe_bounds_offset_cm{};
   bool probe_bounds_yaw_valid{};
   double probe_camera_minus_bounds_degrees{};
+  bool probe_jerk_valid{};
+  double probe_jerk_peak_degrees{};
+  double probe_jerk_avg_degrees{};
+  double probe_height_step_cm{};
+  bool tick_interval_valid{};
+  double tick_interval_min_ms{};
+  double tick_interval_max_ms{};
 };
 
 // Keep a window peak without a lock. The Game thread resets these between
@@ -739,6 +766,15 @@ struct Context final {
   // camera.
   double probe_bounds_dx_cm{};
   double probe_bounds_dy_cm{};
+  // Probe input: the mesh bound radius that `origin_cm.z = center.z - extent_z`
+  // subtracts, captured by QueryPlayer. Its per-tick change is the vertical bob
+  // the eye inherits from the mesh.
+  double probe_extent_z_cm{};
+  double probe_last_extent_z_cm{};
+  bool probe_have_extent{};
+  // Judder history: [0] is the previous frame's offset, [1] the one before it.
+  double jerk_offset_cm[2][3]{};
+  std::uint32_t jerk_history{};
   std::uint32_t view_snap_reasons{};
   std::uint32_t yaw_source{kYawSourceNone};
   nfs2015_chase_cam::LatencyWindow camera_cost{};
@@ -1620,6 +1656,9 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
         center[axis] = esp.bounds_center[axis];
       }
       extent_z = esp.bounds_extent[2];
+      // The probe measures how much this radius moves tick to tick. It is the
+      // only mesh-bound quantity that still reaches the eye.
+      context.probe_extent_z_cm = static_cast<double>(extent_z);
     }
     // T3.1: the game camera's yaw, sampled by the host on the same Game tick
     // as the car position and delivered as a cached copy. The detour's
@@ -2169,6 +2208,9 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     context.presenter_epoch = sample.epoch;
     context.presenter_last_ns = now_ns;
     context.presenter_accumulator = 0.0;
+    // A reset is a discontinuity: the old history describes a different
+    // trajectory, so it would read as one enormous judder spike.
+    context.jerk_history = 0;
   }
 
   double elapsed =
@@ -2223,12 +2265,45 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   context.presenter_drift.store(context.chase.drift(),
                                 std::memory_order_relaxed);
   double distance2 = 0.0;
+  double offset_cm[3]{};
   for (std::size_t axis = 0; axis < 3; ++axis) {
-    const double delta = location[axis] - sample.anchor_cm[axis];
-    distance2 += delta * delta;
+    offset_cm[axis] = location[axis] - sample.anchor_cm[axis];
+    distance2 += offset_cm[axis] * offset_cm[axis];
   }
-  context.presenter_distance_cm.store(std::sqrt(distance2),
-                                      std::memory_order_relaxed);
+  const double distance_cm = std::sqrt(distance2);
+  context.presenter_distance_cm.store(distance_cm, std::memory_order_relaxed);
+
+  // Judder instrument. The second difference of the eye's offset from the car
+  // is what the eye cannot explain as a continuation of its own motion; a
+  // smooth orbit gives a small, slowly varying value, judder a spiky one.
+  // Divided by the distance to the car it becomes an angle, which is the
+  // quantity the eye actually integrates. This runs once per frame: the
+  // duplicate-pass early return above already filtered the extra calls.
+  if (context.jerk_history >= 2U && distance_cm > kMinimumJerkRadiusCm) {
+    double second_difference2 = 0.0;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const double delta = offset_cm[axis] - 2.0 * context.jerk_offset_cm[0][axis] +
+                           context.jerk_offset_cm[1][axis];
+      second_difference2 += delta * delta;
+    }
+    const double degrees =
+        std::sqrt(second_difference2) / distance_cm *
+        nfs2015_chase::kDegreesPerRadian;
+    if (std::isfinite(degrees) && degrees < 90.0) {
+      const auto tenths = static_cast<std::uint64_t>(degrees * 10.0 + 0.5);
+      RaisePeak(context.diag.render_jerk_peak_ddeg, tenths);
+      context.diag.render_jerk_sum_ddeg.fetch_add(tenths,
+                                                  std::memory_order_relaxed);
+      context.diag.render_jerk_count.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    context.jerk_offset_cm[1][axis] = context.jerk_offset_cm[0][axis];
+    context.jerk_offset_cm[0][axis] = offset_cm[axis];
+  }
+  if (context.jerk_history < 2U) {
+    ++context.jerk_history;
+  }
   return true;
 }
 
@@ -2526,8 +2601,16 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     sample.driving = true;
     sample.epoch = context.sample_epoch;
     if (context.sample_last_ns > 0 && sample.time_ns > context.sample_last_ns) {
-      context.sample_interval_ns.store(sample.time_ns - context.sample_last_ns,
+      const std::int64_t interval_ns =
+          sample.time_ns - context.sample_last_ns;
+      context.sample_interval_ns.store(interval_ns,
                                        std::memory_order_relaxed);
+      // Probe: how steady is the interval the delayed interpolation window is
+      // built from. A jumpy interval puts a per-tick speed change into every
+      // linearly interpolated quantity.
+      const auto interval = static_cast<std::uint64_t>(interval_ns);
+      RaisePeak(context.diag.tick_interval_max_ns, interval);
+      LowerFloor(context.diag.tick_interval_min_ns, interval);
     }
     context.sample_last_ns = sample.time_ns;
     context.car_ring.Write(sample);
@@ -2604,6 +2687,17 @@ void ReleaseProbeSubscription(Context &context) noexcept {
 // `camera_yaw_radians` and `probe_bounds_*` describe the same sample.
 void UpdateProbeYaw(Context &context) noexcept {
   Probe &probe = context.probe;
+  // Vertical bob inherited from the mesh bound radius, measured every tick even
+  // when the camera yaw is unavailable.
+  if (context.probe_have_extent) {
+    const double step =
+        std::fabs(context.probe_extent_z_cm - context.probe_last_extent_z_cm);
+    if (step > probe.height_step_cm) {
+      probe.height_step_cm = step;
+    }
+  }
+  context.probe_last_extent_z_cm = context.probe_extent_z_cm;
+  context.probe_have_extent = true;
   probe.camera_yaw_valid = context.camera_yaw_valid;
   probe.camera_minus_bounds_valid = false;
   if (!context.camera_yaw_valid) {
@@ -2789,6 +2883,32 @@ void UpdateDisplay(Context &context) noexcept {
   context.display.probe_camera_minus_bounds_degrees =
       probe.camera_minus_bounds_valid ? probe.camera_minus_bounds_degrees
                                       : 0.0;
+  const std::uint64_t jerk_count =
+      diag.render_jerk_count.load(std::memory_order_relaxed);
+  const std::uint64_t jerk_sum =
+      diag.render_jerk_sum_ddeg.load(std::memory_order_relaxed);
+  context.display.probe_jerk_valid = jerk_count != 0;
+  context.display.probe_jerk_peak_degrees =
+      static_cast<double>(
+          diag.render_jerk_peak_ddeg.load(std::memory_order_relaxed)) /
+      10.0;
+  context.display.probe_jerk_avg_degrees =
+      jerk_count == 0
+          ? 0.0
+          : static_cast<double>(jerk_sum) /
+                static_cast<double>(jerk_count) / 10.0;
+  context.display.probe_height_step_cm = probe.height_step_cm;
+  const std::uint64_t interval_min_raw =
+      diag.tick_interval_min_ns.load(std::memory_order_relaxed);
+  context.display.tick_interval_valid = interval_min_raw != UINT64_MAX;
+  context.display.tick_interval_min_ms =
+      interval_min_raw == UINT64_MAX
+          ? 0.0
+          : static_cast<double>(interval_min_raw) * 1e-6;
+  context.display.tick_interval_max_ms =
+      static_cast<double>(
+          diag.tick_interval_max_ns.load(std::memory_order_relaxed)) *
+      1e-6;
   context.display.preset = context.preset.load(std::memory_order_acquire);
   context.display.fov_enabled =
       context.fov_enabled.load(std::memory_order_acquire);
@@ -2953,6 +3073,9 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
                                              std::memory_order_relaxed);
   context->diag.render_turn_peak_cdps.store(0, std::memory_order_relaxed);
   context->diag.car_step_dcm.store(0, std::memory_order_relaxed);
+  context->diag.tick_interval_min_ns.store(UINT64_MAX,
+                                           std::memory_order_relaxed);
+  context->diag.tick_interval_max_ns.store(0, std::memory_order_relaxed);
   context->camera_cost.Reset();
   context->camera_ms_last = 0.0;
   // A fresh session re-runs the P0 probe from scratch. Stop already dropped the
@@ -3064,6 +3187,14 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->probe.camera_yaw_step_max_ddeg = 0.0;
         context->probe.camera_yaw_step_sum_ddeg = 0.0;
         context->probe.camera_yaw_step_count = 0;
+        context->probe.height_step_cm = 0.0;
+        context->diag.render_jerk_peak_ddeg.store(0,
+                                                  std::memory_order_relaxed);
+        context->diag.render_jerk_sum_ddeg.store(0, std::memory_order_relaxed);
+        context->diag.render_jerk_count.store(0, std::memory_order_relaxed);
+        context->diag.tick_interval_min_ns.store(UINT64_MAX,
+                                                 std::memory_order_relaxed);
+        context->diag.tick_interval_max_ns.store(0, std::memory_order_relaxed);
         context->diag.slip_max_step_ddeg.store(0,
                                                std::memory_order_relaxed);
         context->update_rate_window = 0.0;
@@ -3142,9 +3273,32 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                      const nfs2015_chase_cam::Localizer &localizer,
                      const DisplayState &display) {
   char line[128]{};
-  // Probe (PLAN-camera-timing.md §8.1). Read-only reconnaissance, so it comes
-  // before everything else: the diagnostics body scrolls and these are the
-  // numbers this round of work is looking at.
+  // Judder instrument and the two defect amplitudes, then the probe. Read-only
+  // reconnaissance, so it comes before everything else: the diagnostics body
+  // scrolls and these are the numbers this round of work is looking at.
+  if (display.probe_jerk_valid) {
+    std::snprintf(line, sizeof(line), "%.2f / %.2f deg",
+                  display.probe_jerk_peak_degrees,
+                  display.probe_jerk_avg_degrees);
+  } else {
+    std::snprintf(line, sizeof(line), "--");
+  }
+  DrawStatusLine(ui, localizer, "diag.jerk",
+                 "Judder: eye 2nd difference, peak / avg, close = smooth",
+                 line);
+  std::snprintf(line, sizeof(line), "%.1f cm", display.probe_height_step_cm);
+  DrawStatusLine(ui, localizer, "diag.height_step",
+                 "Mesh bound radius step per tick, moves the eye up and down",
+                 line);
+  if (display.tick_interval_valid) {
+    std::snprintf(line, sizeof(line), "%.1f / %.1f ms",
+                  display.tick_interval_min_ms, display.tick_interval_max_ms);
+  } else {
+    std::snprintf(line, sizeof(line), "--");
+  }
+  DrawStatusLine(ui, localizer, "diag.tick_interval",
+                 "Game tick interval, min / max, a wide gap jitters samples",
+                 line);
   if (!display.probe_ahud_service) {
     std::snprintf(line, sizeof(line), "no service");
   } else if (display.probe_subscribe_state == kProbeOk) {
