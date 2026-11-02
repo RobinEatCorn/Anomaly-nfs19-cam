@@ -3313,11 +3313,6 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   DrawStatusLine(ui, localizer, "diag.probe_frame_rate",
                  "Probe frames/s vs Game ticks/s, <1.0 leaves steps visible",
                  line);
-  std::snprintf(line, sizeof(line), "%.2f / %.2f deg",
-                display.probe_camera_yaw_step_max_degrees,
-                display.probe_camera_yaw_step_avg_degrees);
-  DrawStatusLine(ui, localizer, "diag.probe_camera_yaw_step",
-                 "Probe camera yaw step per tick, max/avg, >0.3 is noise", line);
   std::snprintf(line, sizeof(line), "%.1f cm", display.probe_bounds_offset_cm);
   DrawStatusLine(ui, localizer, "diag.probe_bounds_offset",
                  "Probe bounds-centre lever arm, <20 cm unusable", line);
@@ -3361,6 +3356,11 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   std::snprintf(line, sizeof(line), "%.1f cm", display.car_step_cm);
   DrawStatusLine(ui, localizer, "diag.car_step",
                  "Anchor step per tick, the scale for the two above", line);
+  std::snprintf(line, sizeof(line), "%.2f / %.2f deg",
+                display.probe_camera_yaw_step_max_degrees,
+                display.probe_camera_yaw_step_avg_degrees);
+  DrawStatusLine(ui, localizer, "diag.probe_camera_yaw_step",
+                 "Game camera yaw step per tick, max/avg, >0.3 is noise", line);
   DrawCountLine(ui, localizer, "diag.snap", "View snaps",
                 display.snap_total);
   static constexpr const char *kSnapKeys[kSnapReasonCount] = {
