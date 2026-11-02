@@ -592,6 +592,7 @@ struct DisplayState final {
   bool roll_only_in_drift{};
   bool diagnostic_flat_pose{};
   bool diagnostic_zero_lag{};
+  double borrow_strength{};
   bool diagnostic_skip_position{};
   bool diagnostic_skip_rotation{};
 
@@ -744,6 +745,10 @@ struct Context final {
   bool borrow_valid{};
   double borrow_lowpass_cm[3]{};
   std::int64_t borrow_last_ns{};
+  // How much of the borrowed high-frequency motion to keep, 0..1. At zero this
+  // is the plain NFS model and the per-tick wobble is back; at one the camera is
+  // locked to what the Game draws.
+  std::atomic<double> borrow_strength{1.0};
   std::atomic_bool fov_enabled{true};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
@@ -1218,6 +1223,8 @@ bool PersistSettings(Context &context) noexcept {
       context.diagnostic_flat_pose.load(std::memory_order_acquire);
   const bool diagnostic_zero_lag =
       context.diagnostic_zero_lag.load(std::memory_order_acquire);
+  const double borrow_strength =
+      context.borrow_strength.load(std::memory_order_acquire);
   const bool diagnostic_skip_position =
       context.diagnostic_skip_position.load(std::memory_order_acquire);
   const bool diagnostic_skip_rotation =
@@ -1262,6 +1269,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
       AppendText(cursor, end, diagnostic_flat_pose ? "true" : "false") &&
+      AppendText(cursor, end, ",\"borrowStrength\":") &&
+      AppendNumber(cursor, end, borrow_strength) &&
       AppendText(cursor, end, ",\"diagnosticZeroLag\":") &&
       AppendText(cursor, end, diagnostic_zero_lag ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticSkipPosition\":") &&
@@ -1300,6 +1309,7 @@ void SetDefaults(Context &context) noexcept {
   context.roll_only_in_drift.store(false, std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.diagnostic_zero_lag.store(false, std::memory_order_release);
+  context.borrow_strength.store(1.0, std::memory_order_release);
   context.diagnostic_skip_position.store(false, std::memory_order_release);
   context.diagnostic_skip_rotation.store(false, std::memory_order_release);
   context.fov_enabled.store(true, std::memory_order_release);
@@ -1440,6 +1450,7 @@ bool LoadSettings(Context &context) noexcept {
   bool roll_only_in_drift = false;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
+  double borrow_strength = 1.0;
   bool diagnostic_skip_position = false;
   bool diagnostic_skip_rotation = false;
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
@@ -1453,6 +1464,8 @@ bool LoadSettings(Context &context) noexcept {
                                       roll_only_in_drift));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticFlatPose",
                                       diagnostic_flat_pose));
+  static_cast<void>(JsonObjectNumber(json, root, "borrowStrength",
+                                     borrow_strength));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticZeroLag",
                                       diagnostic_zero_lag));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticSkipPosition",
@@ -1479,6 +1492,9 @@ bool LoadSettings(Context &context) noexcept {
                                    std::memory_order_release);
   context.diagnostic_flat_pose.store(diagnostic_flat_pose,
                                      std::memory_order_release);
+  context.borrow_strength.store(
+      nfs2015_chase::Clamp(borrow_strength, 0.0, 1.0),
+      std::memory_order_release);
   context.diagnostic_zero_lag.store(diagnostic_zero_lag,
                                     std::memory_order_release);
   context.diagnostic_skip_position.store(diagnostic_skip_position,
@@ -1716,14 +1732,20 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
               if (!context->borrow_valid) {
                 context->borrow_lowpass_cm[axis] = target;
               } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
-                // 0.3 s low-pass: slow enough that the Game's own framing is
-                // removed, fast enough that a drift's push-in still follows.
-                constexpr double kBorrowRate = 3.3;
+                // A ten-hertz high-pass. The wobble this removes is the per
+                // Game-tick one, near 59 Hz; everything that gives the shot its
+                // character, the push-in, the drop, the sway, lives below two
+                // hertz. Separating them by frequency keeps the character and
+                // drops only the wobble. The first attempt crossed over at half
+                // a hertz, took the Game's own camera motion with it, and felt
+                // like a different game.
+                constexpr double kBorrowRate = 63.0;
                 const double blend = 1.0 - std::exp(-kBorrowRate * borrow_dt);
                 context->borrow_lowpass_cm[axis] +=
                     (target - context->borrow_lowpass_cm[axis]) * blend;
                 present_location[axis] +=
-                    target - context->borrow_lowpass_cm[axis];
+                    (target - context->borrow_lowpass_cm[axis]) *
+                    context->borrow_strength.load(std::memory_order_relaxed);
               }
             }
             context->borrow_valid = true;
@@ -3474,6 +3496,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.diagnostic_flat_pose.load(std::memory_order_acquire);
   context.display.diagnostic_zero_lag =
       context.diagnostic_zero_lag.load(std::memory_order_acquire);
+  context.display.borrow_strength =
+      context.borrow_strength.load(std::memory_order_acquire);
   context.display.diagnostic_skip_position =
       context.diagnostic_skip_position.load(std::memory_order_acquire);
   context.display.diagnostic_skip_rotation =
@@ -4289,6 +4313,18 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
       if (ui->checkbox(ui->user, StringView(flat_label), &flat_pose) != 0) {
         context->diagnostic_flat_pose.store(flat_pose != 0,
                                             std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+
+      const std::string borrow_label = context->localizer.Label(
+          "setting.borrow_strength",
+          "Lock to the Game's camera (0 = pure model)", "chase-borrow");
+      float borrow = static_cast<float>(display.borrow_strength);
+      if (ui->slider_float(ui->user, StringView(borrow_label), &borrow, 0.0F,
+                           1.0F) != 0) {
+        context->borrow_strength.store(
+            nfs2015_chase::Clamp(static_cast<double>(borrow), 0.0, 1.0),
+            std::memory_order_release);
         MarkSettingsDirty(*context);
       }
 
