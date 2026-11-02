@@ -420,6 +420,19 @@ struct Diagnostics final {
   std::atomic<std::uint64_t> judder_car_peak_dpx{};
   std::atomic<std::uint64_t> judder_car_sum_dpx{};
   std::atomic<std::uint64_t> judder_car_count{};
+  // Rotation and field of view carry the same kind of residual, in hundredths
+  // of a degree. A point at the centre of the frame cannot see either: rotating
+  // the camera about itself barely moves it, and a lens change scales about it.
+  // These are the channels that a car-centred projection is blind to.
+  std::atomic<std::uint64_t> pitch_peak_cdeg{};
+  std::atomic<std::uint64_t> pitch_sum_cdeg{};
+  std::atomic<std::uint64_t> pitch_count{};
+  std::atomic<std::uint64_t> roll_peak_cdeg{};
+  std::atomic<std::uint64_t> roll_sum_cdeg{};
+  std::atomic<std::uint64_t> roll_count{};
+  std::atomic<std::uint64_t> lens_peak_cdeg{};
+  std::atomic<std::uint64_t> lens_sum_cdeg{};
+  std::atomic<std::uint64_t> lens_count{};
   // Game-tick interval in nanoseconds, floor and peak over the window. The host
   // ticks once per frame on this build, so this is also the frame interval.
   std::atomic<std::uint64_t> tick_interval_min_ns{};
@@ -515,6 +528,16 @@ struct Probe final {
   };
   ScreenTrack track_anchor{};
   ScreenTrack track_car{};
+
+  // The same residual for a single scalar, used for pitch, roll and the lens.
+  struct ScalarTrack final {
+    unsigned count{};
+    double value[2]{};
+    std::int64_t ns[2]{};
+  };
+  ScalarTrack track_pitch{};
+  ScalarTrack track_roll{};
+  ScalarTrack track_lens{};
 };
 
 struct DisplayState final {
@@ -597,6 +620,14 @@ struct DisplayState final {
   bool judder_car_valid{};
   double judder_car_peak_px{};
   double judder_car_avg_px{};
+  bool rotation_valid{};
+  double pitch_peak_degrees{};
+  double pitch_avg_degrees{};
+  double roll_peak_degrees{};
+  double roll_avg_degrees{};
+  bool lens_valid{};
+  double lens_peak_degrees{};
+  double lens_avg_degrees{};
   double probe_height_step_cm{};
   bool tick_interval_valid{};
   double tick_interval_min_ms{};
@@ -2698,6 +2729,62 @@ struct ScreenPointProjector final {
   }
 };
 
+// Residual for a single scalar: this frame's departure from carrying on at the
+// previous rate, multiplied back by the frame time. Returns false when there is
+// not enough history or the frame lengths are implausible.
+bool PushScalarSample(Probe::ScalarTrack &track, const double value,
+                      const std::int64_t now_ns,
+                      double *residual_out) noexcept {
+  if (track.count >= 2U) {
+    const double dt_now = static_cast<double>(now_ns - track.ns[0]) * 1e-9;
+    const double dt_was =
+        static_cast<double>(track.ns[0] - track.ns[1]) * 1e-9;
+    if (dt_now > 0.002 && dt_now < 0.2 && dt_was > 0.002 && dt_was < 0.2) {
+      const double rate_now = (value - track.value[0]) / dt_now;
+      const double rate_was = (track.value[0] - track.value[1]) / dt_was;
+      const double residual = (rate_now - rate_was) * dt_now;
+      if (std::isfinite(residual) && std::fabs(residual) < 180.0) {
+        *residual_out = residual;
+        track.value[1] = track.value[0];
+        track.value[0] = value;
+        track.ns[1] = track.ns[0];
+        track.ns[0] = now_ns;
+        return true;
+      }
+    }
+  }
+  track.value[1] = track.value[0];
+  track.value[0] = value;
+  track.ns[1] = track.ns[0];
+  track.ns[0] = now_ns;
+  if (track.count < 2U) {
+    ++track.count;
+  }
+  return false;
+}
+
+void ResetResidual(std::atomic<std::uint64_t> &peak,
+                   std::atomic<std::uint64_t> &sum,
+                   std::atomic<std::uint64_t> &count) noexcept {
+  peak.store(0, std::memory_order_relaxed);
+  sum.store(0, std::memory_order_relaxed);
+  count.store(0, std::memory_order_relaxed);
+}
+
+void AccumulateResidual(std::atomic<std::uint64_t> &peak,
+                        std::atomic<std::uint64_t> &sum,
+                        std::atomic<std::uint64_t> &count,
+                        const double magnitude,
+                        const double scale) noexcept {
+  if (!std::isfinite(magnitude) || magnitude < 0.0) {
+    return;
+  }
+  const auto units = static_cast<std::uint64_t>(magnitude * scale + 0.5);
+  RaisePeak(peak, units);
+  sum.fetch_add(units, std::memory_order_relaxed);
+  count.fetch_add(1, std::memory_order_relaxed);
+}
+
 void PushScreenSample(const ScreenPointProjector &projector,
                       const double world[3], const std::int64_t now_ns,
                       Probe::ScreenTrack &track,
@@ -2787,6 +2874,34 @@ void ANOMALY_CALL OnProbeFrame(void *user,
                    context->diag.judder_peak_dpx,
                    context->diag.judder_sum_dpx,
                    context->diag.judder_count);
+
+  // Rotation and lens, the two channels a point at the centre cannot see.
+  double residual = 0.0;
+  if (PushScalarSample(
+          probe.track_pitch,
+          context->presenter_pose_rotation[0].load(std::memory_order_relaxed),
+          now_ns, &residual)) {
+    AccumulateResidual(context->diag.pitch_peak_cdeg,
+                       context->diag.pitch_sum_cdeg,
+                       context->diag.pitch_count, std::fabs(residual), 100.0);
+  }
+  if (PushScalarSample(
+          probe.track_roll,
+          context->presenter_pose_rotation[2].load(std::memory_order_relaxed),
+          now_ns, &residual)) {
+    AccumulateResidual(context->diag.roll_peak_cdeg,
+                       context->diag.roll_sum_cdeg,
+                       context->diag.roll_count, std::fabs(residual), 100.0);
+  }
+  if (PushScalarSample(
+          probe.track_lens,
+          static_cast<double>(
+              context->presenter_pose_lens.load(std::memory_order_relaxed)),
+          now_ns, &residual)) {
+    AccumulateResidual(context->diag.lens_peak_cdeg,
+                       context->diag.lens_sum_cdeg,
+                       context->diag.lens_count, std::fabs(residual), 100.0);
+  }
 }
 
 void ReleaseProbeSubscription(Context &context) noexcept {
@@ -3015,6 +3130,46 @@ void UpdateDisplay(Context &context) noexcept {
           ? 0.0
           : static_cast<double>(judder_sum) /
                 static_cast<double>(judder_count) / 10.0;
+  {
+    const std::uint64_t pitch_count =
+        diag.pitch_count.load(std::memory_order_relaxed);
+    const std::uint64_t pitch_sum =
+        diag.pitch_sum_cdeg.load(std::memory_order_relaxed);
+    const std::uint64_t roll_count =
+        diag.roll_count.load(std::memory_order_relaxed);
+    const std::uint64_t roll_sum =
+        diag.roll_sum_cdeg.load(std::memory_order_relaxed);
+    const std::uint64_t lens_count =
+        diag.lens_count.load(std::memory_order_relaxed);
+    const std::uint64_t lens_sum =
+        diag.lens_sum_cdeg.load(std::memory_order_relaxed);
+    context.display.rotation_valid = pitch_count != 0 && roll_count != 0;
+    context.display.pitch_peak_degrees =
+        static_cast<double>(
+            diag.pitch_peak_cdeg.load(std::memory_order_relaxed)) /
+        100.0;
+    context.display.pitch_avg_degrees =
+        pitch_count == 0 ? 0.0
+                         : static_cast<double>(pitch_sum) /
+                               static_cast<double>(pitch_count) / 100.0;
+    context.display.roll_peak_degrees =
+        static_cast<double>(
+            diag.roll_peak_cdeg.load(std::memory_order_relaxed)) /
+        100.0;
+    context.display.roll_avg_degrees =
+        roll_count == 0 ? 0.0
+                        : static_cast<double>(roll_sum) /
+                              static_cast<double>(roll_count) / 100.0;
+    context.display.lens_valid = lens_count != 0;
+    context.display.lens_peak_degrees =
+        static_cast<double>(
+            diag.lens_peak_cdeg.load(std::memory_order_relaxed)) /
+        100.0;
+    context.display.lens_avg_degrees =
+        lens_count == 0 ? 0.0
+                        : static_cast<double>(lens_sum) /
+                              static_cast<double>(lens_count) / 100.0;
+  }
   const std::uint64_t judder_car_count =
       diag.judder_car_count.load(std::memory_order_relaxed);
   const std::uint64_t judder_car_sum =
@@ -3326,6 +3481,18 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->diag.judder_peak_dpx.store(0, std::memory_order_relaxed);
         context->diag.judder_sum_dpx.store(0, std::memory_order_relaxed);
         context->diag.judder_count.store(0, std::memory_order_relaxed);
+        context->diag.judder_car_peak_dpx.store(0, std::memory_order_relaxed);
+        context->diag.judder_car_sum_dpx.store(0, std::memory_order_relaxed);
+        context->diag.judder_car_count.store(0, std::memory_order_relaxed);
+        ResetResidual(context->diag.pitch_peak_cdeg,
+                      context->diag.pitch_sum_cdeg,
+                      context->diag.pitch_count);
+        ResetResidual(context->diag.roll_peak_cdeg,
+                      context->diag.roll_sum_cdeg,
+                      context->diag.roll_count);
+        ResetResidual(context->diag.lens_peak_cdeg,
+                      context->diag.lens_sum_cdeg,
+                      context->diag.lens_count);
         context->diag.tick_interval_min_ns.store(UINT64_MAX,
                                                  std::memory_order_relaxed);
         context->diag.tick_interval_max_ns.store(0, std::memory_order_relaxed);
@@ -3410,33 +3577,34 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   // Judder instrument and the two defect amplitudes, then the probe. Read-only
   // reconnaissance, so it comes before everything else: the diagnostics body
   // scrolls and these are the numbers this round of work is looking at.
+  // Every header value carries its own tag, because these lines have been
+  // confused with each other when the units looked alike.
   if (display.judder_valid) {
-    std::snprintf(line, sizeof(line), "%.1f / %.1f px",
+    std::snprintf(line, sizeof(line), "A %.1f / %.1f px",
                   display.judder_peak_px, display.judder_avg_px);
   } else {
-    std::snprintf(line, sizeof(line), "--");
+    std::snprintf(line, sizeof(line), "A --");
   }
   DrawStatusLine(ui, localizer, "diag.judder",
-                 "Our camera, car anchor through the game projection, px",
-                 line);
-  if (display.judder_car_valid) {
-    std::snprintf(line, sizeof(line), "%.1f / %.1f px",
-                  display.judder_car_peak_px, display.judder_car_avg_px);
+                 "A: anchor through the game projection, peak/avg px", line);
+  if (display.rotation_valid) {
+    std::snprintf(line, sizeof(line), "P %.2f / %.2f  R %.2f / %.2f deg",
+                  display.pitch_peak_degrees, display.pitch_avg_degrees,
+                  display.roll_peak_degrees, display.roll_avg_degrees);
   } else {
-    std::snprintf(line, sizeof(line), "--");
+    std::snprintf(line, sizeof(line), "P --  R --");
   }
-  DrawStatusLine(ui, localizer, "diag.judder_car",
-                 "Raw Game-tick car position through the same projection, px",
-                 line);
-  if (display.tick_interval_valid) {
-    std::snprintf(line, sizeof(line), "%.1f / %.1f ms",
-                  display.tick_interval_min_ms, display.tick_interval_max_ms);
+  DrawStatusLine(ui, localizer, "diag.rotation",
+                 "P/R: pitch and roll residual per frame, peak/avg deg", line);
+  if (display.lens_valid) {
+    std::snprintf(line, sizeof(line), "F %.2f / %.2f deg",
+                  display.lens_peak_degrees, display.lens_avg_degrees);
   } else {
-    std::snprintf(line, sizeof(line), "--");
+    std::snprintf(line, sizeof(line), "F --");
   }
-  DrawStatusLine(ui, localizer, "diag.tick_interval",
-                 "Game tick interval, min / max, a wide gap jitters samples",
-                 line);
+  DrawStatusLine(ui, localizer, "diag.lens_residual",
+                 "F: field of view residual per frame, peak/avg deg", line);
+
   if (!display.probe_ahud_service) {
     std::snprintf(line, sizeof(line), "no service");
   } else if (display.probe_subscribe_state == kProbeOk) {
@@ -3494,7 +3662,23 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   std::snprintf(line, sizeof(line), "%.1f cm", display.car_step_cm);
   DrawStatusLine(ui, localizer, "diag.car_step",
                  "Anchor step per tick, the scale for the two above", line);
-  std::snprintf(line, sizeof(line), "%.1f cm", display.probe_height_step_cm);
+  if (display.judder_car_valid) {
+    std::snprintf(line, sizeof(line), "C %.1f / %.1f px",
+                  display.judder_car_peak_px, display.judder_car_avg_px);
+  } else {
+    std::snprintf(line, sizeof(line), "C --");
+  }
+  DrawStatusLine(ui, localizer, "diag.judder_car",
+                 "C: raw Game-tick car position, same projection, px", line);
+  if (display.tick_interval_valid) {
+    std::snprintf(line, sizeof(line), "T %.1f / %.1f ms",
+                  display.tick_interval_min_ms, display.tick_interval_max_ms);
+  } else {
+    std::snprintf(line, sizeof(line), "T --");
+  }
+  DrawStatusLine(ui, localizer, "diag.tick_interval",
+                 "T: Game tick interval, min / max ms", line);
+  std::snprintf(line, sizeof(line), "H %.1f cm", display.probe_height_step_cm);
   DrawStatusLine(ui, localizer, "diag.height_step",
                  "Mesh bound radius step per tick, moves the eye up and down",
                  line);
