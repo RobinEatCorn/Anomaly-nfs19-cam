@@ -743,18 +743,20 @@ struct Context final {
   // off leaves the Game's own value in place for that half.
   std::atomic_bool diagnostic_skip_position{};
   std::atomic_bool diagnostic_skip_rotation{};
-  // High-frequency borrow from the Game's own camera position. The Game solves
-  // where the car is drawn and puts its camera there; we only have 50 Hz samples
-  // of it and cannot reproduce the instant. Keep the slow part of the Game
-  // camera's offset from the car, which is its framing, and take the fast part,
-  // which is the car-locked truth our samples are missing.
-  bool borrow_valid{};
-  double borrow_lowpass_cm[3]{};
-  std::int64_t borrow_last_ns{};
-  // How much of the borrowed high-frequency motion to keep, 0..1. At zero this
-  // is the plain NFS model and the per-tick wobble is back; at one the camera is
-  // locked to what the Game draws.
-  std::atomic<double> borrow_strength{0.0};
+  // Render-synced car position estimate. The Game draws the car at an instant
+  // our Game-tick samples cannot see, but the Game's own camera position is
+  // produced at that same instant. We low-pass the Game camera's offset from
+  // our sampled car to recover the Game camera's framing, then subtract it
+  // from the Game camera position to approximate where the Game actually drew
+  // the car this frame. The chase model can then anchor itself to that point,
+  // which is the quantity that was missing before.
+  bool game_offset_valid{};
+  double game_offset_cm[3]{};
+  std::int64_t game_offset_last_ns{};
+  // How much of the render-synced car position to use, 0..1. At zero this is
+  // the plain NFS model anchored to the Game-tick sample; at one the model is
+  // anchored to the Game's drawn car position.
+  std::atomic<double> borrow_strength{1.0};
   std::atomic_bool fov_enabled{true};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
@@ -1315,7 +1317,7 @@ void SetDefaults(Context &context) noexcept {
   context.roll_only_in_drift.store(false, std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.diagnostic_zero_lag.store(false, std::memory_order_release);
-  context.borrow_strength.store(0.0, std::memory_order_release);
+  context.borrow_strength.store(1.0, std::memory_order_release);
   context.diagnostic_skip_position.store(false, std::memory_order_release);
   context.diagnostic_skip_rotation.store(false, std::memory_order_release);
   context.fov_enabled.store(true, std::memory_order_release);
@@ -1456,7 +1458,7 @@ bool LoadSettings(Context &context) noexcept {
   bool roll_only_in_drift = false;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
-  double borrow_strength = 0.0;
+  double borrow_strength = 1.0;
   bool diagnostic_skip_position = false;
   bool diagnostic_skip_rotation = false;
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
@@ -2445,6 +2447,59 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     return false;
   }
 
+  // A bumped epoch means the model must restart (world change, teleport,
+  // preset switch). Restart the offset estimate too, so it initialises from
+  // the current frame instead of converging over a third of a second.
+  if (context.presenter_initialized && context.presenter_epoch != sample.epoch) {
+    context.game_offset_valid = false;
+    context.game_offset_last_ns = 0;
+  }
+
+  // Anchor the model to the render-synced car position. The Game-tick sample
+  // is the best measurement we have of the car, but the Game draws the car at
+  // this render instant. The Game camera's own location is produced at that
+  // same instant, so we use it as a reference. See the Context field comment.
+  if (game_eye_cm != nullptr) {
+    const double our_car_cm[3] = {
+        sample.car.position.x * 100.0, sample.car.position.y * 100.0,
+        sample.car.position.z * 100.0};
+    const double borrow_strength =
+        context.borrow_strength.load(std::memory_order_relaxed);
+    const double borrow_dt =
+        context.game_offset_last_ns == 0
+            ? 0.0
+            : static_cast<double>(now_ns - context.game_offset_last_ns) * 1e-9;
+    context.game_offset_last_ns = now_ns;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const double offset = game_eye_cm[axis] - our_car_cm[axis];
+      if (!context.game_offset_valid) {
+        context.game_offset_cm[axis] = offset;
+      } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
+        constexpr double kGameOffsetRate = 3.3;
+        const double blend =
+            1.0 - std::exp(-kGameOffsetRate * borrow_dt);
+        context.game_offset_cm[axis] +=
+            (offset - context.game_offset_cm[axis]) * blend;
+      }
+      // The render-synced car position. `borrow_strength` interpolates
+      // between the plain tick sample and the Game-camera-derived estimate,
+      // so 0 keeps the old behaviour and 1 follows the drawn car.
+      const double raw_est_cm = game_eye_cm[axis] - context.game_offset_cm[axis];
+      const double car_cm =
+          our_car_cm[axis] + (raw_est_cm - our_car_cm[axis]) * borrow_strength;
+      if (axis == 0) {
+        sample.car.position.x = car_cm / 100.0;
+      } else if (axis == 1) {
+        sample.car.position.y = car_cm / 100.0;
+      } else {
+        sample.car.position.z = car_cm / 100.0;
+      }
+      sample.anchor_cm[axis] = car_cm;
+      sample.origin_cm[axis] = car_cm;
+    }
+    context.game_offset_valid = true;
+  }
+
   if (!context.presenter_initialized || context.presenter_epoch != sample.epoch ||
       !context.chase.initialized()) {
     context.chase.Reset(sample.car);
@@ -2493,37 +2548,6 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
               ? static_cast<float>(
                     view.HorizontalFovDegrees(sample.aspect_ratio))
               : 0.0F;
-
-  // Optional high-frequency borrow from the Game's own camera position, done
-  // under the presenter lock so its state is never touched by two render
-  // threads at once. `game_eye_cm` is the Game camera location that the
-  // original view-point function produced for this pass.
-  const double borrow_strength =
-      context.borrow_strength.load(std::memory_order_relaxed);
-  if (game_eye_cm != nullptr && borrow_strength > 0.0) {
-    const double borrow_dt =
-        context.borrow_last_ns == 0
-            ? 0.0
-            : static_cast<double>(now_ns - context.borrow_last_ns) * 1e-9;
-    context.borrow_last_ns = now_ns;
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      const double target = game_eye_cm[axis] - location[axis];
-      if (!context.borrow_valid) {
-        context.borrow_lowpass_cm[axis] = target;
-      } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
-        // Crossing over at 3.3 rad/s keeps the Game camera's framing (the
-        // slow part) out and takes only the fast car-locked motion that our
-        // Game-tick samples miss. See PLAN-camera-timing.md §6.
-        constexpr double kBorrowRate = 3.3;
-        const double blend = 1.0 - std::exp(-kBorrowRate * borrow_dt);
-        context.borrow_lowpass_cm[axis] +=
-            (target - context.borrow_lowpass_cm[axis]) * blend;
-        location[axis] +=
-            (target - context.borrow_lowpass_cm[axis]) * borrow_strength;
-      }
-    }
-    context.borrow_valid = true;
-  }
 
   for (std::size_t axis = 0; axis < 3; ++axis) {
     context.presenter_anchor[axis].store(sample.anchor_cm[axis],
@@ -3707,8 +3731,8 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   context->chase_initialized = false;
   ++context->sample_epoch;
   context->sample_mean_interval_ns.store(0.0, std::memory_order_relaxed);
-  context->borrow_valid = false;
-  context->borrow_last_ns = 0;
+  context->game_offset_valid = false;
+  context->game_offset_last_ns = 0;
   context->car_ring.Clear();
   PublishInactive(*context);
   ReleaseToggleHotkey(*context);
