@@ -3568,6 +3568,56 @@ void DrawCountLine(const AnomalyUiServiceV1 *ui,
   DrawStatusLine(ui, localizer, key, fallback, buffer);
 }
 
+// Which channel is actually twitching, as one word.
+//
+// Four quantities are now measured per frame and they are not in the same unit,
+// so comparing them needs a threshold each: a pixel of car-on-screen wobble is
+// about 0.05 degrees, and a tenth of a degree of rotation or lens is about two
+// pixels. Score each against its own threshold and name the worst one. The
+// point is to stop the loop of reading numbers back and interpreting them.
+enum class JudderChannel {
+  kNone = 0,
+  kPosition,
+  kPitch,
+  kRoll,
+  kLens,
+};
+
+[[nodiscard]] JudderChannel WorstJudderChannel(
+    const DisplayState &display) noexcept {
+  constexpr double kPositionThresholdPx = 2.0;
+  constexpr double kAngleThresholdDegrees = 0.10;
+  JudderChannel worst = JudderChannel::kNone;
+  double score = 1.0;
+  const auto consider = [&score, &worst](const JudderChannel channel,
+                                         const double value,
+                                         const double threshold) {
+    if (!(threshold > 0.0) || !std::isfinite(value)) {
+      return;
+    }
+    const double candidate = value / threshold;
+    if (candidate > score) {
+      score = candidate;
+      worst = channel;
+    }
+  };
+  if (display.judder_valid) {
+    consider(JudderChannel::kPosition, display.judder_avg_px,
+             kPositionThresholdPx);
+  }
+  if (display.rotation_valid) {
+    consider(JudderChannel::kPitch, display.pitch_avg_degrees,
+             kAngleThresholdDegrees);
+    consider(JudderChannel::kRoll, display.roll_avg_degrees,
+             kAngleThresholdDegrees);
+  }
+  if (display.lens_valid) {
+    consider(JudderChannel::kLens, display.lens_avg_degrees,
+             kAngleThresholdDegrees);
+  }
+  return worst;
+}
+
 // T0: the counters behind PLAN-camera-timing.md. Collapsed by default so they
 // do not compete with the settings, but they are the only way to tell a silent
 // degradation (source flip, torn read, dropped tick) from a tuning issue.
@@ -3575,6 +3625,18 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                      const nfs2015_chase_cam::Localizer &localizer,
                      const DisplayState &display) {
   char line[128]{};
+  // One word first: which channel is twitching. Everything below it is the raw
+  // evidence for that verdict.
+  {
+    const JudderChannel channel = WorstJudderChannel(display);
+    const char *fallbacks[5] = {"none yet", "position", "pitch", "roll", "lens"};
+    char key[48]{};
+    std::snprintf(key, sizeof(key), "diag.worst.%d",
+                  static_cast<int>(channel));
+    DrawStatusLine(ui, localizer, key,
+                   fallbacks[static_cast<int>(channel)],
+                   channel == JudderChannel::kNone ? "-" : "<= twitching");
+  }
   // Judder instrument and the two defect amplitudes, then the probe. Read-only
   // reconnaissance, so it comes before everything else: the diagnostics body
   // scrolls and these are the numbers this round of work is looking at.
