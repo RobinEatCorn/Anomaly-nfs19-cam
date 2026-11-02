@@ -417,6 +417,9 @@ struct Diagnostics final {
   std::atomic<std::uint64_t> judder_peak_dpx{};
   std::atomic<std::uint64_t> judder_sum_dpx{};
   std::atomic<std::uint64_t> judder_count{};
+  std::atomic<std::uint64_t> judder_car_peak_dpx{};
+  std::atomic<std::uint64_t> judder_car_sum_dpx{};
+  std::atomic<std::uint64_t> judder_car_count{};
   // Game-tick interval in nanoseconds, floor and peak over the window. The host
   // ticks once per frame on this build, so this is also the frame interval.
   std::atomic<std::uint64_t> tick_interval_min_ns{};
@@ -492,13 +495,26 @@ struct Probe final {
   // Judder: where the game draws the car on screen, in pixels, for the last two
   // frames. Filled from the frame callback, which is the only place the game's
   // projection is available.
-  bool screen_valid{};
-  unsigned screen_count{};
-  // [0] is the newest sample. The timestamps are needed because the frames are
-  // not equally long, and a second difference that ignores that reports frame
-  // jitter as if it were camera jitter.
-  double screen_px[2][2]{};
-  std::int64_t screen_ns[2]{};
+  // Where the game draws a world point this frame, in pixels, for the last two
+  // frames. [0] is the newer. Timestamps are kept because frames are not
+  // equally long, and a residual that ignored that would report frame jitter as
+  // judder.
+  //
+  // Two tracks, because there are two different questions. `anchor` is the car
+  // position this camera was actually built from: its residual is how smooth
+  // our own pipeline is. `car` is the raw newest Game-tick position, which is a
+  // staircase by construction because the Game only moves the pawn once a tick:
+  // its residual is how far that staircase is from what we draw. If only `car`
+  // is rough the picture is fine and the number was an artefact of the
+  // measuring point; if `anchor` is rough the camera itself is moving in steps.
+  struct ScreenTrack final {
+    bool valid{};
+    unsigned count{};
+    double px[2][2]{};
+    std::int64_t ns[2]{};
+  };
+  ScreenTrack track_anchor{};
+  ScreenTrack track_car{};
 };
 
 struct DisplayState final {
@@ -578,6 +594,9 @@ struct DisplayState final {
   bool judder_valid{};
   double judder_peak_px{};
   double judder_avg_px{};
+  bool judder_car_valid{};
+  double judder_car_peak_px{};
+  double judder_car_avg_px{};
   double probe_height_step_cm{};
   bool tick_interval_valid{};
   double tick_interval_min_ms{};
@@ -2664,6 +2683,66 @@ bool ProbeAhudReady(const AnomalyUe5AhudServiceV1 *service) noexcept {
 // touching the engine. That rate is what decides how much of the fixed 1/120
 // step's error remains visible: at 59 fps one substep is half a frame, at 30 fps
 // it is a quarter.
+// One projected world point. The residual is this frame's departure from
+// carrying on at the previous screen velocity, converted back to pixels by
+// multiplying by the frame time: it says how far the point moved differently,
+// and it does not care how long the frame was.
+struct ScreenPointProjector final {
+  const AnomalyUe5AhudFrameV1 *frame;
+
+  [[nodiscard]] bool Project(const double world[3], float screen[2]) const noexcept {
+    if (frame->project(frame->user, world, screen, nullptr) == 0) {
+      return false;
+    }
+    return std::isfinite(screen[0]) && std::isfinite(screen[1]);
+  }
+};
+
+void PushScreenSample(const ScreenPointProjector &projector,
+                      const double world[3], const std::int64_t now_ns,
+                      Probe::ScreenTrack &track,
+                      std::atomic<std::uint64_t> &peak,
+                      std::atomic<std::uint64_t> &sum,
+                      std::atomic<std::uint64_t> &count) noexcept {
+  float screen[2]{};
+  if (!projector.Project(world, screen)) {
+    return;
+  }
+  if (track.count >= 2U) {
+    const double dt_now = static_cast<double>(now_ns - track.ns[0]) * 1e-9;
+    const double dt_was = static_cast<double>(track.ns[0] - track.ns[1]) * 1e-9;
+    if (dt_now > 0.002 && dt_now < 0.2 && dt_was > 0.002 && dt_was < 0.2) {
+      double residual2 = 0.0;
+      for (std::size_t axis = 0; axis < 2; ++axis) {
+        const double velocity_now =
+            (static_cast<double>(screen[axis]) - track.px[0][axis]) / dt_now;
+        const double velocity_was =
+            (track.px[0][axis] - track.px[1][axis]) / dt_was;
+        const double kink = (velocity_now - velocity_was) * dt_now;
+        residual2 += kink * kink;
+      }
+      const double pixels = std::sqrt(residual2);
+      // A reset, a teleport or a camera cut would read as one enormous spike.
+      if (std::isfinite(pixels) && pixels < 2000.0) {
+        const auto tenths = static_cast<std::uint64_t>(pixels * 10.0 + 0.5);
+        RaisePeak(peak, tenths);
+        sum.fetch_add(tenths, std::memory_order_relaxed);
+        count.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
+  track.px[1][0] = track.px[0][0];
+  track.px[1][1] = track.px[0][1];
+  track.ns[1] = track.ns[0];
+  track.px[0][0] = static_cast<double>(screen[0]);
+  track.px[0][1] = static_cast<double>(screen[1]);
+  track.ns[0] = now_ns;
+  if (track.count < 2U) {
+    ++track.count;
+  }
+  track.valid = true;
+}
+
 void ANOMALY_CALL OnProbeFrame(void *user,
                                const AnomalyUe5AhudFrameV1 *frame) noexcept {
   auto *context = static_cast<Context *>(user);
@@ -2673,69 +2752,41 @@ void ANOMALY_CALL OnProbeFrame(void *user,
   ++context->probe.frame_calls;
   ++context->probe.frame_window_calls;
 
-  // Judder instrument. Ask the game where it puts the car on screen this frame,
-  // then take the second difference: how far that pixel position departs from a
-  // straight continuation of the previous two frames. This is the quantity the
-  // eye sees, measured with the same transform the game uses to draw with, so
-  // there is nothing to interpret and nothing to convert. A steady chase shot
-  // gives a small number that stays small; judder makes it spike.
-  if (frame->project == nullptr || frame->user == nullptr ||
-      !context->probe_car_valid.load(std::memory_order_relaxed)) {
-    return;
-  }
-  const double world[3] = {
-      context->probe_car_cm[0].load(std::memory_order_relaxed),
-      context->probe_car_cm[1].load(std::memory_order_relaxed),
-      context->probe_car_cm[2].load(std::memory_order_relaxed)};
-  float screen[2]{};
-  if (frame->project(frame->user, world, screen, nullptr) == 0 ||
-      !std::isfinite(screen[0]) || !std::isfinite(screen[1])) {
+  // Judder instrument. Ask the game where it puts a world point on screen this
+  // frame, using the same projection it draws with, and measure how far that
+  // pixel position departs from carrying on at the previous velocity. Two
+  // points, because the two possible faults need telling apart:
+  //
+  //   anchor  the car position this camera was built from. Rough => the camera
+  //           itself is moving in steps.
+  //   car     the raw newest Game-tick position, which the Game only moves once
+  //           a tick. Rough => the staircase in the data, with the camera
+  //           smooth; the picture would then be fine and this number would be
+  //           an artefact of which point is measured.
+  if (frame->project == nullptr || frame->user == nullptr) {
     return;
   }
   Probe &probe = context->probe;
   const std::int64_t now_ns = NowNanoseconds();
-  if (probe.screen_count >= 2U) {
-    // Frames are not equally long (measured: 16 to 46 ms). A plain second
-    // difference would report that as judder on a perfectly smooth picture, so
-    // measure the change of screen velocity instead and multiply it back by the
-    // frame time: that is this frame's departure from carrying on at the
-    // previous velocity, in pixels. It does not care how long the frame was.
-    const double dt_now =
-        static_cast<double>(now_ns - probe.screen_ns[0]) * 1e-9;
-    const double dt_was =
-        static_cast<double>(probe.screen_ns[0] - probe.screen_ns[1]) * 1e-9;
-    if (dt_now > 0.002 && dt_now < 0.2 && dt_was > 0.002 && dt_was < 0.2) {
-      double residual2 = 0.0;
-      for (std::size_t axis = 0; axis < 2; ++axis) {
-        const double velocity_now =
-            (static_cast<double>(screen[axis]) - probe.screen_px[0][axis]) /
-            dt_now;
-        const double velocity_was =
-            (probe.screen_px[0][axis] - probe.screen_px[1][axis]) / dt_was;
-        const double kink = (velocity_now - velocity_was) * dt_now;
-        residual2 += kink * kink;
-      }
-      const double pixels = std::sqrt(residual2);
-      // A reset, a teleport or a camera cut would read as one enormous spike.
-      if (std::isfinite(pixels) && pixels < 2000.0) {
-        const auto tenths = static_cast<std::uint64_t>(pixels * 10.0 + 0.5);
-        RaisePeak(context->diag.judder_peak_dpx, tenths);
-        context->diag.judder_sum_dpx.fetch_add(tenths,
-                                              std::memory_order_relaxed);
-        context->diag.judder_count.fetch_add(1, std::memory_order_relaxed);
-      }
-    }
+  ScreenPointProjector project{frame};
+  if (context->probe_car_valid.load(std::memory_order_relaxed)) {
+    const double car[3] = {
+        context->probe_car_cm[0].load(std::memory_order_relaxed),
+        context->probe_car_cm[1].load(std::memory_order_relaxed),
+        context->probe_car_cm[2].load(std::memory_order_relaxed)};
+    PushScreenSample(project, car, now_ns, probe.track_car,
+                     context->diag.judder_car_peak_dpx,
+                     context->diag.judder_car_sum_dpx,
+                     context->diag.judder_car_count);
   }
-  probe.screen_px[1][0] = probe.screen_px[0][0];
-  probe.screen_px[1][1] = probe.screen_px[0][1];
-  probe.screen_ns[1] = probe.screen_ns[0];
-  probe.screen_px[0][0] = static_cast<double>(screen[0]);
-  probe.screen_px[0][1] = static_cast<double>(screen[1]);
-  probe.screen_ns[0] = now_ns;
-  if (probe.screen_count < 2U) {
-    ++probe.screen_count;
-  }
-  probe.screen_valid = true;
+  const double anchor[3] = {
+      context->presenter_anchor[0].load(std::memory_order_relaxed),
+      context->presenter_anchor[1].load(std::memory_order_relaxed),
+      context->presenter_anchor[2].load(std::memory_order_relaxed)};
+  PushScreenSample(project, anchor, now_ns, probe.track_anchor,
+                   context->diag.judder_peak_dpx,
+                   context->diag.judder_sum_dpx,
+                   context->diag.judder_count);
 }
 
 void ReleaseProbeSubscription(Context &context) noexcept {
@@ -2964,6 +3015,20 @@ void UpdateDisplay(Context &context) noexcept {
           ? 0.0
           : static_cast<double>(judder_sum) /
                 static_cast<double>(judder_count) / 10.0;
+  const std::uint64_t judder_car_count =
+      diag.judder_car_count.load(std::memory_order_relaxed);
+  const std::uint64_t judder_car_sum =
+      diag.judder_car_sum_dpx.load(std::memory_order_relaxed);
+  context.display.judder_car_valid = judder_car_count != 0;
+  context.display.judder_car_peak_px =
+      static_cast<double>(
+          diag.judder_car_peak_dpx.load(std::memory_order_relaxed)) /
+      10.0;
+  context.display.judder_car_avg_px =
+      judder_car_count == 0
+          ? 0.0
+          : static_cast<double>(judder_car_sum) /
+                static_cast<double>(judder_car_count) / 10.0;
   context.display.probe_height_step_cm = probe.height_step_cm;
   const std::uint64_t interval_min_raw =
       diag.tick_interval_min_ns.load(std::memory_order_relaxed);
@@ -3256,7 +3321,8 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->probe.camera_yaw_step_sum_ddeg = 0.0;
         context->probe.camera_yaw_step_count = 0;
         context->probe.height_step_cm = 0.0;
-        context->probe.screen_count = 0;
+        context->probe.track_anchor.count = 0;
+        context->probe.track_car.count = 0;
         context->diag.judder_peak_dpx.store(0, std::memory_order_relaxed);
         context->diag.judder_sum_dpx.store(0, std::memory_order_relaxed);
         context->diag.judder_count.store(0, std::memory_order_relaxed);
@@ -3351,11 +3417,16 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "--");
   }
   DrawStatusLine(ui, localizer, "diag.judder",
-                 "Car on screen, 2nd difference, peak / avg pixels",
+                 "Our camera, car anchor through the game projection, px",
                  line);
-  std::snprintf(line, sizeof(line), "%.1f cm", display.probe_height_step_cm);
-  DrawStatusLine(ui, localizer, "diag.height_step",
-                 "Mesh bound radius step per tick, moves the eye up and down",
+  if (display.judder_car_valid) {
+    std::snprintf(line, sizeof(line), "%.1f / %.1f px",
+                  display.judder_car_peak_px, display.judder_car_avg_px);
+  } else {
+    std::snprintf(line, sizeof(line), "--");
+  }
+  DrawStatusLine(ui, localizer, "diag.judder_car",
+                 "Raw Game-tick car position through the same projection, px",
                  line);
   if (display.tick_interval_valid) {
     std::snprintf(line, sizeof(line), "%.1f / %.1f ms",
@@ -3423,6 +3494,10 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   std::snprintf(line, sizeof(line), "%.1f cm", display.car_step_cm);
   DrawStatusLine(ui, localizer, "diag.car_step",
                  "Anchor step per tick, the scale for the two above", line);
+  std::snprintf(line, sizeof(line), "%.1f cm", display.probe_height_step_cm);
+  DrawStatusLine(ui, localizer, "diag.height_step",
+                 "Mesh bound radius step per tick, moves the eye up and down",
+                 line);
   std::snprintf(line, sizeof(line), "%.2f / %.2f deg",
                 display.probe_camera_yaw_step_max_degrees,
                 display.probe_camera_yaw_step_avg_degrees);
