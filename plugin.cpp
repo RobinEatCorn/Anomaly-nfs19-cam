@@ -2410,7 +2410,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   // (16.7 ms) and larger than the longest observed within-frame pass gap.
   if (context.presenter_pose_valid.load(std::memory_order_relaxed)) {
     const std::int64_t since = now_ns - context.presenter_pose_ns;
-    if (since >= 0 && since < kPresenterSameFrameNs) {
+    if (since >= -kPresenterSameFrameNs && since < kPresenterSameFrameNs) {
       return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
     }
   }
