@@ -1732,14 +1732,16 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
               if (!context->borrow_valid) {
                 context->borrow_lowpass_cm[axis] = target;
               } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
-                // A ten-hertz high-pass. The wobble this removes is the per
-                // Game-tick one, near 59 Hz; everything that gives the shot its
-                // character, the push-in, the drop, the sway, lives below two
-                // hertz. Separating them by frequency keeps the character and
-                // drops only the wobble. The first attempt crossed over at half
-                // a hertz, took the Game's own camera motion with it, and felt
-                // like a different game.
-                constexpr double kBorrowRate = 63.0;
+                // Crossing over at half a hertz removes the wobble. Crossing
+                // over at ten hertz does not, which was measured: the slider
+                // then did nothing at all, because the correction had been
+                // filtered down to nothing. So the wobble is not per-tick
+                // content, it is a slow mismatch between our estimate of where
+                // the car is and the Game's, at a few hertz, and it sits in the
+                // same band as the camera motion that gives the shot its
+                // character. Frequency cannot separate the two, so the amount
+                // borrowed is the only control there is.
+                constexpr double kBorrowRate = 3.3;
                 const double blend = 1.0 - std::exp(-kBorrowRate * borrow_dt);
                 context->borrow_lowpass_cm[axis] +=
                     (target - context->borrow_lowpass_cm[axis]) * blend;
@@ -3988,6 +3990,10 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   }
   DrawStatusLine(ui, localizer, "diag.lens_residual",
                  "F: field of view residual per frame, peak/avg deg", line);
+  std::snprintf(line, sizeof(line), "B %.2f",
+                display.borrow_strength);
+  DrawStatusLine(ui, localizer, "diag.borrow",
+                 "B: how much of the Game's camera position is borrowed", line);
   if (display.flow_valid) {
     std::snprintf(line, sizeof(line), "W %.2f / %.2f cm",
                   display.flow_peak_cm, display.flow_avg_cm);
