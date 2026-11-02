@@ -132,7 +132,6 @@ constexpr double kUpdateRateWindowSeconds = 0.5;
 constexpr double kMinimumJerkRadiusCm = 100.0;
 constexpr double kSampleMaximumDelaySeconds = 0.05;
 constexpr double kMaximumPresenterStepSeconds = 0.1;
-constexpr int kMaximumPresenterSubsteps = 12;
 // The camera-to-car distance is the direct screen-size driver. Low-pass it so
 // Game-tick sampling/spring phase noise cannot make the car breathe in frame.
 constexpr double kViewDistanceSmoothing = 4.0;
@@ -704,7 +703,6 @@ struct Context final {
   nfs2015_chase::SampleRing car_ring;
   std::atomic_flag presenter_lock = ATOMIC_FLAG_INIT;
   std::int64_t presenter_last_ns{};
-  double presenter_accumulator{};
   std::uint64_t presenter_epoch{};
   bool presenter_initialized{};
   std::int64_t presenter_pose_ns{};
@@ -2207,7 +2205,6 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     context.presenter_initialized = true;
     context.presenter_epoch = sample.epoch;
     context.presenter_last_ns = now_ns;
-    context.presenter_accumulator = 0.0;
     // A reset is a discontinuity: the old history describes a different
     // trajectory, so it would read as one enormous judder spike.
     context.jerk_history = 0;
@@ -2219,23 +2216,21 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     elapsed = 0.0;
   }
   context.presenter_last_ns = now_ns;
-  context.presenter_accumulator += elapsed;
-  // Fixed substeps keep the springs frame-rate independent. The car sample is
-  // the one for this instant, so using it for every substep of the frame is
-  // exact: the sample does not change inside one render call.
-  constexpr double kSubstepSeconds = 1.0 / 120.0;
-  int steps = 0;
-  nfs2015_chase::CameraState view{};
-  while (context.presenter_accumulator >= kSubstepSeconds &&
-         steps < kMaximumPresenterSubsteps) {
-    view = context.chase.Update(kSubstepSeconds, sample.car);
-    context.presenter_accumulator -= kSubstepSeconds;
-    ++steps;
-  }
-  if (steps == 0) {
-    // Same frame or a stall: reuse the model's current pose without stepping.
-    view = context.chase.Update(0.0, sample.car);
-  }
+  // Step the model by the real time that passed. The springs settle with
+  // exp(-rate * dt) (chase_cam.hpp), which solves the differential equation
+  // exactly for any dt, so a variable step is not an approximation here and
+  // there is nothing to keep frame-rate independent.
+  //
+  // The previous version accumulated this time and spent it in fixed 1/120 s
+  // substeps. That made the number of substeps per frame 120 divided by the
+  // frame rate, which is only a whole number at 30, 40 and 60 fps. At any other
+  // rate the count alternates between the two neighbours and the camera's own
+  // advance is quantised: at 45 fps it takes 2, 3, 3 substeps, so the model
+  // moves 16.7, 25, 25 ms of distance in frames that were all equally long, and
+  // the car drifts up to 17 cm back and forth in frame at 30 m/s. That is the
+  // judder: invisible at 60, worst at 45, and proportional to speed, which is
+  // exactly how it has been reported.
+  const nfs2015_chase::CameraState view = context.chase.Update(elapsed, sample.car);
 
   // Scale around the model origin, exactly as the old publish path did, and
   // report the result in world centimetres. The anchor cancels out of this
