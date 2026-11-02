@@ -129,6 +129,12 @@ constexpr double kUpdateRateWindowSeconds = 0.5;
 // How far behind the newest sample the model is fed is one and a half mean tick
 // intervals, decided where the ring is sampled.
 constexpr double kMaximumPresenterStepSeconds = 0.1;
+// Multiple render passes call the detour for one frame. Treat calls
+// closer than this as the same frame so the model advances once per
+// frame, not once per pass. 60 fps frames are 16.7 ms apart and the
+// passes within a frame are usually well under 2 ms, so 8 ms sits in
+// the middle.
+constexpr std::int64_t kPresenterSameFrameNs = 8'000'000;
 // The camera-to-car distance is the direct screen-size driver. Low-pass it so
 // Game-tick sampling/spring phase noise cannot make the car breathe in frame.
 constexpr double kViewDistanceSmoothing = 4.0;
@@ -748,7 +754,7 @@ struct Context final {
   // How much of the borrowed high-frequency motion to keep, 0..1. At zero this
   // is the plain NFS model and the per-tick wobble is back; at one the camera is
   // locked to what the Game draws.
-  std::atomic<double> borrow_strength{1.0};
+  std::atomic<double> borrow_strength{0.0};
   std::atomic_bool fov_enabled{true};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
@@ -1309,7 +1315,7 @@ void SetDefaults(Context &context) noexcept {
   context.roll_only_in_drift.store(false, std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.diagnostic_zero_lag.store(false, std::memory_order_release);
-  context.borrow_strength.store(1.0, std::memory_order_release);
+  context.borrow_strength.store(0.0, std::memory_order_release);
   context.diagnostic_skip_position.store(false, std::memory_order_release);
   context.diagnostic_skip_rotation.store(false, std::memory_order_release);
   context.fov_enabled.store(true, std::memory_order_release);
@@ -1450,7 +1456,7 @@ bool LoadSettings(Context &context) noexcept {
   bool roll_only_in_drift = false;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
-  double borrow_strength = 1.0;
+  double borrow_strength = 0.0;
   bool diagnostic_skip_position = false;
   bool diagnostic_skip_rotation = false;
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
@@ -1560,7 +1566,8 @@ void ReleaseToggleHotkey(Context &context) noexcept {
 // ---------------------------------------------------------------------------
 
 bool AdvancePresenter(Context &context, std::int64_t now_ns,
-                      double location[3], double rotation[3], float *lens,
+                      const double *game_eye_cm, double location[3],
+                      double rotation[3], float *lens,
                       bool *fov_enabled) noexcept;
 
 void RequestPresenterReset(Context &context) noexcept;
@@ -1653,9 +1660,13 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         double present_rotation[3]{};
         float present_lens = 0.0F;
         bool present_fov_enabled = false;
-        if (AdvancePresenter(*context, render_now_ns, present_location,
-                             present_rotation, &present_lens,
-                             &present_fov_enabled)) {
+        // The Game's own position is still in `location` here: the original
+        // ran before us and we have not written yet.
+        const double game_eye_cm[3] = {location[0], location[1],
+                                       location[2]};
+        if (AdvancePresenter(*context, render_now_ns, game_eye_cm,
+                             present_location, present_rotation,
+                             &present_lens, &present_fov_enabled)) {
           // T3.4e: how fast the eye moves *relative to the car*, which is the
           // only thing that can look like twitching. The absolute eye speed is
           // dominated by the car's own travel, so it can never separate a
@@ -1714,43 +1725,10 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
             const bool skip_rotation =
                 context->diagnostic_skip_rotation.load(
                     std::memory_order_relaxed);
-            // The Game's own position is still in `location` here: the
-            // original ran before us and we have not written yet.
-            double game_eye_cm[3]{};
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-              game_eye_cm[axis] = location[axis];
-            }
-            const double borrow_dt =
-                context->borrow_last_ns == 0
-                    ? 0.0
-                    : static_cast<double>(render_now_ns -
-                                          context->borrow_last_ns) *
-                          1e-9;
-            context->borrow_last_ns = render_now_ns;
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-              const double target = game_eye_cm[axis] - present_location[axis];
-              if (!context->borrow_valid) {
-                context->borrow_lowpass_cm[axis] = target;
-              } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
-                // Crossing over at half a hertz removes the wobble. Crossing
-                // over at ten hertz does not, which was measured: the slider
-                // then did nothing at all, because the correction had been
-                // filtered down to nothing. So the wobble is not per-tick
-                // content, it is a slow mismatch between our estimate of where
-                // the car is and the Game's, at a few hertz, and it sits in the
-                // same band as the camera motion that gives the shot its
-                // character. Frequency cannot separate the two, so the amount
-                // borrowed is the only control there is.
-                constexpr double kBorrowRate = 3.3;
-                const double blend = 1.0 - std::exp(-kBorrowRate * borrow_dt);
-                context->borrow_lowpass_cm[axis] +=
-                    (target - context->borrow_lowpass_cm[axis]) * blend;
-                present_location[axis] +=
-                    (target - context->borrow_lowpass_cm[axis]) *
-                    context->borrow_strength.load(std::memory_order_relaxed);
-              }
-            }
-            context->borrow_valid = true;
+            // `AdvancePresenter` applies the Game-camera borrow inside its
+            // lock while producing the pose; when it returned a cached pose
+            // (same frame, or another thread won the lock) the borrow is
+            // already reflected there.
             for (std::size_t axis = 0; axis < 3; ++axis) {
               if (!skip_position) {
                 location[axis] = static_cast<float>(present_location[axis]);
@@ -1844,8 +1822,6 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
   for (std::size_t axis = 0; axis < 3; ++axis) {
     base_cm[axis] = player.position[axis];
   }
-  double center[3] = {player.position[0], player.position[1],
-                      player.position[2]};
   double extent_z = kFallbackPlayerCenterHeightCm;
   AnomalyNtePlayerEspSnapshotV1 esp{sizeof(esp)};
   const bool has_esp =
@@ -1884,9 +1860,6 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
         std::fabs(dz) < 500.0 && esp.bounds_extent[2] > 0.5F &&
         esp.bounds_extent[2] < 1000.0F;
     if (plausible) {
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        center[axis] = esp.bounds_center[axis];
-      }
       extent_z = esp.bounds_extent[2];
       // The probe measures how much this radius moves tick to tick. It is the
       // only mesh-bound quantity that still reaches the eye.
@@ -1906,9 +1879,13 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
   }
   const double origin_offset_cm =
       context.origin_offset_cm.load(std::memory_order_acquire);
-  origin_cm[0] = center[0];
-  origin_cm[1] = center[1];
-  origin_cm[2] = center[2] - extent_z + origin_offset_cm;
+  // The camera model is anchored to the rigid Pawn root. The mesh bounds
+  // centre and extent move with body roll and pitch; anchoring the camera to
+  // them made the eye inherit that motion 1:1, which reads as twitch. Keep the
+  // bounds fields only for the probe, never for the model origin.
+  origin_cm[0] = base_cm[0];
+  origin_cm[1] = base_cm[1];
+  origin_cm[2] = base_cm[2] + origin_offset_cm;
   // The frame callback projects this. The Pawn root, so the measurement is of
   // what the game actually moved, with no mesh bound in it.
   for (std::size_t axis = 0; axis < 3; ++axis) {
@@ -2414,7 +2391,8 @@ void PublishPresenterPose(Context &context, const double location[3],
 // Returns false when there is nothing to present (no sample yet, or another
 // thread is advancing and no cached pose exists).
 bool AdvancePresenter(Context &context, const std::int64_t now_ns,
-                      double location[3], double rotation[3], float *lens,
+                      const double *game_eye_cm, double location[3],
+                      double rotation[3], float *lens,
                       bool *fov_enabled) noexcept {
   if (!TryLockPresenter(context)) {
     return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
@@ -2424,10 +2402,17 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     ~Unlock() { UnlockPresenter(context); }
   } unlock{context};
 
-  if (context.presenter_pose_valid.load(std::memory_order_relaxed) &&
-      now_ns == context.presenter_pose_ns) {
-    // A second pass of the same frame: the model must not advance twice.
-    return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
+  // The detour runs once per render pass, and one frame has many passes. If
+  // every pass advanced the model, the model time would be the pass-to-pass
+  // interval (a noisy fraction of a millisecond), not the frame interval.
+  // Advance once per frame and hand every later pass of that frame the cached
+  // pose. The threshold is smaller than the shortest frame at 60 fps
+  // (16.7 ms) and larger than the longest observed within-frame pass gap.
+  if (context.presenter_pose_valid.load(std::memory_order_relaxed)) {
+    const std::int64_t since = now_ns - context.presenter_pose_ns;
+    if (since >= 0 && since < kPresenterSameFrameNs) {
+      return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
+    }
   }
 
   // Look back one and a half mean intervals. More than one interval keeps the
@@ -2508,6 +2493,37 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
               ? static_cast<float>(
                     view.HorizontalFovDegrees(sample.aspect_ratio))
               : 0.0F;
+
+  // Optional high-frequency borrow from the Game's own camera position, done
+  // under the presenter lock so its state is never touched by two render
+  // threads at once. `game_eye_cm` is the Game camera location that the
+  // original view-point function produced for this pass.
+  const double borrow_strength =
+      context.borrow_strength.load(std::memory_order_relaxed);
+  if (game_eye_cm != nullptr && borrow_strength > 0.0) {
+    const double borrow_dt =
+        context.borrow_last_ns == 0
+            ? 0.0
+            : static_cast<double>(now_ns - context.borrow_last_ns) * 1e-9;
+    context.borrow_last_ns = now_ns;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const double target = game_eye_cm[axis] - location[axis];
+      if (!context.borrow_valid) {
+        context.borrow_lowpass_cm[axis] = target;
+      } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
+        // Crossing over at 3.3 rad/s keeps the Game camera's framing (the
+        // slow part) out and takes only the fast car-locked motion that our
+        // Game-tick samples miss. See PLAN-camera-timing.md §6.
+        constexpr double kBorrowRate = 3.3;
+        const double blend = 1.0 - std::exp(-kBorrowRate * borrow_dt);
+        context.borrow_lowpass_cm[axis] +=
+            (target - context.borrow_lowpass_cm[axis]) * blend;
+        location[axis] +=
+            (target - context.borrow_lowpass_cm[axis]) * borrow_strength;
+      }
+    }
+    context.borrow_valid = true;
+  }
 
   for (std::size_t axis = 0; axis < 3; ++axis) {
     context.presenter_anchor[axis].store(sample.anchor_cm[axis],

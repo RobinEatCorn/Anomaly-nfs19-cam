@@ -586,5 +586,38 @@ int main() {
     ExpectNear("extrapolating never runs backwards", out.car.position.x, 10.0,
                1e-9);
   }
+  {
+    // AtSmooth is a non-uniform Catmull-Rom: with irregular tick intervals the
+    // classic uniform tangent makes the time derivative jump at every knot by
+    // span_prev / span_next, which is a speed step and therefore judder. The
+    // two samples either side of the knot must see the same velocity.
+    nfs2015_chase::CarSample p0;
+    p0.time_ns = 0;
+    p0.car.position = {0.0, 0.0, 0.0};
+    nfs2015_chase::CarSample p1 = p0;
+    p1.time_ns = 1'000'000;  // 1 ms
+    p1.car.position = {1.0, 0.0, 0.0};
+    nfs2015_chase::CarSample p2 = p0;
+    p2.time_ns = 3'000'000;  // 3 ms
+    p2.car.position = {4.0, 0.0, 0.0};
+    nfs2015_chase::CarSample p3 = p0;
+    p3.time_ns = 6'000'000;  // 6 ms
+    p3.car.position = {10.0, 0.0, 0.0};
+    nfs2015_chase::SampleRing ring;
+    ring.Write(p0);
+    ring.Write(p1);
+    ring.Write(p2);
+    ring.Write(p3);
+    nfs2015_chase::CarSample before;
+    nfs2015_chase::CarSample after;
+    Expect("smooth curve samples around the knot",
+           ring.AtSmooth(2'999'000, before) &&
+               ring.AtSmooth(3'001'000, after));
+    const double dt = 2e-6;
+    const double velocity = (after.car.position.x - before.car.position.x) / dt;
+    // True time derivative at p2: (p3 - p1) / (t3 - t1) = 9 m / 5 ms = 1800 m/s.
+    ExpectNear("irregular tick smooth velocity is continuous", velocity,
+               1800.0, 1.0);
+  }
   return 0;
 }

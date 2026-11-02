@@ -193,10 +193,30 @@ class SampleRing final {
             ? view.slots[newer2_index].car.position
             : Sub(Add(p2, p2), p1);
 
-    // Uniform Catmull-Rom tangents, rescaled to this span so an irregular tick
-    // does not change the curve's shape.
-    const Vec3 m1 = Mul(Sub(p2, p0), 0.5);
-    const Vec3 m2 = Mul(Sub(p3, p1), 0.5);
+    // Non-uniform Catmull-Rom tangents: the derivatives are taken with respect
+    // to real time, then expressed in the Hermite basis of this span. With a
+    // uniform tick this reduces to the classic 0.5 * (next - previous). With an
+    // irregular tick, the classic uniform tangent makes the *time* derivative
+    // jump at every knot by span_prev / span_next, which is exactly a speed
+    // step and therefore judder.
+    const bool have_p0 =
+        has_older && view.slots[older2_index].epoch == older.epoch;
+    const bool have_p3 =
+        has_newer && view.slots[newer2_index].epoch == newer.epoch;
+    const std::int64_t dt0 =
+        have_p0 ? older.time_ns - view.slots[older2_index].time_ns : span;
+    const std::int64_t dt2 =
+        have_p3 ? view.slots[newer2_index].time_ns - newer.time_ns : span;
+    const double w0 = dt0 > 0
+                          ? static_cast<double>(span) /
+                                static_cast<double>(span + dt0)
+                          : 0.5;
+    const double w2 = dt2 > 0
+                          ? static_cast<double>(span) /
+                                static_cast<double>(span + dt2)
+                          : 0.5;
+    const Vec3 m1 = Mul(Sub(p2, p0), w0);
+    const Vec3 m2 = Mul(Sub(p3, p1), w2);
     const double s2 = s * s;
     const double s3 = s2 * s;
     const double h00 = 2.0 * s3 - 3.0 * s2 + 1.0;
