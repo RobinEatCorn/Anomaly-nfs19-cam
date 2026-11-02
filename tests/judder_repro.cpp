@@ -89,6 +89,10 @@ struct Clock final {
   // Every `hitch_period` ticks, the interval is multiplied by `hitch_factor`.
   int hitch_period = 0;
   double hitch_factor = 3.0;
+  // The stamp we give the sample, relative to the instant the trajectory was
+  // actually sampled. The plugin stamps samples with the time its own tick
+  // handler ran, not the time the Game captured the transform.
+  double stamp_noise = 0.0;
 
   double Next(Random &random, int index) const noexcept {
     double interval = mean + (random.Next() - 0.5) * 2.0 * jitter;
@@ -168,9 +172,9 @@ Result Run(const Path &path, const Clock &tick_clock, const Clock &frame_clock,
   ChaseCam chase;
   Result result;
 
-  auto make_sample = [&path](double t) {
+  auto make_sample = [&path](double t, double stamp) {
     CarSample sample{};
-    sample.time_ns = static_cast<std::int64_t>(std::llround(t * 1e9));
+    sample.time_ns = static_cast<std::int64_t>(std::llround(stamp * 1e9));
     sample.car = path.At(t);
     for (int axis = 0; axis < 3; ++axis) {
       const double value = axis == 0 ? sample.car.position.x
@@ -195,7 +199,7 @@ Result Run(const Path &path, const Clock &tick_clock, const Clock &frame_clock,
   for (int index = 0; index < 6; ++index) {
     tick_time += tick_clock.Next(tick_random, index);
     last_interval = tick_time - (index == 0 ? 0.0 : tick_time - last_interval);
-    ring.Write(make_sample(tick_time));
+    ring.Write(make_sample(tick_time, tick_time));
   }
   {
     // Recompute the mean from the seeded intervals.
@@ -236,7 +240,12 @@ Result Run(const Path &path, const Clock &tick_clock, const Clock &frame_clock,
       last_interval = interval;
       // A slow running average, as the plugin's smoothed delay would have.
       mean_interval += (interval - mean_interval) * 0.02;
-      const CarSample fresh = make_sample(next_tick - interval);
+      const double stamp =
+          next_tick - interval + (tick_clock.stamp_noise > 0.0
+                                      ? (tick_random.Next() - 0.5) * 2.0 *
+                                            tick_clock.stamp_noise
+                                      : 0.0);
+      const CarSample fresh = make_sample(next_tick - interval, stamp);
       ring.Write(fresh);
       second_newest = newest;
       newest = fresh;
@@ -421,6 +430,17 @@ int main() {
     city.hitch_factor = 2.2;
     for (int lag = 0; lag < kModes; ++lag) {
       Report(names[lag], Run(path, city, frame_clock, lag, false));
+    }
+  }
+
+  std::printf("city, jitter, hitches, and a 1.5 ms error in the sample stamp\n");
+  {
+    Clock stamped = tick_clock;
+    stamped.mean = 0.0170;
+    stamped.jitter = 0.0015;
+    stamped.stamp_noise = 0.0015;
+    for (int lag = 0; lag < kModes; ++lag) {
+      Report(names[lag], Run(path, stamped, frame_clock, lag, false));
     }
   }
 

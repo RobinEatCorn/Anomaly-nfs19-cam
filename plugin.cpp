@@ -2378,9 +2378,15 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   nfs2015_chase::CarSample sample;
   const bool zero_lag =
       context.diagnostic_zero_lag.load(std::memory_order_relaxed);
+  // The curved sample, not the linear one. Linear interpolation is continuous
+  // in position and discontinuous in velocity, so the eye's speed steps at every
+  // Game tick and the whole world's flow rate steps with it. The projection
+  // instrument cannot see that: it projects the car, which travels with the
+  // camera, so the car stays still while the picture jolts. W, the camera's own
+  // speed jump, is the number that sees it, and this curve is what it is for.
   const bool sampled =
       zero_lag ? context.car_ring.Latest(sample)
-               : context.car_ring.AtExtrapolating(
+               : context.car_ring.AtSmooth(
                      now_ns - static_cast<std::int64_t>(delay_ns), sample);
   if (!sampled) {
     return false;
