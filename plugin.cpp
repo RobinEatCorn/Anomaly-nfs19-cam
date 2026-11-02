@@ -494,7 +494,11 @@ struct Probe final {
   // projection is available.
   bool screen_valid{};
   unsigned screen_count{};
+  // [0] is the newest sample. The timestamps are needed because the frames are
+  // not equally long, and a second difference that ignores that reports frame
+  // jitter as if it were camera jitter.
   double screen_px[2][2]{};
+  std::int64_t screen_ns[2]{};
 };
 
 struct DisplayState final {
@@ -2689,26 +2693,45 @@ void ANOMALY_CALL OnProbeFrame(void *user,
     return;
   }
   Probe &probe = context->probe;
+  const std::int64_t now_ns = NowNanoseconds();
   if (probe.screen_count >= 2U) {
-    const double dx =
-        static_cast<double>(screen[0]) - 2.0 * probe.screen_px[0][0] +
-        probe.screen_px[1][0];
-    const double dy =
-        static_cast<double>(screen[1]) - 2.0 * probe.screen_px[0][1] +
-        probe.screen_px[1][1];
-    const double pixels = std::sqrt(dx * dx + dy * dy);
-    // A reset or a teleport would read as one enormous spike.
-    if (std::isfinite(pixels) && pixels < 2000.0) {
-      const auto tenths = static_cast<std::uint64_t>(pixels * 10.0 + 0.5);
-      RaisePeak(context->diag.judder_peak_dpx, tenths);
-      context->diag.judder_sum_dpx.fetch_add(tenths, std::memory_order_relaxed);
-      context->diag.judder_count.fetch_add(1, std::memory_order_relaxed);
+    // Frames are not equally long (measured: 16 to 46 ms). A plain second
+    // difference would report that as judder on a perfectly smooth picture, so
+    // measure the change of screen velocity instead and multiply it back by the
+    // frame time: that is this frame's departure from carrying on at the
+    // previous velocity, in pixels. It does not care how long the frame was.
+    const double dt_now =
+        static_cast<double>(now_ns - probe.screen_ns[0]) * 1e-9;
+    const double dt_was =
+        static_cast<double>(probe.screen_ns[0] - probe.screen_ns[1]) * 1e-9;
+    if (dt_now > 0.002 && dt_now < 0.2 && dt_was > 0.002 && dt_was < 0.2) {
+      double residual2 = 0.0;
+      for (std::size_t axis = 0; axis < 2; ++axis) {
+        const double velocity_now =
+            (static_cast<double>(screen[axis]) - probe.screen_px[0][axis]) /
+            dt_now;
+        const double velocity_was =
+            (probe.screen_px[0][axis] - probe.screen_px[1][axis]) / dt_was;
+        const double kink = (velocity_now - velocity_was) * dt_now;
+        residual2 += kink * kink;
+      }
+      const double pixels = std::sqrt(residual2);
+      // A reset, a teleport or a camera cut would read as one enormous spike.
+      if (std::isfinite(pixels) && pixels < 2000.0) {
+        const auto tenths = static_cast<std::uint64_t>(pixels * 10.0 + 0.5);
+        RaisePeak(context->diag.judder_peak_dpx, tenths);
+        context->diag.judder_sum_dpx.fetch_add(tenths,
+                                              std::memory_order_relaxed);
+        context->diag.judder_count.fetch_add(1, std::memory_order_relaxed);
+      }
     }
   }
   probe.screen_px[1][0] = probe.screen_px[0][0];
   probe.screen_px[1][1] = probe.screen_px[0][1];
+  probe.screen_ns[1] = probe.screen_ns[0];
   probe.screen_px[0][0] = static_cast<double>(screen[0]);
   probe.screen_px[0][1] = static_cast<double>(screen[1]);
+  probe.screen_ns[0] = now_ns;
   if (probe.screen_count < 2U) {
     ++probe.screen_count;
   }
