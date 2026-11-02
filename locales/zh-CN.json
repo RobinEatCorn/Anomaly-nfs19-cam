@@ -46,7 +46,7 @@
     "setting.diagnostics": "诊断计数",
     "diag.detour_rate": "渲染调用 / 游戏 tick",
     "diag.tick_cost": "相机 tick 耗时（当帧/均值/p99/峰值）",
-    "diag.jerk": "抖动指标：眼相对车身位置的二阶变化 最高 / 平均（两数接近=平滑公转；最高远大于平均=有抖动）",
+    "diag.judder": "车在画面里的抖动：游戏自己把车投到屏幕上的像素位置，逐帧二阶变化 最高 / 平均；最高超过 2 px 就是肉眼可见的抖",
     "diag.height_step": "游戏给的车身包围半径每 tick 最大变化（相机高度跟着它上下，这是唯一还留着车体裁剪盒影响的轴）",
     "diag.tick_interval": "游戏 tick 间隔 最低 / 最高（两数差大 = 插值窗口在跳，每个插值量都会有速度突变）",
     "diag.probe_frame_rate": "探针 每帧时机 / 游戏 tick 每秒次数（<1.0 时定步长误差看得见；code N = 订阅失败；no service = 宿主没这个特性）",
