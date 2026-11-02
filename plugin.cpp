@@ -736,6 +736,14 @@ struct Context final {
   // off leaves the Game's own value in place for that half.
   std::atomic_bool diagnostic_skip_position{};
   std::atomic_bool diagnostic_skip_rotation{};
+  // High-frequency borrow from the Game's own camera position. The Game solves
+  // where the car is drawn and puts its camera there; we only have 50 Hz samples
+  // of it and cannot reproduce the instant. Keep the slow part of the Game
+  // camera's offset from the car, which is its framing, and take the fast part,
+  // which is the car-locked truth our samples are missing.
+  bool borrow_valid{};
+  double borrow_lowpass_cm[3]{};
+  std::int64_t borrow_last_ns{};
   std::atomic_bool fov_enabled{true};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
@@ -1686,6 +1694,35 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
             const bool skip_rotation =
                 context->diagnostic_skip_rotation.load(
                     std::memory_order_relaxed);
+            // The Game's own position is still in `location` here: the
+            // original ran before us and we have not written yet.
+            double game_eye_cm[3]{};
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+              game_eye_cm[axis] = location[axis];
+            }
+            const double borrow_dt =
+                context->borrow_last_ns == 0
+                    ? 0.0
+                    : static_cast<double>(render_now_ns -
+                                          context->borrow_last_ns) *
+                          1e-9;
+            context->borrow_last_ns = render_now_ns;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+              const double target = game_eye_cm[axis] - present_location[axis];
+              if (!context->borrow_valid) {
+                context->borrow_lowpass_cm[axis] = target;
+              } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
+                // 0.3 s low-pass: slow enough that the Game's own framing is
+                // removed, fast enough that a drift's push-in still follows.
+                constexpr double kBorrowRate = 3.3;
+                const double blend = 1.0 - std::exp(-kBorrowRate * borrow_dt);
+                context->borrow_lowpass_cm[axis] +=
+                    (target - context->borrow_lowpass_cm[axis]) * blend;
+                present_location[axis] +=
+                    target - context->borrow_lowpass_cm[axis];
+              }
+            }
+            context->borrow_valid = true;
             for (std::size_t axis = 0; axis < 3; ++axis) {
               if (!skip_position) {
                 location[axis] = static_cast<float>(present_location[axis]);
@@ -3615,6 +3652,8 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   context->chase_initialized = false;
   ++context->sample_epoch;
   context->sample_mean_interval_ns.store(0.0, std::memory_order_relaxed);
+  context->borrow_valid = false;
+  context->borrow_last_ns = 0;
   context->car_ring.Clear();
   PublishInactive(*context);
   ReleaseToggleHotkey(*context);
