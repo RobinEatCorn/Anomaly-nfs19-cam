@@ -413,80 +413,67 @@ struct Diagnostics final {
 };
 
 // ---------------------------------------------------------------------------
-// P0 probe (PLAN-camera-timing.md §8). Read-only reconnaissance, not camera
-// code. It answers four questions before anything is built on top of them:
-//   1. are the reflected functions this game needs actually there;
-//   2. can the plugin get the Pawn's `ue5.objects` handle;
-//   3. does the host's once-per-frame callback really fire once per frame;
-//   4. can a callback call back into the engine (ProcessEvent re-entry), and
-//      how far is the car's own yaw from the game camera yaw we chase today.
+// Probe (PLAN-camera-timing.md §8.1). Read-only reconnaissance, not camera
+// code. It answers two questions that decide what to build next:
+//   1. does the host's once-per-frame callback really fire once per frame, and
+//      what is the frame-rate to Game-tick ratio (the size of the quantisation
+//      error a fixed 1/120 step leaves behind);
+//   2. is there a car-yaw source that does not come from the game camera, and
+//      how noisy is the game camera's yaw anyway.
 // Nothing here feeds the chase model, so a failed probe cannot change what the
 // player sees; it only prints numbers.
+//
+// This version targets Anomaly v2.5.0. That ABI has `anomaly.ue5.ahud` but
+// neither `nte.player.get_object_handles` nor `ProcessEvent.invoke`, so asking
+// the engine for the car's own rotation is not available; see §8.2. Everything
+// below is built from data v2.5.0 already publishes.
 // ---------------------------------------------------------------------------
-constexpr std::size_t kProbeRotation = 0;
-constexpr std::size_t kProbeVelocity = 1;
-constexpr std::size_t kProbeHud = 2;
-constexpr std::size_t kProbeFunctionCount = 3;
 constexpr std::uint8_t kProbeUnset = 0;
 constexpr std::uint8_t kProbeOk = 1;
 constexpr std::uint8_t kProbeMissing = 2;
-// The running host's service table does not cover the field at all, i.e. the
-// host binary predates the extension. Distinct from "the call failed", because
-// the fix is to rebuild the host, not to retry.
-constexpr std::uint8_t kProbeNoField = 3;
-// offsetof + sizeof of `get_object_handles`, computed at compile time so the
-// panel can compare it with the struct_size the running host actually
-// published (64 before the extension, 72 after).
-constexpr std::uint32_t kProbePlayerHandlesEnd =
-    offsetof(AnomalyNtePlayerServiceV1, get_object_handles) +
-    sizeof(AnomalyNtePlayerServiceV1::get_object_handles);
-// UFunction::ParmsSize for a Blueprint accessor that returns a 24-byte struct
-// (three doubles). The host itself validates K2_GetActorLocation as NumParms 1,
-// ParmsSize 24, ReturnValue at offset 0 with three doubles, so the rotation
-// getter on the same class is expected to match. The probe measures the real
-// value instead of trusting that: `invoke` reports BUFFER_TOO_SMALL until the
-// buffer is at least ParmsSize, so a binary search recovers it exactly.
-constexpr std::uint32_t kProbeBufferBytes = 32;
-constexpr const char *kProbeFunctionPaths[kProbeFunctionCount] = {
-    "/Script/Engine.Actor.K2_GetActorRotation",
-    "/Script/Engine.Actor.GetVelocity",
-    "/Script/Engine.HUD.ReceiveDrawHUD"};
+// Half a metre of headroom over any real car: a bounds offset longer than this
+// is not a body-frame lever arm, it is a broken sample.
+constexpr double kProbeMaximumBoundsOffsetCm = 300.0;
+// Below this the direction of the bounds offset is dominated by suspension and
+// quantisation noise, so the candidate angle is not reported at all.
+constexpr double kProbeMinimumBoundsOffsetCm = 20.0;
 
 struct Probe final {
-  // One-time resolution, Game thread only.
-  std::uint8_t function_state[kProbeFunctionCount]{};
-  AnomalyGenerationHandleV1 function[kProbeFunctionCount]{};
-  std::uint32_t parms_size[kProbeFunctionCount]{};
-  std::uint32_t resolve_attempts{};
-  double next_resolve_elapsed{};
-  bool resolved{};
-  std::uint32_t handle_attempts{};
-  double next_handle_elapsed{};
-  std::uint8_t handle_state{};
-  std::uint32_t handle_code{};
-  // The player service's own struct_size, read every tick: it is zero when the
-  // service is missing and smaller than kProbePlayerHandlesEnd on an old host.
-  std::uint32_t player_struct_size{};
-  AnomalyGenerationHandleV1 pawn{};
+  // Once-per-frame subscription. `anomaly.ue5.ahud` exists in v2.5.0.
   std::uint32_t subscribe_attempts{};
   double next_subscribe_elapsed{};
   std::uint8_t subscribe_state{};
   std::uint32_t subscribe_code{};
   bool subscribed{};
   AnomalyGenerationHandleV1 subscription{};
-  bool parms_probed{};
   // Per-frame window. The host serialises the callback on the Game thread, so
   // the callback and the Game tick never touch these at the same time.
   std::uint64_t frame_calls{};
   std::uint64_t frame_window_calls{};
   double frame_window_elapsed{};
   double frame_hz{};
-  std::uint64_t invoke_ok{};
-  std::uint64_t invoke_failed{};
-  std::uint32_t invoke_code{};
-  bool yaw_valid{};
-  double car_yaw_degrees{};
-  double yaw_gap_degrees{};
+
+  // Game-camera yaw noise, in tenths of a degree per Game tick. If this is not
+  // far below the slip-angle step the model already shows, the camera's own
+  // jitter is entering the model as "car yaw".
+  double camera_yaw_step_max_ddeg{};
+  double camera_yaw_step_sum_ddeg{};
+  std::uint32_t camera_yaw_step_count{};
+  double camera_yaw_step_avg_ddeg{};
+  double last_camera_yaw_degrees{};
+  bool have_last_camera_yaw{};
+
+  // Body-yaw candidate taken from `bounds_center - player.position`, i.e. a
+  // fixed vector in the car's own frame that therefore rotates with the body
+  // and has nothing to do with the camera. It only means anything when the
+  // offset is long enough to survive noise, hence the magnitude is reported.
+  double bounds_offset_cm{};
+  double bounds_yaw_degrees{};
+  bool bounds_yaw_valid{};
+  double camera_yaw_degrees{};
+  bool camera_yaw_valid{};
+  double camera_minus_bounds_degrees{};
+  bool camera_minus_bounds_valid{};
 };
 
 struct DisplayState final {
@@ -550,25 +537,19 @@ struct DisplayState final {
   double render_turn_peak_dps{};
   double car_step_cm{};
 
-  // P0 probe. Copied from Context::probe on the Game tick.
-  bool probe_objects_service{};
-  bool probe_events_service{};
+  // Probe. Copied from Context::probe on the Game tick.
   bool probe_ahud_service{};
-  std::uint8_t probe_function_state[kProbeFunctionCount]{};
-  std::uint32_t probe_parms_size[kProbeFunctionCount]{};
-  std::uint8_t probe_handle_state{};
-  std::uint32_t probe_handle_code{};
-  std::uint32_t probe_player_struct_size{};
   std::uint8_t probe_subscribe_state{};
   std::uint32_t probe_subscribe_code{};
   double probe_frame_hz{};
   std::uint64_t probe_frame_calls{};
-  std::uint64_t probe_invoke_ok{};
-  std::uint64_t probe_invoke_failed{};
-  std::uint32_t probe_invoke_code{};
-  bool probe_yaw_valid{};
-  double probe_car_yaw_degrees{};
-  double probe_yaw_gap_degrees{};
+  double probe_camera_yaw_step_max_degrees{};
+  double probe_camera_yaw_step_avg_degrees{};
+  bool probe_camera_yaw_valid{};
+  double probe_camera_yaw_degrees{};
+  double probe_bounds_offset_cm{};
+  bool probe_bounds_yaw_valid{};
+  double probe_camera_minus_bounds_degrees{};
 };
 
 // Keep a window peak without a lock. The Game thread resets these between
@@ -603,10 +584,8 @@ struct Context final {
   const AnomalyNteSessionServiceV1 *session{};
   const AnomalyNtePlayerServiceV1 *player{};
   const AnomalyNteVehicleServiceV1 *vehicle{};
-  // Optional engine access. Only the P0 probe uses these; all three may be
-  // null on a host without the matching feature, and every use is guarded.
-  const AnomalyUe5ObjectsServiceV1 *ue5_objects{};
-  const AnomalyUe5ProcessEventServiceV1 *ue5_events{};
+  // Optional engine access. Only the probe uses this; it may be null on a host
+  // without the `ue5.ahud` feature, and every use is guarded.
   const AnomalyUe5AhudServiceV1 *ahud{};
 
   AnomalyGenerationHandleV1 settings_schema{};
@@ -754,6 +733,12 @@ struct Context final {
   // touches Context::diag atomics.
   Diagnostics diag{};
   Probe probe{};
+  // Probe input: the world XY offset of the bounds centre from the Pawn root,
+  // captured by QueryPlayer on this Game tick. A fixed vector in the car's own
+  // frame, so its direction is a body-yaw candidate that never involves the
+  // camera.
+  double probe_bounds_dx_cm{};
+  double probe_bounds_dy_cm{};
   std::uint32_t view_snap_reasons{};
   std::uint32_t yaw_source{kYawSourceNone};
   nfs2015_chase_cam::LatencyWindow camera_cost{};
@@ -1575,6 +1560,8 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
   handle = {};
   context.camera_yaw_valid = false;
   context.camera_yaw_radians = 0.0;
+  context.probe_bounds_dx_cm = 0.0;
+  context.probe_bounds_dy_cm = 0.0;
   if (!PlayerReady(context.player)) {
     return false;
   }
@@ -1616,6 +1603,14 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
     const double dx = esp.bounds_center[0] - player.position[0];
     const double dy = esp.bounds_center[1] - player.position[1];
     const double dz = esp.bounds_center[2] - player.position[2];
+    // Probe input: the horizontal lever arm of the bounds centre in the car's
+    // own frame. Kept even when the bounds are not plausible enough to use as
+    // an origin, because the probe is asking whether the direction of this
+    // vector is stable, not whether its length is right.
+    if (complete && finite) {
+      context.probe_bounds_dx_cm = dx;
+      context.probe_bounds_dy_cm = dy;
+    }
     const bool plausible =
         complete && finite && dx * dx + dy * dy < 500.0 * 500.0 &&
         std::fabs(dz) < 500.0 && esp.bounds_extent[2] > 0.5F &&
@@ -2566,24 +2561,10 @@ void UpdateCamera(Context &context, const double dt) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// P0 probe (PLAN-camera-timing.md §8). See the `Probe` declaration above for
-// what each number is for. Every entry point here is a no-op until the matching
-// optional service is present, so this block cannot break a working install.
+// Probe (PLAN-camera-timing.md §8.1). See the `Probe` declaration above for
+// what each number is for. Every entry point here is a no-op until
+// `anomaly.ue5.ahud` is published, so this cannot break a working install.
 // ---------------------------------------------------------------------------
-
-bool ProbeObjectsReady(const AnomalyUe5ObjectsServiceV1 *service) noexcept {
-  return HasField<AnomalyUe5ObjectsServiceV1,
-                  decltype(AnomalyUe5ObjectsServiceV1::find_exact)>(
-             service, offsetof(AnomalyUe5ObjectsServiceV1, find_exact)) &&
-         service->find_exact != nullptr;
-}
-
-bool ProbeEventsReady(const AnomalyUe5ProcessEventServiceV1 *service) noexcept {
-  return HasField<AnomalyUe5ProcessEventServiceV1,
-                  decltype(AnomalyUe5ProcessEventServiceV1::invoke)>(
-             service, offsetof(AnomalyUe5ProcessEventServiceV1, invoke)) &&
-         service->invoke != nullptr;
-}
 
 bool ProbeAhudReady(const AnomalyUe5AhudServiceV1 *service) noexcept {
   return HasField<AnomalyUe5AhudServiceV1,
@@ -2592,111 +2573,19 @@ bool ProbeAhudReady(const AnomalyUe5AhudServiceV1 *service) noexcept {
          service->subscribe != nullptr && service->unsubscribe != nullptr;
 }
 
-bool ProbePlayerHandlesReady(const AnomalyNtePlayerServiceV1 *service) noexcept {
-  return HasField<AnomalyNtePlayerServiceV1,
-                  decltype(AnomalyNtePlayerServiceV1::get_object_handles)>(
-             service,
-             offsetof(AnomalyNtePlayerServiceV1, get_object_handles)) &&
-         service->get_object_handles != nullptr;
-}
-
-// `invoke` refuses anything smaller than UFunction::ParmsSize with
-// BUFFER_TOO_SMALL before it touches the buffer, and accepts anything at or
-// above it, so the smallest accepted capacity is the real parameter size. The
-// engine only ever writes ParmsSize bytes into a buffer the caller sized, so
-// every accepted call in this search stays inside `buffer`.
-std::uint32_t SmallestAcceptedParameterSize(
-    const AnomalyUe5ProcessEventServiceV1 &events,
-    const AnomalyGenerationHandleV1 object,
-    const AnomalyGenerationHandleV1 function, std::uint8_t *const buffer,
-    const std::uint32_t capacity) noexcept {
-  if (events.invoke(events.user, object, function, buffer, capacity).code !=
-      ANOMALY_STATUS_V1_OK) {
-    return 0;
-  }
-  std::uint32_t low = 1;
-  std::uint32_t high = capacity;
-  while (low < high) {
-    const std::uint32_t middle = low + (high - low) / 2;
-    const auto status =
-        events.invoke(events.user, object, function, buffer, middle);
-    if (status.code == ANOMALY_STATUS_V1_BUFFER_TOO_SMALL) {
-      low = middle + 1;
-    } else {
-      high = middle;
-    }
-  }
-  return low;
-}
-
 // Runs on the Game thread inside the host's AHUD frame dispatch, i.e. once per
-// rendered frame. It asks the engine for the Pawn's own rotation and compares
-// it with the game camera yaw the chase model uses today. Both the engine call
-// and the comparison are the whole point: the call proves that re-entering
-// ProcessEvent from a host callback is safe here.
+// rendered frame. It only counts, so it measures the real frame rate without
+// touching the engine. That rate is what decides how much of the fixed 1/120
+// step's error remains visible: at 59 fps one substep is half a frame, at 30 fps
+// it is a quarter.
 void ANOMALY_CALL OnProbeFrame(void *user,
                                const AnomalyUe5AhudFrameV1 *frame) noexcept {
   auto *context = static_cast<Context *>(user);
   if (context == nullptr || frame == nullptr) {
     return;
   }
-  Probe &probe = context->probe;
-  ++probe.frame_calls;
-  ++probe.frame_window_calls;
-  const std::uint32_t parms_size = probe.parms_size[kProbeRotation];
-  if (context->ue5_events == nullptr || !ProbeEventsReady(context->ue5_events) ||
-      probe.pawn.id == 0 || probe.function_state[kProbeRotation] != kProbeOk ||
-      parms_size == 0 || parms_size > kProbeBufferBytes) {
-    return;
-  }
-  std::array<std::uint8_t, kProbeBufferBytes> buffer{};
-  const auto status = context->ue5_events->invoke(
-      context->ue5_events->user, probe.pawn, probe.function[kProbeRotation],
-      buffer.data(), parms_size);
-  if (status.code != ANOMALY_STATUS_V1_OK) {
-    ++probe.invoke_failed;
-    probe.invoke_code = status.code;
-    if (status.code == ANOMALY_STATUS_V1_NOT_FOUND) {
-      // The Pawn was replaced or destroyed (car swap, respawn). Drop the stale
-      // handle and let the Game tick ask for a fresh one, otherwise every later
-      // frame would report the same failure and the panel would read as if the
-      // route had stopped working.
-      probe.pawn = {};
-      probe.handle_state = kProbeUnset;
-      probe.handle_attempts = 0;
-    }
-    return;
-  }
-  ++probe.invoke_ok;
-  double yaw_degrees = 0.0;
-  if (parms_size == 24) {
-    double value[3]{};
-    std::memcpy(value, buffer.data(), sizeof(value));
-    yaw_degrees = value[1];
-  } else if (parms_size == 12) {
-    float value[3]{};
-    std::memcpy(value, buffer.data(), sizeof(value));
-    yaw_degrees = static_cast<double>(value[1]);
-  } else {
-    // ParmsSize says the layout is not FRotator as expected. Keep counting the
-    // successful calls, but never report a yaw from a guess.
-    probe.invoke_code = ANOMALY_STATUS_V1_FAILED;
-    return;
-  }
-  if (!std::isfinite(yaw_degrees) || std::fabs(yaw_degrees) > 180.5) {
-    probe.yaw_valid = false;
-    return;
-  }
-  probe.car_yaw_degrees = yaw_degrees;
-  probe.yaw_valid = true;
-  if (context->camera_yaw_valid) {
-    const double camera_degrees = context->camera_yaw_radians *
-                                  nfs2015_chase::kDegreesPerRadian;
-    // Shortest arc: the two yaws are the same physical angle on either side of
-    // the +-180 seam.
-    probe.yaw_gap_degrees =
-        std::remainder(yaw_degrees - camera_degrees, 360.0);
-  }
+  ++context->probe.frame_calls;
+  ++context->probe.frame_window_calls;
 }
 
 void ReleaseProbeSubscription(Context &context) noexcept {
@@ -2711,78 +2600,55 @@ void ReleaseProbeSubscription(Context &context) noexcept {
   context.probe.subscription = {};
 }
 
+// Called right after the Game tick has read this tick's snapshots, so
+// `camera_yaw_radians` and `probe_bounds_*` describe the same sample.
+void UpdateProbeYaw(Context &context) noexcept {
+  Probe &probe = context.probe;
+  probe.camera_yaw_valid = context.camera_yaw_valid;
+  probe.camera_minus_bounds_valid = false;
+  if (!context.camera_yaw_valid) {
+    probe.have_last_camera_yaw = false;
+    return;
+  }
+  const double camera_degrees =
+      context.camera_yaw_radians * nfs2015_chase::kDegreesPerRadian;
+  probe.camera_yaw_degrees = camera_degrees;
+  if (probe.have_last_camera_yaw) {
+    // Shortest arc: the yaw crosses +-180 while drifting, and a plain
+    // subtraction would report 360 there.
+    const double step = std::fabs(
+        std::remainder(camera_degrees - probe.last_camera_yaw_degrees, 360.0));
+    if (step > probe.camera_yaw_step_max_ddeg) {
+      probe.camera_yaw_step_max_ddeg = step;
+    }
+    probe.camera_yaw_step_sum_ddeg += step;
+    ++probe.camera_yaw_step_count;
+  }
+  probe.last_camera_yaw_degrees = camera_degrees;
+  probe.have_last_camera_yaw = true;
+
+  const double dx = context.probe_bounds_dx_cm;
+  const double dy = context.probe_bounds_dy_cm;
+  const double offset_cm = std::sqrt(dx * dx + dy * dy);
+  probe.bounds_offset_cm = offset_cm;
+  probe.bounds_yaw_valid =
+      offset_cm >= kProbeMinimumBoundsOffsetCm &&
+      offset_cm <= kProbeMaximumBoundsOffsetCm;
+  if (!probe.bounds_yaw_valid) {
+    return;
+  }
+  probe.bounds_yaw_degrees =
+      std::atan2(dy, dx) * nfs2015_chase::kDegreesPerRadian;
+  probe.camera_minus_bounds_degrees = std::remainder(
+      camera_degrees - probe.bounds_yaw_degrees, 360.0);
+  probe.camera_minus_bounds_valid = true;
+}
+
 void RunProbe(Context &context, const double dt) noexcept {
   Probe &probe = context.probe;
-  probe.player_struct_size =
-      context.player != nullptr ? context.player->struct_size : 0;
-  // 1. Resolve the reflected functions. `ue5.objects` may appear only after
-  //    the profile has validated, so wait for it and retry a few times.
-  if (!probe.resolved && context.ue5_objects != nullptr &&
-      ProbeObjectsReady(context.ue5_objects) &&
-      context.elapsed >= probe.next_resolve_elapsed) {
-    ++probe.resolve_attempts;
-    bool complete = true;
-    for (std::size_t index = 0; index < kProbeFunctionCount; ++index) {
-      if (probe.function_state[index] == kProbeOk) {
-        continue;
-      }
-      AnomalyGenerationHandleV1 handle{};
-      const auto status = context.ue5_objects->find_exact(
-          context.ue5_objects->user, StringView(kProbeFunctionPaths[index]),
-          &handle);
-      if (status.code == ANOMALY_STATUS_V1_OK && handle.id != 0) {
-        probe.function[index] = handle;
-        probe.function_state[index] = kProbeOk;
-      } else {
-        probe.function_state[index] = kProbeMissing;
-        complete = false;
-      }
-    }
-    if (complete || probe.resolve_attempts >= 6) {
-      probe.resolved = true;
-    } else {
-      probe.next_resolve_elapsed = context.elapsed + 2.0;
-    }
-  }
-  // 2. Ask the host for the Pawn's object handle. Game thread only, and it
-  //    needs a live player sample, so a session that starts before the world is
-  //    ready keeps retrying for a while instead of concluding it is missing.
-  if (probe.resolved && probe.handle_state != kProbeOk &&
-      probe.handle_attempts < 20 && context.player != nullptr) {
-    if (!ProbePlayerHandlesReady(context.player)) {
-      // Distinguish "not yet tried" from "this host cannot do it at all".
-      probe.handle_state = kProbeNoField;
-    } else if (context.elapsed >= probe.next_handle_elapsed) {
-      ++probe.handle_attempts;
-      AnomalyGenerationHandleV1 pawn{};
-      const auto status = context.player->get_object_handles(
-          context.player->user, &pawn, nullptr);
-      probe.handle_code = status.code;
-      if (status.code == ANOMALY_STATUS_V1_OK && pawn.id != 0) {
-        probe.pawn = pawn;
-        probe.handle_state = kProbeOk;
-      } else {
-        probe.handle_state = kProbeMissing;
-        probe.next_handle_elapsed = context.elapsed + 2.0;
-      }
-    }
-  }
-  // 3. Measure the real parameter sizes instead of trusting the layout guess.
-  if (probe.handle_state == kProbeOk && !probe.parms_probed &&
-      context.ue5_events != nullptr && ProbeEventsReady(context.ue5_events)) {
-    probe.parms_probed = true;
-    std::array<std::uint8_t, kProbeBufferBytes> buffer{};
-    for (std::size_t index = 0; index < 2; ++index) {
-      if (probe.function_state[index] != kProbeOk) {
-        continue;
-      }
-      probe.parms_size[index] = SmallestAcceptedParameterSize(
-          *context.ue5_events, probe.pawn, probe.function[index],
-          buffer.data(), kProbeBufferBytes);
-    }
-  }
-  // 4. Subscribe to the once-per-frame callback. The binding may still be
-  //    resolving on the first ticks, so retry before calling it missing.
+  UpdateProbeYaw(context);
+  // Subscribe to the once-per-frame callback. The binding may still be
+  // resolving on the first ticks, so retry before calling it missing.
   if (probe.subscribe_state != kProbeOk && probe.subscribe_attempts < 20 &&
       context.ahud != nullptr && ProbeAhudReady(context.ahud) &&
       context.elapsed >= probe.next_subscribe_elapsed) {
@@ -2800,7 +2666,7 @@ void RunProbe(Context &context, const double dt) noexcept {
       probe.next_subscribe_elapsed = context.elapsed + 2.0;
     }
   }
-  // 5. Turn the frame counter into a rate once a second.
+  // Turn the frame counter into a rate once a second.
   if (probe.subscribed && dt > 0.0) {
     probe.frame_window_elapsed += dt;
     if (probe.frame_window_elapsed >= 1.0) {
@@ -2902,32 +2768,27 @@ void UpdateDisplay(Context &context) noexcept {
       static_cast<double>(diag.car_step_dcm.load(std::memory_order_relaxed)) /
       10.0;
   const Probe &probe = context.probe;
-  // Each of these is "the service is published AND the field we need is there".
-  // A published service whose table stops short of `invoke` is an old host, and
-  // reporting that as "on" would send the wrong fix. See kProbeNoField.
-  context.display.probe_objects_service =
-      context.ue5_objects != nullptr && ProbeObjectsReady(context.ue5_objects);
-  context.display.probe_events_service =
-      context.ue5_events != nullptr && ProbeEventsReady(context.ue5_events);
   context.display.probe_ahud_service =
       context.ahud != nullptr && ProbeAhudReady(context.ahud);
-  for (std::size_t index = 0; index < kProbeFunctionCount; ++index) {
-    context.display.probe_function_state[index] = probe.function_state[index];
-    context.display.probe_parms_size[index] = probe.parms_size[index];
-  }
-  context.display.probe_handle_state = probe.handle_state;
-  context.display.probe_handle_code = probe.handle_code;
-  context.display.probe_player_struct_size = probe.player_struct_size;
   context.display.probe_subscribe_state = probe.subscribe_state;
   context.display.probe_subscribe_code = probe.subscribe_code;
   context.display.probe_frame_hz = probe.frame_hz;
   context.display.probe_frame_calls = probe.frame_calls;
-  context.display.probe_invoke_ok = probe.invoke_ok;
-  context.display.probe_invoke_failed = probe.invoke_failed;
-  context.display.probe_invoke_code = probe.invoke_code;
-  context.display.probe_yaw_valid = probe.yaw_valid;
-  context.display.probe_car_yaw_degrees = probe.car_yaw_degrees;
-  context.display.probe_yaw_gap_degrees = probe.yaw_gap_degrees;
+  context.display.probe_camera_yaw_step_max_degrees =
+      probe.camera_yaw_step_max_ddeg;
+  context.display.probe_camera_yaw_step_avg_degrees =
+      probe.camera_yaw_step_count == 0
+          ? 0.0
+          : probe.camera_yaw_step_sum_ddeg /
+                static_cast<double>(probe.camera_yaw_step_count);
+  context.display.probe_camera_yaw_valid = probe.camera_yaw_valid;
+  context.display.probe_camera_yaw_degrees = probe.camera_yaw_degrees;
+  context.display.probe_bounds_offset_cm = probe.bounds_offset_cm;
+  context.display.probe_bounds_yaw_valid = probe.bounds_yaw_valid;
+
+  context.display.probe_camera_minus_bounds_degrees =
+      probe.camera_minus_bounds_valid ? probe.camera_minus_bounds_degrees
+                                      : 0.0;
   context.display.preset = context.preset.load(std::memory_order_acquire);
   context.display.fov_enabled =
       context.fov_enabled.load(std::memory_order_acquire);
@@ -3002,15 +2863,9 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
       ANOMALY_NTE_PLAYER_SERVICE_V1_VERSION);
   context->vehicle = Query<AnomalyNteVehicleServiceV1>(
       host, ANOMALY_NTE_VEHICLE_SERVICE_V1_ID, 1U);
-  // Optional engine access for the P0 probe. All three are declared optional in
-  // the manifest, so a host without the matching feature simply leaves these
-  // null and the probe reports "off" instead of failing the load.
-  context->ue5_objects = Query<AnomalyUe5ObjectsServiceV1>(
-      host, ANOMALY_UE5_OBJECTS_SERVICE_V1_ID,
-      ANOMALY_UE5_OBJECTS_SERVICE_V1_VERSION);
-  context->ue5_events = Query<AnomalyUe5ProcessEventServiceV1>(
-      host, ANOMALY_UE5_PROCESS_EVENT_SERVICE_V1_ID,
-      ANOMALY_UE5_PROCESS_EVENT_SERVICE_V1_VERSION);
+  // Optional engine access for the probe. Declared optional in the manifest, so
+  // a host without `ue5.ahud` simply leaves this null and the probe reports
+  // "off" instead of failing the load.
   context->ahud = Query<AnomalyUe5AhudServiceV1>(
       host, ANOMALY_UE5_AHUD_SERVICE_V1_ID, ANOMALY_UE5_AHUD_SERVICE_V1_VERSION);
   // The entities/actors services are deliberately not leased. Every one of
@@ -3206,6 +3061,9 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
                                                    std::memory_order_relaxed);
         context->diag.render_turn_peak_cdps.store(0, std::memory_order_relaxed);
         context->diag.car_step_dcm.store(0, std::memory_order_relaxed);
+        context->probe.camera_yaw_step_max_ddeg = 0.0;
+        context->probe.camera_yaw_step_sum_ddeg = 0.0;
+        context->probe.camera_yaw_step_count = 0;
         context->diag.slip_max_step_ddeg.store(0,
                                                std::memory_order_relaxed);
         context->update_rate_window = 0.0;
@@ -3214,8 +3072,6 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
     }
     RetryHookIfNeeded(*context);
     static_cast<void>(ResolveCameraPov(*context));
-    // P0 probe: read-only reconnaissance, one Game tick at a time.
-    RunProbe(*context, dt);
     // T0: time the Game-tick work that the camera itself owns. The host
     // callback as a whole also persists settings and resolves the POV, so only
     // UpdateCamera is bracketed here.
@@ -3224,6 +3080,9 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
     context->camera_ms_last =
         static_cast<double>(NowNanoseconds() - camera_begin_ns) * 1e-6;
     context->camera_cost.Add(context->camera_ms_last);
+    // Probe: read-only reconnaissance, one Game tick at a time. It runs after
+    // UpdateCamera so the yaw it compares is this tick's sample.
+    RunProbe(*context, dt);
     UpdateDisplay(*context);
     const auto revision =
         context->settings_revision.load(std::memory_order_acquire);
@@ -3283,81 +3142,40 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                      const nfs2015_chase_cam::Localizer &localizer,
                      const DisplayState &display) {
   char line[128]{};
-  // P0 probe (PLAN-camera-timing.md §8). Read-only reconnaissance, so it comes
+  // Probe (PLAN-camera-timing.md §8.1). Read-only reconnaissance, so it comes
   // before everything else: the diagnostics body scrolls and these are the
   // numbers this round of work is looking at.
-  static constexpr const char *kProbeSwitch[2] = {"off", "on"};
-  std::snprintf(line, sizeof(line), "%s / %s / %s",
-                kProbeSwitch[display.probe_objects_service ? 1 : 0],
-                kProbeSwitch[display.probe_events_service ? 1 : 0],
-                kProbeSwitch[display.probe_ahud_service ? 1 : 0]);
-  DrawStatusLine(ui, localizer, "diag.probe_services",
-                 "Probe services: objects / invoke / frames, need all on",
-                 line);
-  char probe_parms[kProbeFunctionCount][8]{};
-  for (std::size_t index = 0; index < kProbeFunctionCount; ++index) {
-    if (display.probe_function_state[index] == kProbeMissing) {
-      std::snprintf(probe_parms[index], sizeof(probe_parms[index]), "--");
-    } else if (display.probe_function_state[index] != kProbeOk) {
-      std::snprintf(probe_parms[index], sizeof(probe_parms[index]), "?");
-    } else if (display.probe_parms_size[index] != 0) {
-      // Only the two accessors are measured; invoking ReceiveDrawHUD would draw
-      // the HUD a second time, so its size is left alone.
-      std::snprintf(probe_parms[index], sizeof(probe_parms[index]), "%u",
-                    display.probe_parms_size[index]);
-    } else {
-      std::snprintf(probe_parms[index], sizeof(probe_parms[index]), "ok");
-    }
-  }
-  std::snprintf(line, sizeof(line), "%s / %s / %s", probe_parms[0],
-                probe_parms[1], probe_parms[2]);
-  DrawStatusLine(ui, localizer, "diag.probe_functions",
-                 "Probe ParmsSize: rotate / velocity / HUD, 24 is expected",
-                 line);
-  if (display.probe_handle_state == kProbeOk) {
-    std::snprintf(line, sizeof(line), "ok");
-  } else if (display.probe_handle_state == kProbeNoField) {
-    // struct_size the running host published, against the offset this build
-    // needs. 64 < 72 means the host binary predates get_object_handles.
-    std::snprintf(line, sizeof(line), "%u<%u",
-                  display.probe_player_struct_size, kProbePlayerHandlesEnd);
-  } else if (display.probe_handle_state == kProbeMissing) {
-    std::snprintf(line, sizeof(line), "code %u", display.probe_handle_code);
-  } else if (display.probe_player_struct_size == 0) {
+  if (!display.probe_ahud_service) {
     std::snprintf(line, sizeof(line), "no service");
-  } else {
-    std::snprintf(line, sizeof(line), "wait");
-  }
-  DrawStatusLine(ui, localizer, "diag.probe_pawn",
-                 "Probe Pawn handle: ok works, 64<72 host too old, code N call failed",
-                 line);
-  if (display.probe_subscribe_state == kProbeOk) {
-    std::snprintf(line, sizeof(line), "%.1f /s", display.probe_frame_hz);
+  } else if (display.probe_subscribe_state == kProbeOk) {
+    std::snprintf(line, sizeof(line), "%.1f / %.1f Hz", display.probe_frame_hz,
+                  display.update_hz);
   } else if (display.probe_subscribe_state == kProbeMissing) {
     std::snprintf(line, sizeof(line), "code %u",
                   display.probe_subscribe_code);
   } else {
-    std::snprintf(line, sizeof(line), "--");
+    std::snprintf(line, sizeof(line), "wait");
   }
   DrawStatusLine(ui, localizer, "diag.probe_frame_rate",
-                 "Probe frames per second, about the render rate, 0 = silent",
+                 "Probe frames/s vs Game ticks/s, <1.0 leaves steps visible",
                  line);
-  std::snprintf(line, sizeof(line), "%llu / %llu (%u)",
-                static_cast<unsigned long long>(display.probe_invoke_ok),
-                static_cast<unsigned long long>(display.probe_invoke_failed),
-                display.probe_invoke_code);
-  DrawStatusLine(ui, localizer, "diag.probe_invoke",
-                 "Probe calls from the frame callback: ok / fail (code)",
-                 line);
-  if (display.probe_yaw_valid) {
-    std::snprintf(line, sizeof(line), "%.1f deg (car %.1f)",
-                  display.probe_yaw_gap_degrees,
-                  display.probe_car_yaw_degrees);
+  std::snprintf(line, sizeof(line), "%.2f / %.2f deg",
+                display.probe_camera_yaw_step_max_degrees,
+                display.probe_camera_yaw_step_avg_degrees);
+  DrawStatusLine(ui, localizer, "diag.probe_camera_yaw_step",
+                 "Probe camera yaw step per tick, max/avg, >0.3 is noise", line);
+  std::snprintf(line, sizeof(line), "%.1f cm", display.probe_bounds_offset_cm);
+  DrawStatusLine(ui, localizer, "diag.probe_bounds_offset",
+                 "Probe bounds-centre lever arm, <20 cm unusable", line);
+  if (display.probe_bounds_yaw_valid) {
+    std::snprintf(line, sizeof(line), "%.1f deg",
+                  display.probe_camera_minus_bounds_degrees);
   } else {
     std::snprintf(line, sizeof(line), "--");
   }
-  DrawStatusLine(ui, localizer, "diag.probe_yaw_gap",
-                 "Probe car yaw minus camera yaw, 20-40 while drifting", line);
+  DrawStatusLine(ui, localizer, "diag.probe_camera_vs_bounds",
+                 "Probe camera yaw minus bounds yaw, drift shows the slip",
+                 line);
   std::snprintf(line, sizeof(line), "%.1f / %.1f Hz", display.detour_hz,
                 display.update_hz);
   DrawStatusLine(ui, localizer, "diag.detour_rate",
