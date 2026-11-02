@@ -86,6 +86,8 @@ class SampleRing final {
  public:
   static constexpr std::size_t kCapacity = 8U;
   static constexpr int kReadAttempts = 8;
+  // How far past the newest pair the lagged blend may run during a stall.
+  static constexpr double kMaximumLagBlend = 2.0;
 
   // Game tick only.
   void Write(const CarSample &sample) noexcept {
@@ -115,6 +117,55 @@ class SampleRing final {
       return false;
     }
     out = view.slots[(view.next + kCapacity - 1U) % kCapacity];
+    return true;
+  }
+
+  // Sample exactly one Game tick behind the newest sample.
+  //
+  // `At()` takes an absolute time, so the caller has to decide how far back to
+  // look, and every choice of delay has a failure mode at the boundaries. This
+  // one does not: it interpolates across the newest pair using the fraction of
+  // that pair's own span which has elapsed since `now_ns`. When a sample
+  // arrives the blend starts again at the previous sample, so the result is
+  // continuous through every sample boundary, and the requested point can never
+  // pass the newest sample, so nothing ever clamps.
+  //
+  // A next interval longer than the pair's span means the model is briefly
+  // ahead of the blend, up to `kMaximumLagBlend`; that is a stall, and letting
+  // it run rather than freezing keeps the eye moving.
+  [[nodiscard]] bool AtOneTickBehind(const std::int64_t now_ns,
+                                     CarSample &out) const noexcept {
+    Snapshot view;
+    if (!Copy(view) || view.count == 0U) {
+      return false;
+    }
+    const std::size_t newest = (view.next + kCapacity - 1U) % kCapacity;
+    const CarSample &newer = view.slots[newest];
+    if (view.count == 1U) {
+      out = newer;
+      return true;
+    }
+    const std::size_t older_index = (newest + kCapacity - 1U) % kCapacity;
+    const CarSample &older = view.slots[older_index];
+    const std::int64_t span = newer.time_ns - older.time_ns;
+    if (span <= 0) {
+      out = newer;
+      return true;
+    }
+    if (newer.epoch != older.epoch) {
+      // A reset landed between the pair; blending across it would invent motion.
+      out = newer;
+      return true;
+    }
+    double alpha = static_cast<double>(now_ns - newer.time_ns) /
+                   static_cast<double>(span);
+    if (!(alpha > 0.0)) {
+      alpha = 0.0;
+    }
+    if (alpha > kMaximumLagBlend) {
+      alpha = kMaximumLagBlend;
+    }
+    out = BlendCarSample(older, newer, alpha);
     return true;
   }
 
