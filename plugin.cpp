@@ -430,6 +430,16 @@ constexpr std::size_t kProbeFunctionCount = 3;
 constexpr std::uint8_t kProbeUnset = 0;
 constexpr std::uint8_t kProbeOk = 1;
 constexpr std::uint8_t kProbeMissing = 2;
+// The running host's service table does not cover the field at all, i.e. the
+// host binary predates the extension. Distinct from "the call failed", because
+// the fix is to rebuild the host, not to retry.
+constexpr std::uint8_t kProbeNoField = 3;
+// offsetof + sizeof of `get_object_handles`, computed at compile time so the
+// panel can compare it with the struct_size the running host actually
+// published (64 before the extension, 72 after).
+constexpr std::uint32_t kProbePlayerHandlesEnd =
+    offsetof(AnomalyNtePlayerServiceV1, get_object_handles) +
+    sizeof(AnomalyNtePlayerServiceV1::get_object_handles);
 // UFunction::ParmsSize for a Blueprint accessor that returns a 24-byte struct
 // (three doubles). The host itself validates K2_GetActorLocation as NumParms 1,
 // ParmsSize 24, ReturnValue at offset 0 with three doubles, so the rotation
@@ -454,6 +464,9 @@ struct Probe final {
   double next_handle_elapsed{};
   std::uint8_t handle_state{};
   std::uint32_t handle_code{};
+  // The player service's own struct_size, read every tick: it is zero when the
+  // service is missing and smaller than kProbePlayerHandlesEnd on an old host.
+  std::uint32_t player_struct_size{};
   AnomalyGenerationHandleV1 pawn{};
   std::uint32_t subscribe_attempts{};
   double next_subscribe_elapsed{};
@@ -545,6 +558,7 @@ struct DisplayState final {
   std::uint32_t probe_parms_size[kProbeFunctionCount]{};
   std::uint8_t probe_handle_state{};
   std::uint32_t probe_handle_code{};
+  std::uint32_t probe_player_struct_size{};
   std::uint8_t probe_subscribe_state{};
   std::uint32_t probe_subscribe_code{};
   double probe_frame_hz{};
@@ -2699,6 +2713,8 @@ void ReleaseProbeSubscription(Context &context) noexcept {
 
 void RunProbe(Context &context, const double dt) noexcept {
   Probe &probe = context.probe;
+  probe.player_struct_size =
+      context.player != nullptr ? context.player->struct_size : 0;
   // 1. Resolve the reflected functions. `ue5.objects` may appear only after
   //    the profile has validated, so wait for it and retry a few times.
   if (!probe.resolved && context.ue5_objects != nullptr &&
@@ -2732,20 +2748,23 @@ void RunProbe(Context &context, const double dt) noexcept {
   //    needs a live player sample, so a session that starts before the world is
   //    ready keeps retrying for a while instead of concluding it is missing.
   if (probe.resolved && probe.handle_state != kProbeOk &&
-      probe.handle_attempts < 20 && context.player != nullptr &&
-      ProbePlayerHandlesReady(context.player) &&
-      context.elapsed >= probe.next_handle_elapsed) {
-    ++probe.handle_attempts;
-    AnomalyGenerationHandleV1 pawn{};
-    const auto status = context.player->get_object_handles(
-        context.player->user, &pawn, nullptr);
-    probe.handle_code = status.code;
-    if (status.code == ANOMALY_STATUS_V1_OK && pawn.id != 0) {
-      probe.pawn = pawn;
-      probe.handle_state = kProbeOk;
-    } else {
-      probe.handle_state = kProbeMissing;
-      probe.next_handle_elapsed = context.elapsed + 2.0;
+      probe.handle_attempts < 20 && context.player != nullptr) {
+    if (!ProbePlayerHandlesReady(context.player)) {
+      // Distinguish "not yet tried" from "this host cannot do it at all".
+      probe.handle_state = kProbeNoField;
+    } else if (context.elapsed >= probe.next_handle_elapsed) {
+      ++probe.handle_attempts;
+      AnomalyGenerationHandleV1 pawn{};
+      const auto status = context.player->get_object_handles(
+          context.player->user, &pawn, nullptr);
+      probe.handle_code = status.code;
+      if (status.code == ANOMALY_STATUS_V1_OK && pawn.id != 0) {
+        probe.pawn = pawn;
+        probe.handle_state = kProbeOk;
+      } else {
+        probe.handle_state = kProbeMissing;
+        probe.next_handle_elapsed = context.elapsed + 2.0;
+      }
     }
   }
   // 3. Measure the real parameter sizes instead of trusting the layout guess.
@@ -2883,15 +2902,22 @@ void UpdateDisplay(Context &context) noexcept {
       static_cast<double>(diag.car_step_dcm.load(std::memory_order_relaxed)) /
       10.0;
   const Probe &probe = context.probe;
-  context.display.probe_objects_service = context.ue5_objects != nullptr;
-  context.display.probe_events_service = context.ue5_events != nullptr;
-  context.display.probe_ahud_service = context.ahud != nullptr;
+  // Each of these is "the service is published AND the field we need is there".
+  // A published service whose table stops short of `invoke` is an old host, and
+  // reporting that as "on" would send the wrong fix. See kProbeNoField.
+  context.display.probe_objects_service =
+      context.ue5_objects != nullptr && ProbeObjectsReady(context.ue5_objects);
+  context.display.probe_events_service =
+      context.ue5_events != nullptr && ProbeEventsReady(context.ue5_events);
+  context.display.probe_ahud_service =
+      context.ahud != nullptr && ProbeAhudReady(context.ahud);
   for (std::size_t index = 0; index < kProbeFunctionCount; ++index) {
     context.display.probe_function_state[index] = probe.function_state[index];
     context.display.probe_parms_size[index] = probe.parms_size[index];
   }
   context.display.probe_handle_state = probe.handle_state;
   context.display.probe_handle_code = probe.handle_code;
+  context.display.probe_player_struct_size = probe.player_struct_size;
   context.display.probe_subscribe_state = probe.subscribe_state;
   context.display.probe_subscribe_code = probe.subscribe_code;
   context.display.probe_frame_hz = probe.frame_hz;
@@ -3290,13 +3316,21 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                  line);
   if (display.probe_handle_state == kProbeOk) {
     std::snprintf(line, sizeof(line), "ok");
+  } else if (display.probe_handle_state == kProbeNoField) {
+    // struct_size the running host published, against the offset this build
+    // needs. 64 < 72 means the host binary predates get_object_handles.
+    std::snprintf(line, sizeof(line), "%u<%u",
+                  display.probe_player_struct_size, kProbePlayerHandlesEnd);
   } else if (display.probe_handle_state == kProbeMissing) {
     std::snprintf(line, sizeof(line), "code %u", display.probe_handle_code);
+  } else if (display.probe_player_struct_size == 0) {
+    std::snprintf(line, sizeof(line), "no service");
   } else {
-    std::snprintf(line, sizeof(line), "--");
+    std::snprintf(line, sizeof(line), "wait");
   }
   DrawStatusLine(ui, localizer, "diag.probe_pawn",
-                 "Probe Pawn object handle, ok = readable", line);
+                 "Probe Pawn handle: ok works, 64<72 host too old, code N call failed",
+                 line);
   if (display.probe_subscribe_state == kProbeOk) {
     std::snprintf(line, sizeof(line), "%.1f /s", display.probe_frame_hz);
   } else if (display.probe_subscribe_state == kProbeMissing) {
