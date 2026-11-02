@@ -118,6 +118,104 @@ class SampleRing final {
     return true;
   }
 
+  // Sample at `target_ns` with a curve whose *velocity* is continuous.
+  //
+  // Linear interpolation is continuous in position and discontinuous in
+  // velocity: at every Game tick the eye's speed changes instantly, and a camera
+  // whose speed steps makes the whole world's flow rate step with it. The car
+  // sits still in frame while that happens, which is why a measurement that
+  // projects the car cannot see it, and why the complaint is about the picture
+  // and not about the car.
+  //
+  // A Catmull-Rom curve through the four neighbouring samples has the same
+  // position as the linear blend at every knot and a continuous velocity across
+  // them. Only the positional fields take the curve; the rest of the sample
+  // feeds springs that settle over hundreds of milliseconds and does not need
+  // it.
+  [[nodiscard]] bool AtSmooth(const std::int64_t target_ns,
+                              CarSample &out) const noexcept {
+    if (!At(target_ns, out)) {
+      return false;
+    }
+    Snapshot view;
+    if (!Copy(view) || view.count < 3U) {
+      return true;
+    }
+    // Locate the bracket the linear blend used, by time.
+    std::size_t newer_step = 0U;
+    for (std::size_t step = 1U; step < view.count; ++step) {
+      const std::size_t index =
+          (view.next + kCapacity - step) % kCapacity;
+      const std::size_t previous =
+          (view.next + kCapacity - step - 1U) % kCapacity;
+      if (view.slots[index].time_ns >= target_ns &&
+          view.slots[previous].time_ns <= target_ns) {
+        newer_step = step;
+        break;
+      }
+    }
+    if (newer_step == 0U) {
+      return true;
+    }
+    const std::size_t newer_index =
+        (view.next + kCapacity - newer_step) % kCapacity;
+    const std::size_t older_index =
+        (view.next + kCapacity - newer_step - 1U) % kCapacity;
+    const CarSample &newer = view.slots[newer_index];
+    const CarSample &older = view.slots[older_index];
+    const std::int64_t span = newer.time_ns - older.time_ns;
+    if (span <= 0 || newer.epoch != older.epoch) {
+      return true;
+    }
+    const double s =
+        Clamp((static_cast<double>(target_ns - older.time_ns)) /
+                  static_cast<double>(span),
+              0.0, 1.0);
+    // Neighbours for the tangents. A missing one makes the curve fall back to a
+    // parabola on that side, which still matches position and one tangent.
+    const bool has_older =
+        newer_step + 1U < view.count && view.count >= 3U &&
+        newer_step + 1U <= view.count - 1U;
+    const std::size_t older2_index =
+        (view.next + kCapacity - newer_step - 2U) % kCapacity;
+    const bool has_newer = newer_step >= 2U;
+    const std::size_t newer2_index =
+        (view.next + kCapacity - newer_step + 1U) % kCapacity;
+
+    const Vec3 p1 = older.car.position;
+    const Vec3 p2 = newer.car.position;
+    const Vec3 p0 =
+        has_older && view.slots[older2_index].epoch == older.epoch
+            ? view.slots[older2_index].car.position
+            : Sub(Add(p1, p1), p2);
+    const Vec3 p3 =
+        has_newer && view.slots[newer2_index].epoch == newer.epoch
+            ? view.slots[newer2_index].car.position
+            : Sub(Add(p2, p2), p1);
+
+    // Uniform Catmull-Rom tangents, rescaled to this span so an irregular tick
+    // does not change the curve's shape.
+    const Vec3 m1 = Mul(Sub(p2, p0), 0.5);
+    const Vec3 m2 = Mul(Sub(p3, p1), 0.5);
+    const double s2 = s * s;
+    const double s3 = s2 * s;
+    const double h00 = 2.0 * s3 - 3.0 * s2 + 1.0;
+    const double h10 = s3 - 2.0 * s2 + s;
+    const double h01 = -2.0 * s3 + 3.0 * s2;
+    const double h11 = s3 - s2;
+    const Vec3 curve = Add(Add(Mul(p1, h00), Mul(m1, h10)),
+                           Add(Mul(p2, h01), Mul(m2, h11)));
+    const Vec3 delta = Sub(curve, out.car.position);
+    out.car.position = curve;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const double metres =
+          axis == 0 ? delta.x : (axis == 1 ? delta.y : delta.z);
+      out.anchor_cm[axis] += metres * 100.0;
+      out.origin_cm[axis] += metres * 100.0;
+    }
+    return true;
+  }
+
   // Sample at `target_ns`, interpolating when it falls between two samples and
   // continuing the newest pair when it falls beyond them.
   //

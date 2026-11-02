@@ -417,6 +417,12 @@ struct Diagnostics final {
   std::atomic<std::uint64_t> judder_peak_dpx{};
   std::atomic<std::uint64_t> judder_sum_dpx{};
   std::atomic<std::uint64_t> judder_count{};
+  // Model restarts inside the current window. A restart re-seeds the springs
+  // from the car, so the eye jumps and springs back: a far bigger visible event
+  // than any amount of interpolation error, and one that no smoothness
+  // measurement of the running model can see, because it only measures the
+  // times when the model is running.
+  std::atomic<std::uint64_t> reset_window{};
   std::atomic<std::uint64_t> judder_car_peak_dpx{};
   std::atomic<std::uint64_t> judder_car_sum_dpx{};
   std::atomic<std::uint64_t> judder_car_count{};
@@ -632,6 +638,7 @@ struct DisplayState final {
   bool lens_valid{};
   double lens_peak_degrees{};
   double lens_avg_degrees{};
+  std::uint64_t resets_in_window{};
   double probe_height_step_cm{};
   bool tick_interval_valid{};
   double tick_interval_min_ms{};
@@ -886,6 +893,7 @@ void Log(const Context &context, const std::uint32_t level,
 // and consumed by PublishView, so a reset requested while the camera is idle
 // costs nothing and is not reported as a snap that actually happened.
 void NoteViewSnap(Context &context, const SnapReason reason) noexcept {
+  context.diag.reset_window.fetch_add(1, std::memory_order_relaxed);
   context.view_snap = true;
   context.view_snap_reasons |= static_cast<std::uint32_t>(reason);
 }
@@ -3203,6 +3211,8 @@ void UpdateDisplay(Context &context) noexcept {
   context.display.probe_camera_minus_bounds_degrees =
       probe.camera_minus_bounds_valid ? probe.camera_minus_bounds_degrees
                                       : 0.0;
+  context.display.resets_in_window =
+      diag.reset_window.load(std::memory_order_relaxed);
   const std::uint64_t judder_count =
       diag.judder_count.load(std::memory_order_relaxed);
   const std::uint64_t judder_sum =
@@ -3579,6 +3589,7 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->diag.judder_car_peak_dpx.store(0, std::memory_order_relaxed);
         context->diag.judder_car_sum_dpx.store(0, std::memory_order_relaxed);
         context->diag.judder_car_count.store(0, std::memory_order_relaxed);
+        context->diag.reset_window.store(0, std::memory_order_relaxed);
         ResetResidual(context->diag.pitch_peak_cdeg,
                       context->diag.pitch_sum_cdeg,
                       context->diag.pitch_count);
@@ -3675,6 +3686,7 @@ enum class JudderChannel {
   kPitch,
   kRoll,
   kLens,
+  kReset,
 };
 
 [[nodiscard]] JudderChannel WorstJudderChannel(
@@ -3709,6 +3721,10 @@ enum class JudderChannel {
     consider(JudderChannel::kLens, display.lens_avg_degrees,
              kAngleThresholdDegrees);
   }
+  // One reset in half a second is already two visible snaps a second, and each
+  // one is a large event, so it outweighs everything else by construction.
+  consider(JudderChannel::kReset,
+           static_cast<double>(display.resets_in_window), 1.0);
   return worst;
 }
 
@@ -3723,7 +3739,8 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   // evidence for that verdict.
   {
     const JudderChannel channel = WorstJudderChannel(display);
-    const char *fallbacks[5] = {"none yet", "position", "pitch", "roll", "lens"};
+    const char *fallbacks[6] = {"none yet", "position", "pitch",
+                                "roll",     "lens",     "camera reset"};
     char key[48]{};
     std::snprintf(key, sizeof(key), "diag.worst.%d",
                   static_cast<int>(channel));

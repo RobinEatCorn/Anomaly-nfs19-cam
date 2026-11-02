@@ -103,10 +103,20 @@ struct Result final {
   double peak_degrees = 0.0;
   double sum_degrees = 0.0;
   std::uint64_t count = 0;
+  // The camera's own speed, in cm/s, and how much that speed jumps from frame to
+  // frame. This is the background's flow rate: a camera whose speed steps makes
+  // the whole world step, and the car in the middle of the frame does not move a
+  // pixel while it happens.
+  double speed_peak_cmps = 0.0;
+  double speed_sum_cmps = 0.0;
+  std::uint64_t speed_count = 0;
   double residual = 0.0;
   double residual_sum = 0.0;
   std::uint64_t residual_count = 0;
 
+  [[nodiscard]] double SpeedJumpAverage() const noexcept {
+    return speed_count == 0 ? 0.0 : speed_sum_cmps / static_cast<double>(speed_count);
+  }
   [[nodiscard]] double Average() const noexcept {
     return count == 0 ? 0.0 : sum_degrees / static_cast<double>(count);
   }
@@ -212,6 +222,9 @@ Result Run(const Path &path, const Clock &tick_clock, const Clock &frame_clock,
   double previous_angle = 0.0;
   double previous_rate = 0.0;
   bool have_previous = false;
+  double previous_eye[3]{};
+  double previous_eye_speed[3]{};
+  double previous_eye_time = 0.0;
   const double horizon = 6.0;
 
   while (now < horizon) {
@@ -247,6 +260,10 @@ Result Run(const Path &path, const Clock &tick_clock, const Clock &frame_clock,
       case 3:
         got = ring.At(now_ns - static_cast<std::int64_t>(mean_interval * 1.5e9),
                       sample);
+        break;
+      case 5:
+        got = ring.AtSmooth(
+            now_ns - static_cast<std::int64_t>(mean_interval * 1.5e9), sample);
         break;
       default: {
         // One and a half mean intervals back, but when that lands past the
@@ -286,6 +303,33 @@ Result Run(const Path &path, const Clock &tick_clock, const Clock &frame_clock,
     }
     const nfs2015_chase::CameraState view =
         chase.Update(kRenderCallSeconds, sample.car);
+    const double eye[3] = {view.position.x, view.position.y, view.position.z};
+    const double eye_now = static_cast<double>(now_ns) * 1e-9;
+    if (have_previous) {
+      const double dt_eye = eye_now - previous_eye_time;
+      if (dt_eye > 1e-6) {
+        double jump2 = 0.0;
+        for (int axis = 0; axis < 3; ++axis) {
+          const double speed = (eye[axis] - previous_eye[axis]) / dt_eye;
+          const double jump = speed - previous_eye_speed[axis];
+          jump2 += jump * jump;
+          previous_eye_speed[axis] = speed;
+        }
+        const double jump = std::sqrt(jump2);
+        if (std::isfinite(jump) && jump < 5000.0) {
+          if (jump > result.speed_peak_cmps) {
+            result.speed_peak_cmps = jump;
+          }
+          result.speed_sum_cmps += jump;
+          ++result.speed_count;
+        }
+      }
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+      previous_eye[axis] = eye[axis];
+    }
+    previous_eye_time = eye_now;
+    have_previous = true;
 
     if (now >= next_frame) {
       // The frame the player sees, at the frame clock's own time, against the
@@ -317,9 +361,9 @@ Result Run(const Path &path, const Clock &tick_clock, const Clock &frame_clock,
 }
 
 void Report(const char *name, const Result &result) {
-  std::printf("%-34s peak %.3f  avg %.3f deg   (%llu frames)\n", name,
-              result.peak_degrees, result.Average(),
-              static_cast<unsigned long long>(result.count));
+  std::printf("%-34s car %.3f/%.3f deg   eye speed jump %8.2f/%.2f cm/s\n",
+              name, result.Average(), result.peak_degrees,
+              result.SpeedJumpAverage(), result.speed_peak_cmps);
 }
 
 }  // namespace
@@ -338,10 +382,10 @@ int main() {
   Path path;
   path.speed_mps = 30.0;
 
-  const char *names[5] = {"zero lag (staircase)", "fixed mean delay",
+  const char *names[6] = {"zero lag (staircase)", "fixed mean delay",
                           "raw last interval", "1.5x mean delay",
-                          "1.5x + continue on a stall"};
-  const int kModes = 5;
+                          "1.5x + continue on a stall", "1.5x + curved"};
+  const int kModes = 6;
 
   std::printf("straight 30 m/s, steady tick, steady frames\n");
   {
