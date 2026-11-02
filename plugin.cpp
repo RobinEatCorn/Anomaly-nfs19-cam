@@ -567,6 +567,7 @@ struct DisplayState final {
   double pitch_scale{kDefaultPitchScale};
   double shake_scale{kDefaultShakeScale};
   bool roll_only_in_drift{};
+  bool diagnostic_flat_pose{};
 
   // Diagnostics. Copied from Context::diag on the Game tick so Draw reads a
   // plain snapshot on the render thread.
@@ -686,6 +687,10 @@ struct Context final {
   std::atomic<double> pitch_scale{kDefaultPitchScale};
   std::atomic<double> shake_scale{kDefaultShakeScale};
   std::atomic_bool roll_only_in_drift{};
+  // Bisect switch: hold every attitude term at zero and stop writing the lens,
+  // so only position and yaw survive. One click decides whether the twitch is
+  // inside the attitude model at all, without reading a single number.
+  std::atomic_bool diagnostic_flat_pose{};
   std::atomic_bool fov_enabled{true};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
@@ -1155,6 +1160,8 @@ bool PersistSettings(Context &context) noexcept {
       context.roll_only_in_drift.load(std::memory_order_acquire);
   const bool fov_enabled =
       context.fov_enabled.load(std::memory_order_acquire);
+  const bool diagnostic_flat_pose =
+      context.diagnostic_flat_pose.load(std::memory_order_acquire);
   if (!ConfigReady(context.config) ||
       !SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
                      speed_distance_scale, roll_scale, pitch_scale,
@@ -1193,6 +1200,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, shake_scale) &&
       AppendText(cursor, end, ",\"rollOnlyInDrift\":") &&
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
+      AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
+      AppendText(cursor, end, diagnostic_flat_pose ? "true" : "false") &&
       AppendText(cursor, end, "}");
   if (!built) {
     return false;
@@ -1223,6 +1232,7 @@ void SetDefaults(Context &context) noexcept {
   context.pitch_scale.store(kDefaultPitchScale, std::memory_order_release);
   context.shake_scale.store(kDefaultShakeScale, std::memory_order_release);
   context.roll_only_in_drift.store(false, std::memory_order_release);
+  context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.fov_enabled.store(true, std::memory_order_release);
 }
 
@@ -1359,6 +1369,7 @@ bool LoadSettings(Context &context) noexcept {
   double pitch_scale = kDefaultPitchScale;
   double shake_scale = kDefaultShakeScale;
   bool roll_only_in_drift = false;
+  bool diagnostic_flat_pose = false;
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
                                      speed_distance_scale));
   static_cast<void>(JsonObjectNumber(json, root, "rollScale", roll_scale));
@@ -1368,6 +1379,8 @@ bool LoadSettings(Context &context) noexcept {
       JsonObjectNumber(json, root, "shakeScale", shake_scale));
   static_cast<void>(JsonObjectBoolean(json, root, "rollOnlyInDrift",
                                       roll_only_in_drift));
+  static_cast<void>(JsonObjectBoolean(json, root, "diagnosticFlatPose",
+                                      diagnostic_flat_pose));
   if (!SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
                      speed_distance_scale, roll_scale, pitch_scale,
                      shake_scale)) {
@@ -1386,6 +1399,8 @@ bool LoadSettings(Context &context) noexcept {
   context.shake_scale.store(shake_scale, std::memory_order_release);
   context.roll_only_in_drift.store(roll_only_in_drift,
                                    std::memory_order_release);
+  context.diagnostic_flat_pose.store(diagnostic_flat_pose,
+                                     std::memory_order_release);
   context.fov_enabled.store(fov_enabled, std::memory_order_release);
   return true;
 }
@@ -2354,8 +2369,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
 void UpdateCamera(Context &context, const double dt) noexcept {
   const bool enabled = context.enabled.load(std::memory_order_acquire);
   const std::uint32_t preset = context.preset.load(std::memory_order_acquire);
-  const bool fov_enabled =
-      context.fov_enabled.load(std::memory_order_acquire);
+  bool fov_enabled = context.fov_enabled.load(std::memory_order_acquire);
   const double camera_scale =
       context.camera_scale.load(std::memory_order_acquire);
   const double aspect_ratio =
@@ -2368,8 +2382,18 @@ void UpdateCamera(Context &context, const double dt) noexcept {
       context.pitch_scale.load(std::memory_order_acquire);
   const double shake_scale =
       context.shake_scale.load(std::memory_order_acquire);
-  const bool roll_only_in_drift =
+  bool roll_only_in_drift =
       context.roll_only_in_drift.load(std::memory_order_acquire);
+  // The bisect switch: no attitude, no lens. Position and yaw only.
+  const bool diagnostic_flat_pose =
+      context.diagnostic_flat_pose.load(std::memory_order_acquire);
+  const double effective_roll_scale = diagnostic_flat_pose ? 0.0 : roll_scale;
+  const double effective_pitch_scale = diagnostic_flat_pose ? 0.0 : pitch_scale;
+  const double effective_shake_scale = diagnostic_flat_pose ? 0.0 : shake_scale;
+  if (diagnostic_flat_pose) {
+    fov_enabled = false;
+    roll_only_in_drift = true;
+  }
   // The model lives on the render clock now, so configuration changes are made
   // under its lock.
   LockPresenter(context);
@@ -2382,9 +2406,9 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   }
   // These are cheap setters that do not reset the springs.
   context.chase.SetSpeedDistanceScale(speed_distance_scale);
-  context.chase.SetRollScale(roll_scale);
-  context.chase.SetPitchScale(pitch_scale);
-  context.chase.SetShakeScale(shake_scale);
+  context.chase.SetRollScale(effective_roll_scale);
+  context.chase.SetPitchScale(effective_pitch_scale);
+  context.chase.SetShakeScale(effective_shake_scale);
   context.chase.SetRollOnlyInDrift(roll_only_in_drift);
   UnlockPresenter(context);
   if (context.reset_requested.exchange(false, std::memory_order_acq_rel)) {
@@ -3216,6 +3240,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.shake_scale.load(std::memory_order_acquire);
   context.display.roll_only_in_drift =
       context.roll_only_in_drift.load(std::memory_order_acquire);
+  context.display.diagnostic_flat_pose =
+      context.diagnostic_flat_pose.load(std::memory_order_acquire);
 }
 
 void RetryHookIfNeeded(Context &context) noexcept {
@@ -3965,6 +3991,16 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                        &roll_only_drift) != 0) {
         context->roll_only_in_drift.store(roll_only_drift != 0,
                                           std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+
+      const std::string flat_label = context->localizer.Label(
+          "setting.diagnostic_flat_pose",
+          "Diagnostic: position and yaw only", "chase-flat-pose");
+      int flat_pose = display.diagnostic_flat_pose ? 1 : 0;
+      if (ui->checkbox(ui->user, StringView(flat_label), &flat_pose) != 0) {
+        context->diagnostic_flat_pose.store(flat_pose != 0,
+                                            std::memory_order_release);
         MarkSettingsDirty(*context);
       }
 
