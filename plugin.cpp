@@ -568,6 +568,7 @@ struct DisplayState final {
   double shake_scale{kDefaultShakeScale};
   bool roll_only_in_drift{};
   bool diagnostic_flat_pose{};
+  bool diagnostic_zero_lag{};
 
   // Diagnostics. Copied from Context::diag on the Game tick so Draw reads a
   // plain snapshot on the render thread.
@@ -691,6 +692,12 @@ struct Context final {
   // so only position and yaw survive. One click decides whether the twitch is
   // inside the attitude model at all, without reading a single number.
   std::atomic_bool diagnostic_flat_pose{};
+  // Second bisect switch: stop delaying at all and use the newest Game-tick
+  // position. If the Game draws the car from that same value, the car sits
+  // still in frame and only the background steps; if it draws an interpolated
+  // position, the car itself will start stepping instead. Either answer says
+  // which of the two we have been chasing.
+  std::atomic_bool diagnostic_zero_lag{};
   std::atomic_bool fov_enabled{true};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
@@ -1162,6 +1169,8 @@ bool PersistSettings(Context &context) noexcept {
       context.fov_enabled.load(std::memory_order_acquire);
   const bool diagnostic_flat_pose =
       context.diagnostic_flat_pose.load(std::memory_order_acquire);
+  const bool diagnostic_zero_lag =
+      context.diagnostic_zero_lag.load(std::memory_order_acquire);
   if (!ConfigReady(context.config) ||
       !SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
                      speed_distance_scale, roll_scale, pitch_scale,
@@ -1202,6 +1211,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
       AppendText(cursor, end, diagnostic_flat_pose ? "true" : "false") &&
+      AppendText(cursor, end, ",\"diagnosticZeroLag\":") &&
+      AppendText(cursor, end, diagnostic_zero_lag ? "true" : "false") &&
       AppendText(cursor, end, "}");
   if (!built) {
     return false;
@@ -1233,6 +1244,7 @@ void SetDefaults(Context &context) noexcept {
   context.shake_scale.store(kDefaultShakeScale, std::memory_order_release);
   context.roll_only_in_drift.store(false, std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
+  context.diagnostic_zero_lag.store(false, std::memory_order_release);
   context.fov_enabled.store(true, std::memory_order_release);
 }
 
@@ -1370,6 +1382,7 @@ bool LoadSettings(Context &context) noexcept {
   double shake_scale = kDefaultShakeScale;
   bool roll_only_in_drift = false;
   bool diagnostic_flat_pose = false;
+  bool diagnostic_zero_lag = false;
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
                                      speed_distance_scale));
   static_cast<void>(JsonObjectNumber(json, root, "rollScale", roll_scale));
@@ -1381,6 +1394,8 @@ bool LoadSettings(Context &context) noexcept {
                                       roll_only_in_drift));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticFlatPose",
                                       diagnostic_flat_pose));
+  static_cast<void>(JsonObjectBoolean(json, root, "diagnosticZeroLag",
+                                      diagnostic_zero_lag));
   if (!SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
                      speed_distance_scale, roll_scale, pitch_scale,
                      shake_scale)) {
@@ -1401,6 +1416,8 @@ bool LoadSettings(Context &context) noexcept {
                                    std::memory_order_release);
   context.diagnostic_flat_pose.store(diagnostic_flat_pose,
                                      std::memory_order_release);
+  context.diagnostic_zero_lag.store(diagnostic_zero_lag,
+                                    std::memory_order_release);
   context.fov_enabled.store(fov_enabled, std::memory_order_release);
   return true;
 }
@@ -2288,8 +2305,13 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   constexpr double kSampleDelayFactor = 1.5;
   const double delay_ns = mean_interval_ns * kSampleDelayFactor;
   nfs2015_chase::CarSample sample;
-  if (!context.car_ring.AtExtrapolating(
-          now_ns - static_cast<std::int64_t>(delay_ns), sample)) {
+  const bool zero_lag =
+      context.diagnostic_zero_lag.load(std::memory_order_relaxed);
+  const bool sampled =
+      zero_lag ? context.car_ring.Latest(sample)
+               : context.car_ring.AtExtrapolating(
+                     now_ns - static_cast<std::int64_t>(delay_ns), sample);
+  if (!sampled) {
     return false;
   }
   if (!sample.driving) {
@@ -3242,6 +3264,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.roll_only_in_drift.load(std::memory_order_acquire);
   context.display.diagnostic_flat_pose =
       context.diagnostic_flat_pose.load(std::memory_order_acquire);
+  context.display.diagnostic_zero_lag =
+      context.diagnostic_zero_lag.load(std::memory_order_acquire);
 }
 
 void RetryHookIfNeeded(Context &context) noexcept {
@@ -4001,6 +4025,16 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
       if (ui->checkbox(ui->user, StringView(flat_label), &flat_pose) != 0) {
         context->diagnostic_flat_pose.store(flat_pose != 0,
                                             std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+
+      const std::string zero_lag_label = context->localizer.Label(
+          "setting.diagnostic_zero_lag",
+          "Diagnostic: zero lag, newest tick position", "chase-zero-lag");
+      int zero_lag = display.diagnostic_zero_lag ? 1 : 0;
+      if (ui->checkbox(ui->user, StringView(zero_lag_label), &zero_lag) != 0) {
+        context->diagnostic_zero_lag.store(zero_lag != 0,
+                                           std::memory_order_release);
         MarkSettingsDirty(*context);
       }
 
