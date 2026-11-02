@@ -569,6 +569,8 @@ struct DisplayState final {
   bool roll_only_in_drift{};
   bool diagnostic_flat_pose{};
   bool diagnostic_zero_lag{};
+  bool diagnostic_skip_position{};
+  bool diagnostic_skip_rotation{};
 
   // Diagnostics. Copied from Context::diag on the Game tick so Draw reads a
   // plain snapshot on the render thread.
@@ -698,6 +700,12 @@ struct Context final {
   // position, the car itself will start stepping instead. Either answer says
   // which of the two we have been chasing.
   std::atomic_bool diagnostic_zero_lag{};
+  // Third pair of bisect switches: what we write. Every build so far has
+  // overwritten the Game's location and rotation together, so the write itself
+  // has never been varied, only the arithmetic behind it. Turning one of these
+  // off leaves the Game's own value in place for that half.
+  std::atomic_bool diagnostic_skip_position{};
+  std::atomic_bool diagnostic_skip_rotation{};
   std::atomic_bool fov_enabled{true};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
@@ -1171,6 +1179,10 @@ bool PersistSettings(Context &context) noexcept {
       context.diagnostic_flat_pose.load(std::memory_order_acquire);
   const bool diagnostic_zero_lag =
       context.diagnostic_zero_lag.load(std::memory_order_acquire);
+  const bool diagnostic_skip_position =
+      context.diagnostic_skip_position.load(std::memory_order_acquire);
+  const bool diagnostic_skip_rotation =
+      context.diagnostic_skip_rotation.load(std::memory_order_acquire);
   if (!ConfigReady(context.config) ||
       !SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
                      speed_distance_scale, roll_scale, pitch_scale,
@@ -1213,6 +1225,10 @@ bool PersistSettings(Context &context) noexcept {
       AppendText(cursor, end, diagnostic_flat_pose ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticZeroLag\":") &&
       AppendText(cursor, end, diagnostic_zero_lag ? "true" : "false") &&
+      AppendText(cursor, end, ",\"diagnosticSkipPosition\":") &&
+      AppendText(cursor, end, diagnostic_skip_position ? "true" : "false") &&
+      AppendText(cursor, end, ",\"diagnosticSkipRotation\":") &&
+      AppendText(cursor, end, diagnostic_skip_rotation ? "true" : "false") &&
       AppendText(cursor, end, "}");
   if (!built) {
     return false;
@@ -1245,6 +1261,8 @@ void SetDefaults(Context &context) noexcept {
   context.roll_only_in_drift.store(false, std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.diagnostic_zero_lag.store(false, std::memory_order_release);
+  context.diagnostic_skip_position.store(false, std::memory_order_release);
+  context.diagnostic_skip_rotation.store(false, std::memory_order_release);
   context.fov_enabled.store(true, std::memory_order_release);
 }
 
@@ -1383,6 +1401,8 @@ bool LoadSettings(Context &context) noexcept {
   bool roll_only_in_drift = false;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
+  bool diagnostic_skip_position = false;
+  bool diagnostic_skip_rotation = false;
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
                                      speed_distance_scale));
   static_cast<void>(JsonObjectNumber(json, root, "rollScale", roll_scale));
@@ -1396,6 +1416,10 @@ bool LoadSettings(Context &context) noexcept {
                                       diagnostic_flat_pose));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticZeroLag",
                                       diagnostic_zero_lag));
+  static_cast<void>(JsonObjectBoolean(json, root, "diagnosticSkipPosition",
+                                      diagnostic_skip_position));
+  static_cast<void>(JsonObjectBoolean(json, root, "diagnosticSkipRotation",
+                                      diagnostic_skip_rotation));
   if (!SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
                      speed_distance_scale, roll_scale, pitch_scale,
                      shake_scale)) {
@@ -1418,6 +1442,10 @@ bool LoadSettings(Context &context) noexcept {
                                      std::memory_order_release);
   context.diagnostic_zero_lag.store(diagnostic_zero_lag,
                                     std::memory_order_release);
+  context.diagnostic_skip_position.store(diagnostic_skip_position,
+                                         std::memory_order_release);
+  context.diagnostic_skip_rotation.store(diagnostic_skip_rotation,
+                                         std::memory_order_release);
   context.fov_enabled.store(fov_enabled, std::memory_order_release);
   return true;
 }
@@ -1620,9 +1648,21 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
             relative_time_ns = render_now_ns;
             relative_valid = true;
           }
-          for (std::size_t axis = 0; axis < 3; ++axis) {
-            location[axis] = static_cast<float>(present_location[axis]);
-            rotation[axis] = static_cast<float>(present_rotation[axis]);
+          {
+            const bool skip_position =
+                context->diagnostic_skip_position.load(
+                    std::memory_order_relaxed);
+            const bool skip_rotation =
+                context->diagnostic_skip_rotation.load(
+                    std::memory_order_relaxed);
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+              if (!skip_position) {
+                location[axis] = static_cast<float>(present_location[axis]);
+              }
+              if (!skip_rotation) {
+                rotation[axis] = static_cast<float>(present_rotation[axis]);
+              }
+            }
           }
 
           const std::uintptr_t pov =
@@ -3266,6 +3306,10 @@ void UpdateDisplay(Context &context) noexcept {
       context.diagnostic_flat_pose.load(std::memory_order_acquire);
   context.display.diagnostic_zero_lag =
       context.diagnostic_zero_lag.load(std::memory_order_acquire);
+  context.display.diagnostic_skip_position =
+      context.diagnostic_skip_position.load(std::memory_order_acquire);
+  context.display.diagnostic_skip_rotation =
+      context.diagnostic_skip_rotation.load(std::memory_order_acquire);
 }
 
 void RetryHookIfNeeded(Context &context) noexcept {
@@ -4035,6 +4079,28 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
       if (ui->checkbox(ui->user, StringView(zero_lag_label), &zero_lag) != 0) {
         context->diagnostic_zero_lag.store(zero_lag != 0,
                                            std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+
+      const std::string skip_position_label = context->localizer.Label(
+          "setting.diagnostic_skip_position",
+          "Diagnostic: keep the Game's position", "chase-skip-position");
+      int skip_position = display.diagnostic_skip_position ? 1 : 0;
+      if (ui->checkbox(ui->user, StringView(skip_position_label),
+                       &skip_position) != 0) {
+        context->diagnostic_skip_position.store(skip_position != 0,
+                                                std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+
+      const std::string skip_rotation_label = context->localizer.Label(
+          "setting.diagnostic_skip_rotation",
+          "Diagnostic: keep the Game's rotation", "chase-skip-rotation");
+      int skip_rotation = display.diagnostic_skip_rotation ? 1 : 0;
+      if (ui->checkbox(ui->user, StringView(skip_rotation_label),
+                       &skip_rotation) != 0) {
+        context->diagnostic_skip_rotation.store(skip_rotation != 0,
+                                                std::memory_order_release);
         MarkSettingsDirty(*context);
       }
 

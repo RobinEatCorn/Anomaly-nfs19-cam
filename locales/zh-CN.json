@@ -86,6 +86,8 @@
     "diag.worst.3": "抖动来源：侧倾（画面在左右歪）",
     "diag.worst.4": "抖动来源：视野（画面在缩放）",
     "setting.diagnostic_flat_pose": "诊断：只保留位置和朝向（关掉侧倾、俯仰、抖动、视野）。用来一刀切开抽搐到底在不在姿态模型里",
-    "setting.diagnostic_zero_lag": "诊断：零延迟（不插值，直接用最新一份车位置）。用来判断游戏到底把车画在「最新一份」还是「插值后的位置」上"
+    "setting.diagnostic_zero_lag": "诊断：零延迟（不插值，直接用最新一份车位置）。用来判断游戏到底把车画在「最新一份」还是「插值后的位置」上",
+    "setting.diagnostic_skip_position": "诊断：不写位置（保留游戏自己的相机位置，只覆盖朝向）",
+    "setting.diagnostic_skip_rotation": "诊断：不写朝向（保留游戏自己的相机朝向，只覆盖位置）"
   }
 }
