@@ -68,6 +68,21 @@
       "id": "anomaly.nte.vehicle",
       "minVersion": 1,
       "optional": true
+    },
+    {
+      "id": "anomaly.ue5.objects",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.ue5.process-event",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.ue5.ahud",
+      "minVersion": 1,
+      "optional": true
     }
   ],
   "capabilities": [
@@ -81,6 +96,9 @@
     "memory-write",
     "nte-session-snapshot",
     "nte-player-snapshot",
-    "nte-vehicle"
+    "nte-vehicle",
+    "ue5-objects",
+    "ue5-ahud",
+    "game-events"
   ]
 }
