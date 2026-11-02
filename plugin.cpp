@@ -423,6 +423,17 @@ struct Diagnostics final {
   // measurement of the running model can see, because it only measures the
   // times when the model is running.
   std::atomic<std::uint64_t> reset_window{};
+  // The camera's own speed, and how much that speed jumps between frames, in
+  // hundredths of a centimetre. This is the world's flow rate: the car travels
+  // with the camera and stays put in frame while the whole picture jolts, which
+  // is why a measurement of the car cannot see it.
+  std::atomic<std::uint64_t> flow_peak_ccm{};
+  std::atomic<std::uint64_t> flow_sum_ccm{};
+  std::atomic<std::uint64_t> flow_count{};
+  // Frame pacing, in microseconds: the longest frame of the window and the mean.
+  std::atomic<std::uint64_t> frame_peak_us{};
+  std::atomic<std::uint64_t> frame_sum_us{};
+  std::atomic<std::uint64_t> frame_count{};
   std::atomic<std::uint64_t> judder_car_peak_dpx{};
   std::atomic<std::uint64_t> judder_car_sum_dpx{};
   std::atomic<std::uint64_t> judder_car_count{};
@@ -541,6 +552,12 @@ struct Probe final {
     double value[2]{};
     std::int64_t ns[2]{};
   };
+  // The camera's own published position, for the flow measurement.
+  double eye_cm[2][3]{};
+  std::int64_t eye_ns[2]{};
+  unsigned eye_count{};
+  // Frame pacing.
+  std::int64_t frame_last_ns{};
   ScalarTrack track_pitch{};
   ScalarTrack track_roll{};
   ScalarTrack track_lens{};
@@ -639,6 +656,12 @@ struct DisplayState final {
   double lens_peak_degrees{};
   double lens_avg_degrees{};
   std::uint64_t resets_in_window{};
+  bool flow_valid{};
+  double flow_peak_cm{};
+  double flow_avg_cm{};
+  bool frame_valid{};
+  double frame_peak_ms{};
+  double frame_mean_ms{};
   double probe_height_step_cm{};
   bool tick_interval_valid{};
   double tick_interval_min_ms{};
@@ -2970,6 +2993,63 @@ void ANOMALY_CALL OnProbeFrame(void *user,
                    context->diag.judder_sum_dpx,
                    context->diag.judder_count);
 
+  // The camera's own speed. A camera that translates in steps makes the world
+  // flow in steps; the car sits still in the middle of the frame throughout.
+  {
+    const double eye[3] = {
+        context->presenter_pose_location[0].load(std::memory_order_relaxed),
+        context->presenter_pose_location[1].load(std::memory_order_relaxed),
+        context->presenter_pose_location[2].load(std::memory_order_relaxed)};
+    if (probe.eye_count >= 1U) {
+      const double dt = static_cast<double>(now_ns - probe.eye_ns[0]) * 1e-9;
+      if (dt > 0.002 && dt < 0.2) {
+        double jump2 = 0.0;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          const double speed = (eye[axis] - probe.eye_cm[0][axis]) / dt;
+          const double previous =
+              probe.eye_count >= 2U
+                  ? (probe.eye_cm[0][axis] - probe.eye_cm[1][axis]) /
+                        (static_cast<double>(probe.eye_ns[0] -
+                                             probe.eye_ns[1]) *
+                         1e-9)
+                  : speed;
+          const double kink = (speed - previous) * dt;
+          jump2 += kink * kink;
+        }
+        const double centimetres = std::sqrt(jump2);
+        if (std::isfinite(centimetres) && centimetres < 500.0) {
+          const auto ccm =
+              static_cast<std::uint64_t>(centimetres * 100.0 + 0.5);
+          RaisePeak(context->diag.flow_peak_ccm, ccm);
+          context->diag.flow_sum_ccm.fetch_add(ccm, std::memory_order_relaxed);
+          context->diag.flow_count.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      probe.eye_cm[1][axis] = probe.eye_cm[0][axis];
+      probe.eye_cm[0][axis] = eye[axis];
+    }
+    probe.eye_ns[1] = probe.eye_ns[0];
+    probe.eye_ns[0] = now_ns;
+    if (probe.eye_count < 2U) {
+      ++probe.eye_count;
+    }
+  }
+  // Frame pacing. A frame that takes half as long again as the average is a
+  // visible stutter no matter how smooth the camera's math is, and it is the one
+  // source of judder that lives outside the pose entirely.
+  {
+    const auto micros = static_cast<std::uint64_t>(
+        static_cast<double>(now_ns - probe.frame_last_ns) / 1000.0 + 0.5);
+    if (probe.frame_last_ns != 0 && micros > 200 && micros < 200000) {
+      RaisePeak(context->diag.frame_peak_us, micros);
+      context->diag.frame_sum_us.fetch_add(micros, std::memory_order_relaxed);
+      context->diag.frame_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    probe.frame_last_ns = now_ns;
+  }
+
   // Rotation and lens, the two channels a point at the centre cannot see.
   double residual = 0.0;
   if (PushScalarSample(
@@ -3213,6 +3293,34 @@ void UpdateDisplay(Context &context) noexcept {
                                       : 0.0;
   context.display.resets_in_window =
       diag.reset_window.load(std::memory_order_relaxed);
+  {
+    const std::uint64_t flow_count =
+        diag.flow_count.load(std::memory_order_relaxed);
+    const std::uint64_t flow_sum =
+        diag.flow_sum_ccm.load(std::memory_order_relaxed);
+    context.display.flow_valid = flow_count != 0;
+    context.display.flow_peak_cm =
+        static_cast<double>(
+            diag.flow_peak_ccm.load(std::memory_order_relaxed)) /
+        100.0;
+    context.display.flow_avg_cm =
+        flow_count == 0 ? 0.0
+                        : static_cast<double>(flow_sum) /
+                              static_cast<double>(flow_count) / 100.0;
+    const std::uint64_t frame_count =
+        diag.frame_count.load(std::memory_order_relaxed);
+    const std::uint64_t frame_sum =
+        diag.frame_sum_us.load(std::memory_order_relaxed);
+    context.display.frame_valid = frame_count != 0;
+    context.display.frame_peak_ms =
+        static_cast<double>(
+            diag.frame_peak_us.load(std::memory_order_relaxed)) /
+        1000.0;
+    context.display.frame_mean_ms =
+        frame_count == 0 ? 0.0
+                         : static_cast<double>(frame_sum) /
+                               static_cast<double>(frame_count) / 1000.0;
+  }
   const std::uint64_t judder_count =
       diag.judder_count.load(std::memory_order_relaxed);
   const std::uint64_t judder_sum =
@@ -3582,6 +3690,7 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->probe.camera_yaw_step_count = 0;
         context->probe.height_step_cm = 0.0;
         context->probe.track_anchor.count = 0;
+        context->probe.eye_count = 0;
         context->probe.track_car.count = 0;
         context->diag.judder_peak_dpx.store(0, std::memory_order_relaxed);
         context->diag.judder_sum_dpx.store(0, std::memory_order_relaxed);
@@ -3590,6 +3699,12 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->diag.judder_car_sum_dpx.store(0, std::memory_order_relaxed);
         context->diag.judder_car_count.store(0, std::memory_order_relaxed);
         context->diag.reset_window.store(0, std::memory_order_relaxed);
+        ResetResidual(context->diag.flow_peak_ccm,
+                      context->diag.flow_sum_ccm,
+                      context->diag.flow_count);
+        ResetResidual(context->diag.frame_peak_us,
+                      context->diag.frame_sum_us,
+                      context->diag.frame_count);
         ResetResidual(context->diag.pitch_peak_cdeg,
                       context->diag.pitch_sum_cdeg,
                       context->diag.pitch_count);
@@ -3687,6 +3802,8 @@ enum class JudderChannel {
   kRoll,
   kLens,
   kReset,
+  kFlow,
+  kFrame,
 };
 
 [[nodiscard]] JudderChannel WorstJudderChannel(
@@ -3723,6 +3840,16 @@ enum class JudderChannel {
   }
   // One reset in half a second is already two visible snaps a second, and each
   // one is a large event, so it outweighs everything else by construction.
+  // A centimetre of camera position per frame is a fifth of a degree at five
+  // metres, so two centimetres is where the world visibly changes speed.
+  consider(JudderChannel::kFlow, display.flow_avg_cm, 2.0);
+  // A frame half again as long as the average is a visible stutter. Scored as
+  // how far the longest frame of the window runs past four thirds of the mean.
+  if (display.frame_valid && display.frame_mean_ms > 1.0) {
+    const double ratio = display.frame_peak_ms / display.frame_mean_ms;
+    consider(JudderChannel::kFrame, (ratio - 1.0) * display.frame_mean_ms,
+             0.4 * display.frame_mean_ms);
+  }
   consider(JudderChannel::kReset,
            static_cast<double>(display.resets_in_window), 1.0);
   return worst;
@@ -3739,8 +3866,9 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   // evidence for that verdict.
   {
     const JudderChannel channel = WorstJudderChannel(display);
-    const char *fallbacks[6] = {"none yet", "position", "pitch",
-                                "roll",     "lens",     "camera reset"};
+    const char *fallbacks[8] = {"none yet", "position", "pitch",
+                                "roll",     "lens",     "camera reset",
+                                "world flow", "frame pacing"};
     char key[48]{};
     std::snprintf(key, sizeof(key), "diag.worst.%d",
                   static_cast<int>(channel));
@@ -3778,6 +3906,23 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   }
   DrawStatusLine(ui, localizer, "diag.lens_residual",
                  "F: field of view residual per frame, peak/avg deg", line);
+  if (display.flow_valid) {
+    std::snprintf(line, sizeof(line), "W %.2f / %.2f cm",
+                  display.flow_peak_cm, display.flow_avg_cm);
+  } else {
+    std::snprintf(line, sizeof(line), "W --");
+  }
+  DrawStatusLine(ui, localizer, "diag.flow",
+                 "W: the camera's own speed jump per frame, peak/avg cm",
+                 line);
+  if (display.frame_valid) {
+    std::snprintf(line, sizeof(line), "T %.1f / %.1f ms",
+                  display.frame_peak_ms, display.frame_mean_ms);
+  } else {
+    std::snprintf(line, sizeof(line), "T --");
+  }
+  DrawStatusLine(ui, localizer, "diag.frame_pacing",
+                 "T: frame length, peak / mean ms", line);
 
   if (!display.probe_ahud_service) {
     std::snprintf(line, sizeof(line), "no service");
