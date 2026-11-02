@@ -1552,6 +1552,10 @@ void RequestPresenterReset(Context &context) noexcept;
 void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
                                         double *rotation) noexcept {
   Context *context = g_active.load(std::memory_order_acquire);
+  if (context != nullptr &&
+      !context->started.load(std::memory_order_acquire)) {
+    context = nullptr;
+  }
   if (context != nullptr) {
     context->diag.detour_calls.fetch_add(1, std::memory_order_relaxed);
     context->diag.detour_calls_window.fetch_add(1,
@@ -2997,6 +3001,9 @@ void ANOMALY_CALL OnProbeFrame(void *user,
   if (context == nullptr || frame == nullptr) {
     return;
   }
+  if (!context->started.load(std::memory_order_acquire)) {
+    return;
+  }
   ++context->probe.frame_calls;
   ++context->probe.frame_window_calls;
 
@@ -3649,6 +3656,12 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
     return Status(ANOMALY_STATUS_V1_INVALID_ARGUMENT);
   }
   context->started.store(false, std::memory_order_release);
+  // Both callbacks check `started` or `g_active` first, so dropping these two
+  // before any release means the revocation below has nothing to wait for.
+  // Draining a callback that is still running the model is what turns a stop
+  // into a timeout, and a timeout into a quarantined plugin that the Host will
+  // not load again until the process restarts.
+  g_active.store(nullptr, std::memory_order_release);
   context->chase_initialized = false;
   ++context->sample_epoch;
   context->sample_mean_interval_ns.store(0.0, std::memory_order_relaxed);
