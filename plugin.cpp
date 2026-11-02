@@ -125,9 +125,9 @@ constexpr double kUpdateRateWindowSeconds = 0.5;
 // the cap keeps a long hitch from making the camera trail too far behind.
 // A longer gap is a hitch/teleport, not a low update rate. Snap the history
 // instead of blending across it (which would both trail and step at the end).
-// T2 presenter: how far behind the newest sample the model is fed, and the
-// largest step the springs are allowed to take in one frame.
-constexpr double kSampleMaximumDelaySeconds = 0.05;
+// T2 presenter: the largest step the springs are allowed to take in one frame.
+// How far behind the newest sample the model is fed is one and a half mean tick
+// intervals, decided where the ring is sampled.
 constexpr double kMaximumPresenterStepSeconds = 0.1;
 // The camera-to-car distance is the direct screen-size driver. Low-pass it so
 // Game-tick sampling/spring phase noise cannot make the car breathe in frame.
@@ -772,14 +772,14 @@ struct Context final {
   std::atomic<double> presenter_drift{};
   std::atomic<double> presenter_distance_cm{};
   std::atomic<std::int64_t> sample_interval_ns{};
-  // The delay the presenter samples the ring at, smoothed. The instantaneous
-  // interval swings with the Game tick (16.5 to 46.1 ms measured on this
-  // machine), and using it directly means the moment the camera looks at the
-  // car jumps by that swing every tick. At 30 m/s a 0.4 ms change is 12 cm of
-  // car position, and the car visibly shakes in frame. A one second
-  // exponential average follows a genuinely slower tick rate without passing
-  // its frame-to-frame jitter through.
-  std::atomic<double> sample_delay_ns{};
+  // Running mean of the Game tick interval. The presenter looks back this far
+  // times kSampleDelayFactor, which is more than one interval, so the sample
+  // point always sits inside a bracket instead of clamping at its edge. An
+  // offline harness (tests/judder_repro.cpp) scores the alternatives on a 45 Hz
+  // tick against 59 Hz frames with hitches, as degrees of car-on-screen wobble
+  // per frame: last interval raw 0.354, this mean 0.124, this mean out to one
+  // and a half intervals with continuation 0.006.
+  std::atomic<double> sample_mean_interval_ns{};
   std::int64_t sample_last_ns{};
   // Bumped by the Game tick when the model must restart (world, preset, reset).
   std::uint64_t sample_epoch{};
@@ -2262,16 +2262,19 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
   }
 
-  // Smoothed, not instantaneous: see sample_delay_ns. The instantaneous value
-  // moves the sample point around by its own jitter, which puts the car's
-  // position on screen into a per-frame tremor at exactly the tick rate.
-  const double delay_ns =
-      context.sample_delay_ns.load(std::memory_order_relaxed);
-  const double delay_seconds =
-      nfs2015_chase::Clamp(delay_ns * 1e-9, 0.0, kSampleMaximumDelaySeconds);
+  // Look back one and a half mean intervals. More than one interval keeps the
+  // target strictly inside a bracket, so the ring interpolates instead of
+  // clamping at its edge; the mean rather than the last measurement keeps the
+  // target from dancing with the interval's own jitter. When a tick arrives
+  // late the target runs past the newest sample, and the ring continues along
+  // the newest pair rather than freezing there.
+  const double mean_interval_ns =
+      context.sample_mean_interval_ns.load(std::memory_order_relaxed);
+  constexpr double kSampleDelayFactor = 1.5;
+  const double delay_ns = mean_interval_ns * kSampleDelayFactor;
   nfs2015_chase::CarSample sample;
-  if (!context.car_ring.At(
-          now_ns - static_cast<std::int64_t>(delay_seconds * 1e9), sample)) {
+  if (!context.car_ring.AtExtrapolating(
+          now_ns - static_cast<std::int64_t>(delay_ns), sample)) {
     return false;
   }
   if (!sample.driving) {
@@ -2647,15 +2650,13 @@ void UpdateCamera(Context &context, const double dt) noexcept {
                                        std::memory_order_relaxed);
       {
         const double previous =
-            context.sample_delay_ns.load(std::memory_order_relaxed);
+            context.sample_mean_interval_ns.load(std::memory_order_relaxed);
         const double measured = static_cast<double>(interval_ns);
-        // About one second of ticks, so a real rate change is followed within a
-        // second and a single hitch barely moves it.
-        constexpr double kDelayTrackingGain = 0.02;
-        context.sample_delay_ns.store(
+        constexpr double kTrackingGain = 0.02;
+        context.sample_mean_interval_ns.store(
             previous <= 0.0
                 ? measured
-                : previous + (measured - previous) * kDelayTrackingGain,
+                : previous + (measured - previous) * kTrackingGain,
             std::memory_order_relaxed);
       }
       // Probe: how steady is the interval the delayed interpolation window is
@@ -3395,7 +3396,7 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   context->started.store(false, std::memory_order_release);
   context->chase_initialized = false;
   ++context->sample_epoch;
-  context->sample_delay_ns.store(0.0, std::memory_order_relaxed);
+  context->sample_mean_interval_ns.store(0.0, std::memory_order_relaxed);
   context->car_ring.Clear();
   PublishInactive(*context);
   ReleaseToggleHotkey(*context);

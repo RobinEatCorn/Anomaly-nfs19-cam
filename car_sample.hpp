@@ -118,6 +118,48 @@ class SampleRing final {
     return true;
   }
 
+  // Sample at `target_ns`, interpolating when it falls between two samples and
+  // continuing the newest pair when it falls beyond them.
+  //
+  // At() clamps in that last case, which is right for "always return a pose" and
+  // wrong for a renderer: a clamp freezes the eye until the next Game tick and
+  // then releases the whole accumulated distance in one jump. A tick that
+  // arrives late is a late sample, not a stopped car, so carry on at the
+  // velocity of the newest pair for at most one span of it. Beyond that the
+  // sample is old enough that the honest answer is to stop.
+  [[nodiscard]] bool AtExtrapolating(const std::int64_t target_ns,
+                                     CarSample &out) const noexcept {
+    if (!At(target_ns, out)) {
+      return false;
+    }
+    Snapshot view;
+    if (!Copy(view) || view.count < 2U) {
+      return true;
+    }
+    const std::size_t newest = (view.next + kCapacity - 1U) % kCapacity;
+    const CarSample &newer = view.slots[newest];
+    if (target_ns <= newer.time_ns) {
+      return true;
+    }
+    const std::size_t older_index = (newest + kCapacity - 1U) % kCapacity;
+    const CarSample &older = view.slots[older_index];
+    const std::int64_t span = newer.time_ns - older.time_ns;
+    if (span <= 0 || newer.epoch != older.epoch) {
+      return true;
+    }
+    double ahead = static_cast<double>(target_ns - newer.time_ns) /
+                   static_cast<double>(span);
+    if (!(ahead > 0.0)) {
+      return true;
+    }
+    if (ahead > 1.0) {
+      ahead = 1.0;
+    }
+    out = BlendCarSample(newer, older, -ahead);
+    out.time_ns = target_ns;
+    return true;
+  }
+
   // Sample at `time_ns`, interpolating between the two samples that bracket it.
   // Times outside the stored range clamp to the oldest or newest sample: the
   // renderer must always get a pose, even if the Game thread stalled.

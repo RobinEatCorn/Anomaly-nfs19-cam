@@ -559,5 +559,32 @@ int main() {
     Expect("ring still holds the oldest retained slot", ring.At(15000, older));
     ExpectNear("ring wraps at capacity", older.car.speed, 15.0, 1e-9);
   }
-return 0;
+  {
+    // AtExtrapolating: inside the range it is At(); past the newest sample it
+    // continues the newest pair instead of clamping, and stops after one span.
+    nfs2015_chase::CarSample a;
+    a.time_ns = 1000;
+    a.car.position = {0.0, 0.0, 0.0};
+    nfs2015_chase::CarSample b;
+    b.time_ns = 2000;  // span 1000 ns, 10 m per span
+    b.car.position = {10.0, 0.0, 0.0};
+    nfs2015_chase::SampleRing ring;
+    ring.Write(a);
+    ring.Write(b);
+    nfs2015_chase::CarSample out;
+    Expect("extrapolating inside the range", ring.AtExtrapolating(1500, out));
+    ExpectNear("extrapolating interpolates inside the range",
+               out.car.position.x, 5.0, 1e-9);
+    Expect("extrapolating past the newest", ring.AtExtrapolating(2500, out));
+    ExpectNear("extrapolating continues at the newest pair's velocity",
+               out.car.position.x, 15.0, 1e-9);
+    Expect("extrapolating far past the newest",
+           ring.AtExtrapolating(5000, out));
+    ExpectNear("extrapolating stops after one span", out.car.position.x, 20.0,
+               1e-9);
+    Expect("extrapolating before the oldest", ring.AtExtrapolating(0, out));
+    ExpectNear("extrapolating never runs backwards", out.car.position.x, 10.0,
+               1e-9);
+  }
+  return 0;
 }
