@@ -73,6 +73,11 @@
       "id": "anomaly.ue5.ahud",
       "minVersion": 1,
       "optional": true
+    },
+    {
+      "id": "anomaly.ue5.build",
+      "minVersion": 1,
+      "optional": true
     }
   ],
   "capabilities": [
@@ -87,6 +92,7 @@
     "nte-session-snapshot",
     "nte-player-snapshot",
     "nte-vehicle",
-    "ue5-ahud"
+    "ue5-ahud",
+    "ue5-build"
   ]
 }

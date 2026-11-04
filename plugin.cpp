@@ -200,6 +200,48 @@ constexpr std::uint8_t kRenderXWait = 0;
 constexpr std::uint8_t kRenderXReady = 1;
 constexpr std::uint8_t kRenderXFailed = 2;
 
+// Version insurance for the X anchor (PLAN-render-thread-hook.md task group 1).
+// The offset table above was verified against this exact Anomaly NTE profile;
+// `anomaly-cli --pid <pid> ue` reports the same value as `profileHash`. The
+// profile is hashed as its raw JSON text, so any edit - even whitespace - moves
+// this value and disables the X path instead of reading a layout that moved.
+// On a mismatch the camera keeps working through the borrow estimate, and the
+// panel says why.
+constexpr std::string_view kExpectedProfileHash =
+    "06e1b79ceb4b9a778cb2b88357fea9ac2a6c34e06ba759d3b62048a979fd11bd";
+constexpr std::uint8_t kAnchorInsuranceWaiting = 0;
+constexpr std::uint8_t kAnchorInsuranceReady = 1;
+constexpr std::uint8_t kAnchorInsuranceServiceMissing = 2;
+constexpr std::uint8_t kAnchorInsuranceHashMismatch = 3;
+constexpr std::uint8_t kAnchorInsuranceReadFailed = 4;
+// What anchors the car position. `X` reads `root+280` in the detour; `Borrow`
+// is the old game-camera estimate; `Model` is the untouched tick sample.
+constexpr std::uint32_t kAnchorSourceX = 0;
+constexpr std::uint32_t kAnchorSourceBorrow = 1;
+constexpr std::uint32_t kAnchorSourceModel = 2;
+constexpr std::uint32_t kAnchorSourceDefault = kAnchorSourceX;
+// What the panel reports. These are also what the detour publishes as the
+// anchor it actually used this frame.
+constexpr std::uint8_t kAnchorStateX = 0;
+constexpr std::uint8_t kAnchorStateBorrow = 1;
+constexpr std::uint8_t kAnchorStateDisabled = 2;
+constexpr std::uint8_t kAnchorStateHashMismatch = 3;
+constexpr std::uint8_t kAnchorStateResolveFailed = 4;
+constexpr std::uint8_t kAnchorGateOk = 0;
+constexpr std::uint8_t kAnchorGateHash = 1;
+constexpr std::uint8_t kAnchorGateResolve = 2;
+constexpr std::uint8_t kAnchorGateService = 3;
+constexpr std::uint8_t kAnchorGateOffset = 4;
+constexpr std::uint8_t kAnchorGateOff = 5;
+constexpr std::uint8_t kAnchorGateRead = 6;
+// A wrong offset is caught by the Game-tick cross-check. Require this many
+// consecutive mismatches so one hitch cannot disable the path for a session.
+constexpr std::uint32_t kAnchorChainMismatchLimit = 3;
+// The detour reads X at most once per 8 ms; the presenter runs on the same
+// call or the next pass. Fifty ms covers a frame hitch without accepting a
+// stale position from before a pause.
+constexpr std::int64_t kAnchorSnapshotMaxAgeNs = 50'000'000;
+
 constexpr std::string_view kSettingsSchema = R"json(
 {
   "type":"object",
@@ -216,7 +258,13 @@ constexpr std::string_view kSettingsSchema = R"json(
     "rollScale":{"type":"number","minimum":0.0,"maximum":2.0},
     "pitchScale":{"type":"number","minimum":0.0,"maximum":2.0},
     "shakeScale":{"type":"number","minimum":0.0,"maximum":2.0},
-    "rollOnlyInDrift":{"type":"boolean"}
+    "rollOnlyInDrift":{"type":"boolean"},
+    "anchorSource":{"type":"integer","minimum":0,"maximum":2},
+    "borrowStrength":{"type":"number","minimum":0.0,"maximum":1.0},
+    "diagnosticFlatPose":{"type":"boolean"},
+    "diagnosticZeroLag":{"type":"boolean"},
+    "diagnosticSkipPosition":{"type":"boolean"},
+    "diagnosticSkipRotation":{"type":"boolean"}
   }
 }
 )json";
@@ -646,6 +694,23 @@ struct RenderXProbe final {
   std::atomic<std::int64_t> lead_sum_dms{};
   std::atomic<std::int64_t> lead_count{};
 
+  // Task group 1: version gate and the anchor snapshot the presenter reads.
+  // `insurance_state` and `chain_failed` are Game-tick only; the detour reads
+  // `anchor_enabled` and the snapshot fields.
+  std::uint8_t insurance_state{kAnchorInsuranceWaiting};
+  std::uint8_t logged_insurance_state{0xFF};
+  bool chain_verified{};
+  bool chain_failed{};
+  std::uint32_t chain_fail_streak{};
+  std::atomic_bool anchor_enabled{};
+  std::atomic_bool anchor_valid{};
+  std::atomic<double> anchor_cm[3]{};
+  std::atomic<std::int64_t> anchor_ns{};
+  std::atomic<std::int64_t> last_read_ns{};
+  std::atomic<std::uint64_t> anchor_read_failures{};
+  std::atomic<std::uint64_t> anchor_fallbacks{};
+  std::atomic<std::uint8_t> last_used{kAnchorStateDisabled};
+
   void Reset() noexcept {
     resolve_state = kRenderXWait;
     resolve_code = 0;
@@ -676,6 +741,21 @@ struct RenderXProbe final {
     lead_sum_dcm.store(0, std::memory_order_relaxed);
     lead_sum_dms.store(0, std::memory_order_relaxed);
     lead_count.store(0, std::memory_order_relaxed);
+    insurance_state = kAnchorInsuranceWaiting;
+    logged_insurance_state = 0xFF;
+    chain_verified = false;
+    chain_failed = false;
+    chain_fail_streak = 0;
+    anchor_enabled.store(false, std::memory_order_relaxed);
+    anchor_valid.store(false, std::memory_order_relaxed);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      anchor_cm[axis].store(0.0, std::memory_order_relaxed);
+    }
+    anchor_ns.store(0, std::memory_order_relaxed);
+    last_read_ns.store(0, std::memory_order_relaxed);
+    anchor_read_failures.store(0, std::memory_order_relaxed);
+    anchor_fallbacks.store(0, std::memory_order_relaxed);
+    last_used.store(kAnchorStateDisabled, std::memory_order_relaxed);
   }
 
   // Called by the Game tick every 0.5 s, next to the other diagnostic windows.
@@ -777,6 +857,11 @@ struct DisplayState final {
   double render_x_chain_cm{};
   std::uint64_t render_x_chain_mismatches{};
   std::uint64_t render_x_gt_samples{};
+  std::uint32_t anchor_source{kAnchorSourceDefault};
+  std::uint8_t anchor_effective{kAnchorStateDisabled};
+  std::uint8_t anchor_gate{kAnchorGateOff};
+  std::uint64_t anchor_fallbacks{};
+  std::uint64_t anchor_read_failures{};
 
   // Probe. Copied from Context::probe on the Game tick.
   bool probe_ahud_service{};
@@ -853,6 +938,9 @@ struct Context final {
   // Optional engine access. Only the probe uses this; it may be null on a host
   // without the `ue5.ahud` feature, and every use is guarded.
   const AnomalyUe5AhudServiceV1 *ahud{};
+  // Optional build identity. It gates the hardcoded offset table used by the X
+  // anchor; a host without it simply leaves the X path disabled.
+  const AnomalyUe5BuildServiceV1 *build{};
 
   AnomalyGenerationHandleV1 settings_schema{};
   AnomalyGenerationHandleV1 toggle_hotkey{};
@@ -900,6 +988,10 @@ struct Context final {
   // the plain NFS model anchored to the Game-tick sample; at one the model is
   // anchored to the Game's drawn car position.
   std::atomic<double> borrow_strength{1.0};
+  // Which position source feeds the anchor: X (detour-time `root+280`), the
+  // borrow estimate, or the plain tick sample. The X path falls back to borrow
+  // when the build gate is closed, so the camera never depends on it.
+  std::atomic<std::uint32_t> anchor_source{kAnchorSourceDefault};
   std::atomic_bool fov_enabled{true};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
@@ -1295,8 +1387,35 @@ bool ReadChainLocation(const AnomalyCoreServiceV1 *core,
   return true;
 }
 
+bool HexEqualsIgnoreCase(const char *actual,
+                         const std::string_view expected) noexcept {
+  if (actual == nullptr) {
+    return false;
+  }
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    char value = actual[index];
+    if (value == '\0') {
+      return false;
+    }
+    if (value >= 'A' && value <= 'Z') {
+      value = static_cast<char>(value - 'A' + 'a');
+    }
+    char wanted = expected[index];
+    if (wanted >= 'A' && wanted <= 'Z') {
+      wanted = static_cast<char>(wanted - 'A' + 'a');
+    }
+    if (value != wanted) {
+      return false;
+    }
+  }
+  return actual[expected.size()] == '\0';
+}
+
 void TryResolveRenderX(Context &context) noexcept {
   RenderXProbe &probe = context.render_x;
+  if (probe.insurance_state != kAnchorInsuranceReady) {
+    return;
+  }
   std::uintptr_t instruction{};
   const AnomalyStatusV1 status =
       ResolveSignatureStatus(context, kGWorldPattern, instruction);
@@ -1314,11 +1433,74 @@ void TryResolveRenderX(Context &context) noexcept {
       probe.gworld_slot = static_cast<std::uintptr_t>(slot);
       probe.resolve_state = kRenderXReady;
       probe.resolve_code = ANOMALY_STATUS_V1_OK;
+      probe.anchor_enabled.store(probe.chain_verified && !probe.chain_failed,
+                                 std::memory_order_release);
       return;
     }
   }
   probe.resolve_state = kRenderXFailed;
-  probe.resolve_code = status.code;
+  probe.resolve_code =
+      status.code == ANOMALY_STATUS_V1_OK ? ANOMALY_STATUS_V1_FAILED
+                                          : status.code;
+  probe.anchor_enabled.store(false, std::memory_order_release);
+}
+
+// Read the host's build identity once, then close or open the X gate. The
+// hardcoded offsets are only meaningful for the profile they were verified
+// against; a mismatch is a version change, not a bug to retry.
+void EvaluateAnchorInsurance(Context &context) noexcept {
+  RenderXProbe &probe = context.render_x;
+  std::uint8_t next = kAnchorInsuranceServiceMissing;
+  std::array<char, 96> hash{};
+  std::size_t hash_size = hash.size();
+  if (context.build != nullptr && context.build->profile_hash != nullptr) {
+    const AnomalyStatusV1 status = context.build->profile_hash(
+        context.build->user, hash.data(), &hash_size);
+    if (status.code == ANOMALY_STATUS_V1_OK && hash_size > 1 &&
+        hash_size <= hash.size() && hash[0] != '\0') {
+      next = HexEqualsIgnoreCase(hash.data(), kExpectedProfileHash)
+                 ? kAnchorInsuranceReady
+                 : kAnchorInsuranceHashMismatch;
+    } else {
+      next = kAnchorInsuranceReadFailed;
+    }
+  }
+  probe.insurance_state = next;
+  if (next != kAnchorInsuranceReady) {
+    probe.anchor_enabled.store(false, std::memory_order_release);
+  }
+  if (probe.logged_insurance_state != next) {
+    probe.logged_insurance_state = next;
+    char message[320]{};
+    if (next == kAnchorInsuranceReady) {
+      std::snprintf(message, sizeof(message),
+                    "anchor gate: ready (profile %.*s)",
+                    static_cast<int>(hash_size > 0 ? hash_size - 1 : 0),
+                    hash.data());
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+    } else if (next == kAnchorInsuranceHashMismatch) {
+      std::snprintf(message, sizeof(message),
+                    "anchor gate: profile hash mismatch (got %.*s, want %.*s); "
+                    "X anchor disabled, borrow stays active",
+                    static_cast<int>(hash_size > 0 ? hash_size - 1 : 0),
+                    hash.data(),
+                    static_cast<int>(kExpectedProfileHash.size()),
+                    kExpectedProfileHash.data());
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, message);
+    } else if (next == kAnchorInsuranceServiceMissing) {
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "anchor gate: ue5 build service unavailable; X anchor disabled");
+    } else {
+      std::snprintf(message, sizeof(message),
+                    "anchor gate: profile hash unreadable (size=%zu); "
+                    "X anchor disabled",
+                    hash_size);
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, message);
+    }
+  }
+  if (next == kAnchorInsuranceReady) {
+    TryResolveRenderX(context);
+  }
 }
 
 // Game tick: refresh the world pointer and the pawn chain, then compare the
@@ -1327,10 +1509,17 @@ void TryResolveRenderX(Context &context) noexcept {
 void UpdateRenderXProbe(Context &context, const double base_cm[3],
                         const bool player_valid) noexcept {
   RenderXProbe &probe = context.render_x;
-  if (probe.resolve_state != kRenderXReady &&
+  if (probe.insurance_state == kAnchorInsuranceWaiting &&
       context.elapsed >= probe.next_resolve_elapsed) {
-    // The profile can still be settling on the first ticks, so a failure is
-    // retried - slowly, because a section scan is not free.
+    // The profile can still be settling on the first tick; a hash that was not
+    // readable yet is worth one more look.
+    probe.next_resolve_elapsed = context.elapsed + kRenderXResolveRetrySeconds;
+    EvaluateAnchorInsurance(context);
+  } else if (probe.insurance_state == kAnchorInsuranceReady &&
+             probe.resolve_state != kRenderXReady &&
+             context.elapsed >= probe.next_resolve_elapsed) {
+    // The profile can still be settling on the first ticks, so a failed
+    // pattern scan is retried - slowly, because a section scan is not free.
     probe.next_resolve_elapsed = context.elapsed + kRenderXResolveRetrySeconds;
     TryResolveRenderX(context);
   }
@@ -1360,6 +1549,20 @@ void UpdateRenderXProbe(Context &context, const double base_cm[3],
         }
         if (distance > kRenderXChainToleranceCm) {
           ++probe.chain_mismatches;
+          if (probe.chain_fail_streak < kAnchorChainMismatchLimit) {
+            ++probe.chain_fail_streak;
+          }
+          if (probe.chain_fail_streak >= kAnchorChainMismatchLimit) {
+            probe.chain_failed = true;
+            probe.anchor_enabled.store(false, std::memory_order_release);
+            probe.anchor_valid.store(false, std::memory_order_release);
+          }
+        } else {
+          probe.chain_fail_streak = 0;
+          probe.chain_verified = true;
+          if (probe.resolve_state == kRenderXReady && !probe.chain_failed) {
+            probe.anchor_enabled.store(true, std::memory_order_release);
+          }
         }
       }
     }
@@ -1411,21 +1614,41 @@ void UpdateRenderXProbe(Context &context, const double base_cm[3],
 // the phase can be measured with the camera switched off.
 void SampleRenderXPhase(Context &context) noexcept {
   RenderXProbe &probe = context.render_x;
-  // The detour runs once per render pass; the passes of one frame are only a
-  // fraction of a millisecond apart. Same threshold as the presenter.
-  static thread_local std::int64_t last_sample_ns = 0;
-  const std::int64_t now_ns = NowNanoseconds();
-  if (last_sample_ns != 0 && now_ns - last_sample_ns < kPresenterSameFrameNs) {
+  if (!probe.anchor_enabled.load(std::memory_order_acquire)) {
     return;
   }
-  last_sample_ns = now_ns;
+  // The detour runs once per render pass; the passes of one frame are only a
+  // fraction of a millisecond apart. One read per 8 ms across all detour
+  // threads: the first pass reads, the rest consume the same snapshot. This is
+  // also the only read on the camera path; no allocation, no lock, no log.
+  const std::int64_t now_ns = NowNanoseconds();
+  std::int64_t previous = probe.last_read_ns.load(std::memory_order_relaxed);
+  if (previous != 0 && now_ns - previous < kPresenterSameFrameNs) {
+    return;
+  }
+  if (!probe.last_read_ns.compare_exchange_strong(
+          previous, now_ns, std::memory_order_relaxed)) {
+    return;
+  }
   const std::uintptr_t root = probe.root.load(std::memory_order_relaxed);
-  if (root == 0 || !probe.player_valid.load(std::memory_order_acquire)) {
+  if (root == 0) {
     return;
   }
   double render_cm[3]{};
   if (!ReadChainLocation(context.core, root, render_cm)) {
     probe.read_failures.fetch_add(1, std::memory_order_relaxed);
+    probe.anchor_read_failures.fetch_add(1, std::memory_order_relaxed);
+    probe.anchor_valid.store(false, std::memory_order_release);
+    return;
+  }
+  // Publish the same read the phase uses as the anchor snapshot. It is valid
+  // at any speed; the phase statistics below still need a moving car.
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    probe.anchor_cm[axis].store(render_cm[axis], std::memory_order_relaxed);
+  }
+  probe.anchor_ns.store(NowNanoseconds(), std::memory_order_relaxed);
+  probe.anchor_valid.store(true, std::memory_order_release);
+  if (!probe.player_valid.load(std::memory_order_acquire)) {
     return;
   }
   double player_cm[3]{};
@@ -1673,6 +1896,8 @@ bool PersistSettings(Context &context) noexcept {
       context.diagnostic_zero_lag.load(std::memory_order_acquire);
   const double borrow_strength =
       context.borrow_strength.load(std::memory_order_acquire);
+  const std::uint32_t anchor_source =
+      context.anchor_source.load(std::memory_order_acquire);
   const bool diagnostic_skip_position =
       context.diagnostic_skip_position.load(std::memory_order_acquire);
   const bool diagnostic_skip_rotation =
@@ -1719,6 +1944,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendText(cursor, end, diagnostic_flat_pose ? "true" : "false") &&
       AppendText(cursor, end, ",\"borrowStrength\":") &&
       AppendNumber(cursor, end, borrow_strength) &&
+      AppendText(cursor, end, ",\"anchorSource\":") &&
+      AppendNumber(cursor, end, static_cast<double>(anchor_source)) &&
       AppendText(cursor, end, ",\"diagnosticZeroLag\":") &&
       AppendText(cursor, end, diagnostic_zero_lag ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticSkipPosition\":") &&
@@ -1758,6 +1985,7 @@ void SetDefaults(Context &context) noexcept {
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.diagnostic_zero_lag.store(false, std::memory_order_release);
   context.borrow_strength.store(1.0, std::memory_order_release);
+  context.anchor_source.store(kAnchorSourceDefault, std::memory_order_release);
   context.diagnostic_skip_position.store(false, std::memory_order_release);
   context.diagnostic_skip_rotation.store(false, std::memory_order_release);
   context.fov_enabled.store(true, std::memory_order_release);
@@ -1869,7 +2097,7 @@ bool LoadSettings(Context &context) noexcept {
       kind != ANOMALY_JSON_V1_OBJECT ||
       json.object_size(json.user, root, &field_count).code !=
           ANOMALY_STATUS_V1_OK ||
-      field_count < 6 || field_count > 12) {
+      field_count < 6 || field_count > 24) {
     return false;
   }
   bool enabled{};
@@ -1899,6 +2127,7 @@ bool LoadSettings(Context &context) noexcept {
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
   double borrow_strength = 1.0;
+  double anchor_source_number = static_cast<double>(kAnchorSourceDefault);
   bool diagnostic_skip_position = false;
   bool diagnostic_skip_rotation = false;
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
@@ -1914,6 +2143,8 @@ bool LoadSettings(Context &context) noexcept {
                                       diagnostic_flat_pose));
   static_cast<void>(JsonObjectNumber(json, root, "borrowStrength",
                                      borrow_strength));
+  static_cast<void>(JsonObjectNumber(json, root, "anchorSource",
+                                     anchor_source_number));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticZeroLag",
                                       diagnostic_zero_lag));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticSkipPosition",
@@ -1942,6 +2173,13 @@ bool LoadSettings(Context &context) noexcept {
                                      std::memory_order_release);
   context.borrow_strength.store(
       nfs2015_chase::Clamp(borrow_strength, 0.0, 1.0),
+      std::memory_order_release);
+  context.anchor_source.store(
+      std::isfinite(anchor_source_number) && anchor_source_number >= 0.0 &&
+              anchor_source_number <= 2.0 &&
+              std::floor(anchor_source_number) == anchor_source_number
+          ? static_cast<std::uint32_t>(anchor_source_number)
+          : kAnchorSourceDefault,
       std::memory_order_release);
   context.diagnostic_zero_lag.store(diagnostic_zero_lag,
                                     std::memory_order_release);
@@ -2898,38 +3136,93 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     context.game_offset_last_ns = 0;
   }
 
-  // Anchor the model to the render-synced car position. The Game-tick sample
-  // is the best measurement we have of the car, but the Game draws the car at
-  // this render instant. The Game camera's own location is produced at that
-  // same instant, so we use it as a reference. See the Context field comment.
+  // Anchor the model to the car position produced at this detour instant.
+  // Three sources, selected by `anchor_source`:
+  //   X      the `root+280` read the same detour took (task group 1),
+  //   Borrow the old game-camera estimate,
+  //   Model  the untouched Game-tick sample.
+  // X only enters the anchor; velocity and yaw still come from the Game tick.
   if (game_eye_cm != nullptr) {
     const double our_car_cm[3] = {
         sample.car.position.x * 100.0, sample.car.position.y * 100.0,
         sample.car.position.z * 100.0};
     const double borrow_strength =
         context.borrow_strength.load(std::memory_order_relaxed);
-    const double borrow_dt =
-        context.game_offset_last_ns == 0
-            ? 0.0
-            : static_cast<double>(now_ns - context.game_offset_last_ns) * 1e-9;
-    context.game_offset_last_ns = now_ns;
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      const double offset = game_eye_cm[axis] - our_car_cm[axis];
-      if (!context.game_offset_valid) {
-        context.game_offset_cm[axis] = offset;
-      } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
-        constexpr double kGameOffsetRate = 3.3;
-        const double blend =
-            1.0 - std::exp(-kGameOffsetRate * borrow_dt);
-        context.game_offset_cm[axis] +=
-            (offset - context.game_offset_cm[axis]) * blend;
+    const std::uint32_t anchor_source =
+        context.anchor_source.load(std::memory_order_relaxed);
+    double raw_est_cm[3]{};
+
+    bool x_valid = false;
+    if (anchor_source == kAnchorSourceX) {
+      x_valid =
+          context.render_x.anchor_enabled.load(std::memory_order_acquire) &&
+          context.render_x.anchor_valid.load(std::memory_order_acquire);
+      if (x_valid) {
+        const std::int64_t age =
+            now_ns - context.render_x.anchor_ns.load(std::memory_order_relaxed);
+        x_valid = age >= 0 && age <= kAnchorSnapshotMaxAgeNs;
       }
-      // The render-synced car position. `borrow_strength` interpolates
-      // between the plain tick sample and the Game-camera-derived estimate,
-      // so 0 keeps the old behaviour and 1 follows the drawn car.
-      const double raw_est_cm = game_eye_cm[axis] - context.game_offset_cm[axis];
+    }
+
+    if (anchor_source == kAnchorSourceX && x_valid) {
+      // X is the raw `root+280`; the model's car origin is that value plus the
+      // user's `originOffsetCm`, applied on Z exactly as `QueryPlayer` does.
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        raw_est_cm[axis] =
+            context.render_x.anchor_cm[axis].load(std::memory_order_relaxed);
+      }
+      raw_est_cm[2] +=
+          context.origin_offset_cm.load(std::memory_order_relaxed);
+      // The borrow offset is not tracking in this mode. If the X path falls
+      // back, the offset re-initialises from the current Game camera instead
+      // of resuming a stale estimate.
+      context.game_offset_valid = false;
+      context.game_offset_last_ns = 0;
+      context.render_x.last_used.store(kAnchorStateX,
+                                       std::memory_order_relaxed);
+    } else if (anchor_source == kAnchorSourceModel) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        raw_est_cm[axis] = our_car_cm[axis];
+      }
+      context.game_offset_valid = false;
+      context.game_offset_last_ns = 0;
+      context.render_x.last_used.store(kAnchorStateDisabled,
+                                       std::memory_order_relaxed);
+    } else {
+      if (anchor_source == kAnchorSourceX) {
+        context.render_x.anchor_fallbacks.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+      const double borrow_dt =
+          context.game_offset_last_ns == 0
+              ? 0.0
+              : static_cast<double>(now_ns - context.game_offset_last_ns) * 1e-9;
+      context.game_offset_last_ns = now_ns;
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const double offset = game_eye_cm[axis] - our_car_cm[axis];
+        if (!context.game_offset_valid) {
+          context.game_offset_cm[axis] = offset;
+        } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
+          constexpr double kGameOffsetRate = 3.3;
+          const double blend =
+              1.0 - std::exp(-kGameOffsetRate * borrow_dt);
+          context.game_offset_cm[axis] +=
+              (offset - context.game_offset_cm[axis]) * blend;
+        }
+        raw_est_cm[axis] =
+            game_eye_cm[axis] - context.game_offset_cm[axis];
+      }
+      context.game_offset_valid = true;
+      context.render_x.last_used.store(kAnchorStateBorrow,
+                                       std::memory_order_relaxed);
+    }
+
+    // `borrow_strength` still interpolates between the plain tick sample and
+    // the selected source, so 0 is the pure model and 1 is fully anchored.
+    for (std::size_t axis = 0; axis < 3; ++axis) {
       const double car_cm =
-          our_car_cm[axis] + (raw_est_cm - our_car_cm[axis]) * borrow_strength;
+          our_car_cm[axis] +
+          (raw_est_cm[axis] - our_car_cm[axis]) * borrow_strength;
       if (axis == 0) {
         sample.car.position.x = car_cm / 100.0;
       } else if (axis == 1) {
@@ -2940,7 +3233,6 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
       sample.anchor_cm[axis] = car_cm;
       sample.origin_cm[axis] = car_cm;
     }
-    context.game_offset_valid = true;
   }
 
   if (!context.presenter_initialized || context.presenter_epoch != sample.epoch ||
@@ -4005,6 +4297,50 @@ void UpdateDisplay(Context &context) noexcept {
     context.display.render_x_gt_samples =
         render_x.samples_on_game_thread.load(std::memory_order_relaxed);
   }
+  {
+    const RenderXProbe &render_x = context.render_x;
+    const std::uint32_t source =
+        context.anchor_source.load(std::memory_order_acquire);
+    const std::uint8_t insurance = render_x.insurance_state;
+    const std::uint8_t last_used =
+        render_x.last_used.load(std::memory_order_relaxed);
+    context.display.anchor_source = source;
+    context.display.anchor_fallbacks =
+        render_x.anchor_fallbacks.load(std::memory_order_relaxed);
+    context.display.anchor_read_failures =
+        render_x.anchor_read_failures.load(std::memory_order_relaxed);
+    std::uint8_t gate = kAnchorGateOff;
+    if (source == kAnchorSourceX) {
+      if (insurance == kAnchorInsuranceHashMismatch) {
+        gate = kAnchorGateHash;
+      } else if (insurance == kAnchorInsuranceServiceMissing) {
+        gate = kAnchorGateService;
+      } else if (insurance == kAnchorInsuranceReadFailed) {
+        gate = kAnchorGateRead;
+      } else if (render_x.chain_failed) {
+        gate = kAnchorGateOffset;
+      } else if (render_x.resolve_state == kRenderXFailed) {
+        gate = kAnchorGateResolve;
+      } else if (insurance == kAnchorInsuranceReady &&
+                 render_x.resolve_state == kRenderXReady) {
+        gate = kAnchorGateOk;
+      }
+    }
+    context.display.anchor_gate = gate;
+    std::uint8_t effective = kAnchorStateDisabled;
+    if (source == kAnchorSourceX) {
+      if (insurance == kAnchorInsuranceHashMismatch) {
+        effective = kAnchorStateHashMismatch;
+      } else if (render_x.resolve_state == kRenderXFailed) {
+        effective = kAnchorStateResolveFailed;
+      } else {
+        effective = last_used;
+      }
+    } else if (source == kAnchorSourceBorrow) {
+      effective = kAnchorStateBorrow;
+    }
+    context.display.anchor_effective = effective;
+  }
   const std::uint64_t interval_min_raw =
       diag.tick_interval_min_ns.load(std::memory_order_relaxed);
   context.display.tick_interval_valid = interval_min_raw != UINT64_MAX;
@@ -4105,6 +4441,11 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
   // "off" instead of failing the load.
   context->ahud = Query<AnomalyUe5AhudServiceV1>(
       host, ANOMALY_UE5_AHUD_SERVICE_V1_ID, ANOMALY_UE5_AHUD_SERVICE_V1_VERSION);
+  // Version insurance for the X anchor. Optional: a host without the build
+  // service leaves the X path disabled and the borrow estimate in charge.
+  context->build = Query<AnomalyUe5BuildServiceV1>(
+      host, ANOMALY_UE5_BUILD_SERVICE_V1_ID,
+      ANOMALY_UE5_BUILD_SERVICE_V1_VERSION);
   // The entities/actors services are deliberately not leased. Every one of
   // their reflection calls (`component_bounds`, `frame`, `page`) runs a
   // name-keyed walk inside the host on every call, and the camera needs none
@@ -4198,10 +4539,11 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   // A fresh session re-runs the P0 probe from scratch. Stop already dropped the
   // old subscription, so nothing can be in flight while this resets.
   context->probe = Probe{};
-  // Task group 0: resolve `ue5.GWorld` from the Lifecycle domain, where
-  // signature learning is allowed. The Game tick retries slowly on failure.
+  // Task group 1: check the profile hash, then resolve `ue5.GWorld` from the
+  // Lifecycle domain where signature learning is allowed. The Game tick
+  // retries a failed pattern scan, but never bypasses the hash gate.
   context->render_x.Reset();
-  TryResolveRenderX(*context);
+  EvaluateAnchorInsurance(*context);
   context->detour_hz = 0.0;
   context->next_vehicle_query_elapsed = 0.0;
   context->vehicle_cached_valid = false;
@@ -4592,6 +4934,21 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                 display.render_x_speed_kmh);
   DrawStatusLine(ui, localizer, "diag.render_x_lead", "X along travel",
                  line);
+  {
+    static constexpr const char *kGateValues[7] = {
+        "ok", "hash", "pattern", "service", "offset", "off", "read"};
+    const std::size_t gate =
+        display.anchor_gate < 7U ? display.anchor_gate : 6U;
+    DrawStatusLine(ui, localizer, "diag.anchor_gate", "X gate",
+                   kGateValues[gate]);
+    std::snprintf(line, sizeof(line), "%llu / %llu",
+                  static_cast<unsigned long long>(
+                      display.anchor_fallbacks),
+                  static_cast<unsigned long long>(
+                      display.anchor_read_failures));
+    DrawStatusLine(ui, localizer, "diag.anchor_fallback",
+                   "X fallback/read", line);
+  }
 
   if (!display.probe_ahud_service) {
     std::snprintf(line, sizeof(line), "no service");
@@ -4771,6 +5128,23 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
       std::string selected = context->localizer.Text("status.preset", "Preset");
       selected.append(": ").append(PresetName(context->localizer, display.preset));
       ui->text(ui->user, StringView(selected));
+
+      const std::string anchor_label =
+          context->localizer.Text("setting.anchor_source", "Anchor source");
+      ui->text(ui->user, StringView(anchor_label));
+      const auto anchor_button = [&](const std::uint32_t source,
+                                     const char *key, const char *fallback) {
+        std::string label;
+        label.append(display.anchor_source == source ? "> " : "  ");
+        label.append(context->localizer.Text(key, fallback));
+        if (ui->button(ui->user, StringView(label), 0.0F, 0.0F) != 0) {
+          context->anchor_source.store(source, std::memory_order_release);
+          MarkSettingsDirty(*context);
+        }
+      };
+      anchor_button(kAnchorSourceX, "anchor.x", "X anchored");
+      anchor_button(kAnchorSourceBorrow, "anchor.borrow", "Borrow estimate");
+      anchor_button(kAnchorSourceModel, "anchor.model", "Pure model");
 
       const std::string fov_label = context->localizer.Label(
           "setting.fov", "Apply NFS lens (FOV)", "chase-fov");
@@ -4969,6 +5343,39 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
               : context->localizer.Text(
                     display.started ? "status.unavailable" : "status.stopped",
                     display.started ? "Unavailable" : "Stopped"));
+      {
+        const char *state_key = "anchor.state.disabled";
+        const char *state_fallback = "disabled";
+        switch (display.anchor_effective) {
+          case kAnchorStateX:
+            state_key = "anchor.state.x";
+            state_fallback = "X anchored";
+            break;
+          case kAnchorStateBorrow:
+            state_key = "anchor.state.borrow";
+            state_fallback = "borrow";
+            break;
+          case kAnchorStateHashMismatch:
+            state_key = "anchor.state.hash_mismatch";
+            state_fallback = "hash mismatch";
+            break;
+          case kAnchorStateResolveFailed:
+            state_key = "anchor.state.resolve_failed";
+            state_fallback = "pattern failed";
+            break;
+          default:
+            break;
+        }
+        std::string anchor_value =
+            context->localizer.Text(state_key, state_fallback);
+        char fallback_count[48]{};
+        std::snprintf(fallback_count, sizeof(fallback_count), "  fb %llu",
+                      static_cast<unsigned long long>(
+                          display.anchor_fallbacks));
+        anchor_value.append(fallback_count);
+        DrawStatusLine(ui, context->localizer, "status.anchor", "Anchor",
+                       anchor_value);
+      }
       if (display.started) {
         char update_line[64]{};
         std::snprintf(update_line, sizeof(update_line), "%.1f Hz",

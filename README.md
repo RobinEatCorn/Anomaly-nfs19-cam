@@ -33,10 +33,12 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 - `anomaly.interop.signature` + `anomaly.interop.hook` 接管 CameraManager 的视点函数；
 - `anomaly.nte.player` / `anomaly.nte.vehicle` 读取相机所需的快照（两者在宿主侧都是缓存拷贝或
   低频轮询；不租用 `anomaly.nte.entities` / `anomaly.nte.actors`）；
+- `anomaly.core` 的 `read_memory` 读取 `ue5.GWorld` 链（X 锚点）；
+- `anomaly.ue5.build`（可选）用 `profile_hash` 给硬编码的偏移表做版本门禁；
 - `anomaly.config` + `anomaly.json` 持久化并解析设置（不依赖第三方 JSON 库）；
 - `anomaly.ui` / `anomaly.localization` / `anomaly.input` 提供窗口、翻译和 F7 快捷键。
 
-不扫描 GObjects，不调用 `ProcessEvent`。
+不扫描 GObjects，不调用 `ProcessEvent`；`ue5.GWorld` 只按 profile 的 pattern 解析一次全局槽位。
 
 ## 目录
 
@@ -148,6 +150,13 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
   属于观感重建而非实机数据。
 - 窗口中可调整机位距离/高度缩放、车身原点偏移、视口宽高比、速度/加速距离倍率、侧倾强度、
   刹车俯仰强度、镜头震动强度与“仅在漂移时侧倾”。
+- **锚点来源** 有三档：**X 锚定**（默认，在视点 detour 里读同一时刻的 `root+280`）、
+  **borrow 估计**（旧行为，用游戏相机位置反推）和**纯模型**（不锚定）。窗口状态行显示当前
+  实际使用的锚点与 `fb` 回退次数；诊断里的 `X 门禁` 给出 `ok / hash / pattern / service /
+  offset / off` 的原因。
+- **版本保险**：启动时用 `anomaly.ue5.build` 的 `profile_hash` 对比本包验证过的 profile。
+  hash 不匹配、pattern 解析失败、同链校验连续失败或服务缺失时，X 路径自动禁用并回退到 borrow，
+  相机继续工作，状态行不会静默。
 - 相机模型按 Game tick 运行；`Camera update rate` 显示实际 tick 频率，`View output / interp`
   显示视点 detour 的输出频率和命中渲染帧插值的比例。低于 60 Hz 时 detour 会用最近两次快照
   插值，不再对车辆基准做前向预测；同时会用原始游戏相机位姿的帧间位移把机位补到当前渲染帧，
