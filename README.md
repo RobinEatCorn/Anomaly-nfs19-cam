@@ -157,11 +157,11 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 - **版本保险**：启动时用 `anomaly.ue5.build` 的 `profile_hash` 对比本包验证过的 profile。
   hash 不匹配、pattern 解析失败、同链校验连续失败或服务缺失时，X 路径自动禁用并回退到 borrow，
   相机继续工作，状态行不会静默。
-- 相机模型按 Game tick 运行；`Camera update rate` 显示实际 tick 频率，`View output / interp`
+- 相机模型在视点 detour（渲染时钟）里推进，Game tick 只写车样本；`Camera update rate` 显示实际 tick 频率，`View output / interp`
   显示视点 detour 的输出频率和命中渲染帧插值的比例。低于 60 Hz 时 detour 会用最近两次快照
   插值，不再对车辆基准做前向预测；同时会用原始游戏相机位姿的帧间位移把机位补到当前渲染帧，
   避免车身和机位差一帧。
-- 相机基准是 Pawn 根位置（驾驶时它就是载具 actor 的根组件）。它在发布时被 `render_offset`
+- Game-tick 样本的基准是 Pawn 根位置（驾驶时它就是载具 actor 的根组件）。它在发布时被 `render_offset`
   减掉、又被 detour 加回来，因此不参与世界坐标，只需要稳定——固定用它换掉了原来每 tick
   一次的 `component_bounds` 反射查找（那是 tick 耗时的主要来源）。
 
