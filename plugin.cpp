@@ -2247,8 +2247,8 @@ void ReleaseToggleHotkey(Context &context) noexcept {
 
 bool AdvancePresenter(Context &context, std::int64_t now_ns,
                       const double *game_eye_cm, double location[3],
-                      double rotation[3], float *lens,
-                      bool *fov_enabled) noexcept;
+                      double rotation[3], float *lens, bool *fov_enabled,
+                      bool *advanced) noexcept;
 
 void RequestPresenterReset(Context &context) noexcept;
 
@@ -2347,14 +2347,18 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         // ran before us and we have not written yet.
         const double game_eye_cm[3] = {location[0], location[1],
                                        location[2]};
+        bool advanced = false;
         if (AdvancePresenter(*context, render_now_ns, game_eye_cm,
                              present_location, present_rotation,
-                             &present_lens, &present_fov_enabled)) {
+                             &present_lens, &present_fov_enabled, &advanced)) {
           // T3.4e: how fast the eye moves *relative to the car*, which is the
           // only thing that can look like twitching. The absolute eye speed is
           // dominated by the car's own travel, so it can never separate a
-          // smooth camera from a juddering one.
-          {
+          // smooth camera from a juddering one. Sample only when this call
+          // advanced the model: later passes of the same frame reuse the cached
+          // pose, and dividing its step by a pass-length dt inflates the peak
+          // by the whole frame motion (PLAN-camera-timing.md §4.1).
+          if (advanced) {
             static thread_local bool relative_valid = false;
             static thread_local std::int64_t relative_time_ns = 0;
             static thread_local double relative_offset[3]{};
@@ -3075,8 +3079,9 @@ void PublishPresenterPose(Context &context, const double location[3],
 // thread is advancing and no cached pose exists).
 bool AdvancePresenter(Context &context, const std::int64_t now_ns,
                       const double *game_eye_cm, double location[3],
-                      double rotation[3], float *lens,
-                      bool *fov_enabled) noexcept {
+                      double rotation[3], float *lens, bool *fov_enabled,
+                      bool *advanced) noexcept {
+  *advanced = false;
   if (!TryLockPresenter(context)) {
     return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
   }
@@ -3300,6 +3305,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   }
   const double distance_cm = std::sqrt(distance2);
   context.presenter_distance_cm.store(distance_cm, std::memory_order_relaxed);
+  *advanced = true;
 
   return true;
 }
