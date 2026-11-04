@@ -170,6 +170,36 @@ constexpr std::string_view kCameraViewPointPattern =
 constexpr std::uint32_t kCameraPovAccessorVtableOffset = 0x7A0;
 constexpr std::uint32_t kCameraPovFovOffset = 0x30;
 
+// Render-thread car position probe (PLAN-render-thread-hook.md task group 0).
+// The profile's `ue5.GWorld` entry: `mov rbx,[rip+disp32]` is the first
+// instruction, 7 bytes long, and the displacement sits at +3. Resolving the
+// pattern gives the instruction, so the global slot is
+// `instruction + instructionSize + displacement`.
+constexpr std::string_view kGWorldPattern =
+    "48 8B 1D ?? ?? ?? ?? 48 85 DB 74 ?? 41 B0 01";
+constexpr std::uint32_t kGWorldRipOffset = 3;
+constexpr std::uint32_t kGWorldInstructionSize = 7;
+// Offsets from the host's own `ReadCurrentPlayerLocation`, i.e. the profile's
+// `nte-current.json` layout. Every one of them is a hardcoded guess about the
+// running build; the Game-tick cross-check below is what catches a stale table.
+constexpr std::uint32_t kWorldGameInstanceOffset = 560;
+constexpr std::uint32_t kGameInstanceLocalPlayersOffset = 56;
+constexpr std::uint32_t kLocalPlayerControllerOffset = 48;
+constexpr std::uint32_t kControllerPawnOffset = 776;
+constexpr std::uint32_t kActorRootComponentOffset = 456;
+constexpr std::uint32_t kSceneComponentLocationOffset = 280;
+// The phase sample only means something while the car is moving: at a
+// standstill both clocks read the same point and the mean would be diluted.
+// Ten metres per second keeps city crawling out of the average.
+constexpr double kRenderXMinimumSpeedCmps = 1000.0;
+// The same chain read on the Game tick has to reproduce the host snapshot. A
+// centimetre covers double-rounding; anything larger is a wrong offset.
+constexpr double kRenderXChainToleranceCm = 1.0;
+constexpr double kRenderXResolveRetrySeconds = 2.0;
+constexpr std::uint8_t kRenderXWait = 0;
+constexpr std::uint8_t kRenderXReady = 1;
+constexpr std::uint8_t kRenderXFailed = 2;
+
 constexpr std::string_view kSettingsSchema = R"json(
 {
   "type":"object",
@@ -569,6 +599,101 @@ struct Probe final {
   ScalarTrack track_lens{};
 };
 
+// PLAN-render-thread-hook.md task group 0: read-only phase probe. The host
+// samples `player.position` on the Game tick, but the Game draws the car from
+// whatever the render thread sees at draw time. This walks the host's own
+// player chain from `ue5.GWorld` on both clocks so the difference can be read
+// instead of argued about. Nothing here feeds the camera.
+//
+// The Game-tick read is the control: it must equal the host snapshot exactly.
+// If it does not, the hardcoded offsets no longer describe this build and the
+// render-thread number cannot be trusted either.
+struct RenderXProbe final {
+  // Game tick: resolution state, the GWorld slot, and the cached Pawn chain.
+  std::uint8_t resolve_state{kRenderXWait};
+  std::uint32_t resolve_code{};
+  double next_resolve_elapsed{};
+  std::uintptr_t gworld_slot{};
+  std::atomic<std::uintptr_t> root{};
+  // Game tick: the host snapshot the render-thread read is compared with. The
+  // velocity turns the difference into a signed lead along the direction of
+  // travel, which is what separates "same field, read later" from "some other
+  // field that happens to be near". Measured from this probe's own successive
+  // snapshots, so it keeps working with the camera switched off.
+  std::atomic<double> player_cm[3]{};
+  std::atomic<double> velocity_cmps[3]{};
+  std::atomic_bool player_valid{};
+  // Which thread actually performs the X read. If the detour runs on the Game
+  // thread, a "render-time" reading is not render-time at all, and the whole
+  // premise needs revisiting before any anchoring work.
+  std::atomic<std::uint32_t> game_thread_id{};
+  std::atomic<std::uint64_t> samples_on_game_thread{};
+  double last_player_cm[3]{};
+  double last_player_time{};
+  bool have_last_player{};
+  // Game tick: same-chain cross-check, window max and session mismatch count.
+  double chain_max_cm{};
+  std::uint64_t chain_mismatches{};
+  // Render thread: phase samples. Reset with the host's 0.5 s windows.
+  std::atomic<std::uint64_t> read_failures{};
+  std::atomic<std::uint64_t> sample_count{};
+  std::atomic<std::uint64_t> peak_dcm{};
+  std::atomic<std::uint64_t> sum_dcm{};
+  std::atomic<std::uint64_t> peak_dms{};
+  std::atomic<std::uint64_t> sum_dms{};
+  std::atomic<std::uint64_t> speed_sum_cmps{};
+  std::atomic<std::int64_t> lead_sum_dcm{};
+  std::atomic<std::int64_t> lead_sum_dms{};
+  std::atomic<std::int64_t> lead_count{};
+
+  void Reset() noexcept {
+    resolve_state = kRenderXWait;
+    resolve_code = 0;
+    next_resolve_elapsed = 0.0;
+    gworld_slot = 0;
+    root.store(0, std::memory_order_relaxed);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      player_cm[axis].store(0.0, std::memory_order_relaxed);
+      velocity_cmps[axis].store(0.0, std::memory_order_relaxed);
+    }
+    player_valid.store(false, std::memory_order_relaxed);
+    game_thread_id.store(0, std::memory_order_relaxed);
+    samples_on_game_thread.store(0, std::memory_order_relaxed);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      last_player_cm[axis] = 0.0;
+    }
+    last_player_time = 0.0;
+    have_last_player = false;
+    chain_max_cm = 0.0;
+    chain_mismatches = 0;
+    read_failures.store(0, std::memory_order_relaxed);
+    sample_count.store(0, std::memory_order_relaxed);
+    peak_dcm.store(0, std::memory_order_relaxed);
+    sum_dcm.store(0, std::memory_order_relaxed);
+    peak_dms.store(0, std::memory_order_relaxed);
+    sum_dms.store(0, std::memory_order_relaxed);
+    speed_sum_cmps.store(0, std::memory_order_relaxed);
+    lead_sum_dcm.store(0, std::memory_order_relaxed);
+    lead_sum_dms.store(0, std::memory_order_relaxed);
+    lead_count.store(0, std::memory_order_relaxed);
+  }
+
+  // Called by the Game tick every 0.5 s, next to the other diagnostic windows.
+  void ResetWindow() noexcept {
+    peak_dcm.store(0, std::memory_order_relaxed);
+    sum_dcm.store(0, std::memory_order_relaxed);
+    peak_dms.store(0, std::memory_order_relaxed);
+    sum_dms.store(0, std::memory_order_relaxed);
+    speed_sum_cmps.store(0, std::memory_order_relaxed);
+    sample_count.store(0, std::memory_order_relaxed);
+    lead_sum_dcm.store(0, std::memory_order_relaxed);
+    lead_sum_dms.store(0, std::memory_order_relaxed);
+    lead_count.store(0, std::memory_order_relaxed);
+    samples_on_game_thread.store(0, std::memory_order_relaxed);
+    chain_max_cm = 0.0;
+  }
+};
+
 struct DisplayState final {
   bool started{};
   bool enabled{};
@@ -634,6 +759,24 @@ struct DisplayState final {
   double render_turn_floor_dps{};
   double render_turn_peak_dps{};
   double car_step_cm{};
+
+  // Render-thread X probe (PLAN-render-thread-hook.md task group 0). Copied
+  // from Context::render_x on the Game tick.
+  std::uint8_t render_x_state{};
+  std::uint32_t render_x_code{};
+  std::uint64_t render_x_failures{};
+  std::uint64_t render_x_samples{};
+  bool render_x_valid{};
+  double render_x_avg_cm{};
+  double render_x_peak_cm{};
+  double render_x_avg_ms{};
+  double render_x_peak_ms{};
+  double render_x_lead_cm{};
+  double render_x_lead_ms{};
+  double render_x_speed_kmh{};
+  double render_x_chain_cm{};
+  std::uint64_t render_x_chain_mismatches{};
+  std::uint64_t render_x_gt_samples{};
 
   // Probe. Copied from Context::probe on the Game tick.
   bool probe_ahud_service{};
@@ -893,6 +1036,9 @@ struct Context final {
   // touches Context::diag atomics.
   Diagnostics diag{};
   Probe probe{};
+  // PLAN-render-thread-hook.md task group 0. Read-only: it never reaches the
+  // camera or the publisher.
+  RenderXProbe render_x{};
   // Probe input: the world XY offset of the bounds centre from the Pawn root,
   // captured by QueryPlayer on this Game tick. A fixed vector in the car's own
   // frame, so its direction is a body-yaw candidate that never involves the
@@ -1049,6 +1195,300 @@ bool ResolveCameraPov(Context &context) noexcept {
   context.camera_pov.store(pov, std::memory_order_release);
   context.camera_pov_manager.store(manager, std::memory_order_release);
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Render-thread car position probe (PLAN-render-thread-hook.md task group 0)
+// ---------------------------------------------------------------------------
+//
+// Read-only reconnaissance for the hook route. It answers one question that the
+// readings of the last months could not: does the render thread see a *newer*
+// car transform than the Game-tick snapshot the camera is built from?
+//
+// The Game-tick half walks the host's own player chain (the offsets in
+// `ReadCurrentPlayerLocation`) and compares it with the host snapshot. That is
+// the control: if it does not reproduce the snapshot exactly, the hardcoded
+// offsets are stale and the render-thread half is measuring the wrong field.
+// The render half reads the same `root + 280` from the detour and subtracts the
+// snapshot. Roughly one tick of travel of lead means the anchor exists (and the
+// camera can use it); a near-zero difference means the renderer draws from a
+// different field (`ComponentToWorld`) and task group 1 is next.
+//
+// No allocation, no lock of our own, no logging: stack buffers and atomics, so
+// the render path stays as cheap as the rest of the detour.
+
+struct PlayerChain final {
+  std::uintptr_t pawn{};
+  std::uintptr_t root{};
+};
+
+AnomalyStatusV1 ResolveSignatureStatus(const Context &context,
+                                       const std::string_view pattern,
+                                       std::uintptr_t &address) noexcept {
+  address = 0;
+  if (!SignatureReady(context.signature)) {
+    return Status(ANOMALY_STATUS_V1_UNAVAILABLE);
+  }
+  return context.signature->resolve(
+      context.signature->user, StringView("HTGame.exe"), StringView(".text"),
+      StringView(pattern), &address);
+}
+
+// `world -> gameInstance -> localPlayers.data[0] -> controller -> pawn -> root`.
+// Exactly the host's chain, so a difference in the final read can only come
+// from the moment of the read, not from a different path.
+bool WalkPlayerChain(const AnomalyCoreServiceV1 *core,
+                     const std::uintptr_t world,
+                     PlayerChain &chain) noexcept {
+  if (world == 0) {
+    return false;
+  }
+  std::uintptr_t game_instance{};
+  std::uintptr_t players{};
+  if (!ReadPointerAtOffset(core, world, kWorldGameInstanceOffset,
+                           game_instance) ||
+      !ReadPointerAtOffset(core, game_instance,
+                           kGameInstanceLocalPlayersOffset, players)) {
+    return false;
+  }
+  std::uintptr_t count_address{};
+  std::int32_t players_count{};
+  if (!AddAddress(game_instance,
+                  kGameInstanceLocalPlayersOffset + sizeof(std::uintptr_t),
+                  count_address) ||
+      !Read(core, count_address, players_count) || players_count < 1 ||
+      players_count > 64) {
+    return false;
+  }
+  std::uintptr_t local_player{};
+  std::uintptr_t controller{};
+  return Read(core, players, local_player) && local_player != 0 &&
+         ReadPointerAtOffset(core, local_player, kLocalPlayerControllerOffset,
+                             controller) &&
+         ReadPointerAtOffset(core, controller, kControllerPawnOffset,
+                             chain.pawn) &&
+         ReadPointerAtOffset(core, chain.pawn, kActorRootComponentOffset,
+                             chain.root);
+}
+
+bool ReadChainLocation(const AnomalyCoreServiceV1 *core,
+                       const std::uintptr_t root, double cm[3]) noexcept {
+  std::uintptr_t address{};
+  if (core == nullptr || core->read_memory == nullptr ||
+      !AddAddress(root, kSceneComponentLocationOffset, address)) {
+    return false;
+  }
+  std::array<double, 3> values{};
+  AnomalyMutableByteSpanV1 destination{
+      reinterpret_cast<std::uint8_t *>(values.data()), sizeof(values)};
+  if (core->read_memory(core->user, address, destination).code !=
+      ANOMALY_STATUS_V1_OK) {
+    return false;
+  }
+  if (!std::isfinite(values[0]) || !std::isfinite(values[1]) ||
+      !std::isfinite(values[2])) {
+    return false;
+  }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    cm[axis] = values[axis];
+  }
+  return true;
+}
+
+void TryResolveRenderX(Context &context) noexcept {
+  RenderXProbe &probe = context.render_x;
+  std::uintptr_t instruction{};
+  const AnomalyStatusV1 status =
+      ResolveSignatureStatus(context, kGWorldPattern, instruction);
+  if (status.code == ANOMALY_STATUS_V1_OK && instruction != 0) {
+    std::uintptr_t displacement_address{};
+    std::int32_t displacement{};
+    std::intptr_t slot = 0;
+    if (AddAddress(instruction, kGWorldRipOffset, displacement_address) &&
+        Read(context.core, displacement_address, displacement)) {
+      slot = static_cast<std::intptr_t>(instruction) +
+             static_cast<std::intptr_t>(kGWorldInstructionSize) +
+             static_cast<std::intptr_t>(displacement);
+    }
+    if (slot > 0) {
+      probe.gworld_slot = static_cast<std::uintptr_t>(slot);
+      probe.resolve_state = kRenderXReady;
+      probe.resolve_code = ANOMALY_STATUS_V1_OK;
+      return;
+    }
+  }
+  probe.resolve_state = kRenderXFailed;
+  probe.resolve_code = status.code;
+}
+
+// Game tick: refresh the world pointer and the pawn chain, then compare the
+// same chain's location with the host snapshot. Caching here keeps the render
+// thread down to the single 24-byte read that the phase question needs.
+void UpdateRenderXProbe(Context &context, const double base_cm[3],
+                        const bool player_valid) noexcept {
+  RenderXProbe &probe = context.render_x;
+  if (probe.resolve_state != kRenderXReady &&
+      context.elapsed >= probe.next_resolve_elapsed) {
+    // The profile can still be settling on the first ticks, so a failure is
+    // retried - slowly, because a section scan is not free.
+    probe.next_resolve_elapsed = context.elapsed + kRenderXResolveRetrySeconds;
+    TryResolveRenderX(context);
+  }
+  if (probe.resolve_state == kRenderXReady) {
+    std::uintptr_t world{};
+    PlayerChain chain{};
+    if (Read(context.core, probe.gworld_slot, world) && world != 0 &&
+        WalkPlayerChain(context.core, world, chain)) {
+      probe.root.store(chain.root, std::memory_order_relaxed);
+    } else {
+      probe.root.store(0, std::memory_order_relaxed);
+    }
+  }
+  if (player_valid) {
+    const std::uintptr_t root = probe.root.load(std::memory_order_relaxed);
+    double chain_cm[3]{};
+    if (root != 0 && ReadChainLocation(context.core, root, chain_cm)) {
+      double squared = 0.0;
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const double delta = chain_cm[axis] - base_cm[axis];
+        squared += delta * delta;
+      }
+      const double distance = std::sqrt(squared);
+      if (std::isfinite(distance)) {
+        if (distance > probe.chain_max_cm) {
+          probe.chain_max_cm = distance;
+        }
+        if (distance > kRenderXChainToleranceCm) {
+          ++probe.chain_mismatches;
+        }
+      }
+    }
+  }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    probe.player_cm[axis].store(base_cm[axis], std::memory_order_relaxed);
+  }
+  // Speed and direction for the phase sample, from the probe's own successive
+  // snapshots rather than the camera model: the probe then works with the
+  // camera switched off, which is the natural way to bisect the twitch.
+  double velocity_cmps[3]{};
+  if (player_valid && probe.have_last_player &&
+      context.elapsed > probe.last_player_time) {
+    const double step_seconds = context.elapsed - probe.last_player_time;
+    double squared = 0.0;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const double step = base_cm[axis] - probe.last_player_cm[axis];
+      velocity_cmps[axis] = step / step_seconds;
+      squared += step * step;
+    }
+    // A reset/teleport is not a direction: hold the previous answer instead of
+    // projecting a phase sample onto it.
+    if (!(squared <
+          kViewHistorySnapDistanceCm * kViewHistorySnapDistanceCm)) {
+      for (double &value : velocity_cmps) {
+        value = 0.0;
+      }
+    }
+  } else {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      velocity_cmps[axis] =
+          probe.velocity_cmps[axis].load(std::memory_order_relaxed);
+    }
+  }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    probe.velocity_cmps[axis].store(velocity_cmps[axis],
+                                    std::memory_order_relaxed);
+    probe.last_player_cm[axis] = base_cm[axis];
+  }
+  probe.last_player_time = context.elapsed;
+  probe.have_last_player = player_valid;
+  probe.game_thread_id.store(static_cast<std::uint32_t>(GetCurrentThreadId()),
+                             std::memory_order_relaxed);
+  probe.player_valid.store(player_valid, std::memory_order_release);
+}
+
+// Render thread: one read per frame of the cached field, compared with the
+// Game-tick snapshot. Runs even when the plugin is not replacing the view, so
+// the phase can be measured with the camera switched off.
+void SampleRenderXPhase(Context &context) noexcept {
+  RenderXProbe &probe = context.render_x;
+  // The detour runs once per render pass; the passes of one frame are only a
+  // fraction of a millisecond apart. Same threshold as the presenter.
+  static thread_local std::int64_t last_sample_ns = 0;
+  const std::int64_t now_ns = NowNanoseconds();
+  if (last_sample_ns != 0 && now_ns - last_sample_ns < kPresenterSameFrameNs) {
+    return;
+  }
+  last_sample_ns = now_ns;
+  const std::uintptr_t root = probe.root.load(std::memory_order_relaxed);
+  if (root == 0 || !probe.player_valid.load(std::memory_order_acquire)) {
+    return;
+  }
+  double render_cm[3]{};
+  if (!ReadChainLocation(context.core, root, render_cm)) {
+    probe.read_failures.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  double player_cm[3]{};
+  double velocity_cmps[3]{};
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    player_cm[axis] = probe.player_cm[axis].load(std::memory_order_relaxed);
+    velocity_cmps[axis] =
+        probe.velocity_cmps[axis].load(std::memory_order_relaxed);
+  }
+  const double speed_cmps =
+      std::sqrt(velocity_cmps[0] * velocity_cmps[0] +
+                velocity_cmps[1] * velocity_cmps[1]);
+  if (!(speed_cmps >= kRenderXMinimumSpeedCmps)) {
+    return;
+  }
+  double difference_cm[3]{};
+  double squared = 0.0;
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    difference_cm[axis] = render_cm[axis] - player_cm[axis];
+    squared += difference_cm[axis] * difference_cm[axis];
+  }
+  const double distance_cm = std::sqrt(squared);
+  // A teleport, a dead pointer or garbage: not a phase sample, and far outside
+  // the range this question is about.
+  if (!std::isfinite(distance_cm) ||
+      distance_cm >= kViewHistorySnapDistanceCm) {
+    return;
+  }
+  RaisePeak(probe.peak_dcm,
+            static_cast<std::uint64_t>(distance_cm * 10.0));
+  probe.sum_dcm.fetch_add(static_cast<std::uint64_t>(distance_cm * 10.0),
+                          std::memory_order_relaxed);
+  // The same distance as time. Speed varies inside the 0.5 s window, so the
+  // centimetres alone cannot be compared with a tick interval; the phase this
+  // probe is about is a time offset, and this is it.
+  const double distance_ms = distance_cm / speed_cmps * 1000.0;
+  if (std::isfinite(distance_ms) && distance_ms < 1000.0) {
+    RaisePeak(probe.peak_dms,
+              static_cast<std::uint64_t>(distance_ms * 10.0));
+    probe.sum_dms.fetch_add(static_cast<std::uint64_t>(distance_ms * 10.0),
+                            std::memory_order_relaxed);
+  }
+  probe.speed_sum_cmps.fetch_add(static_cast<std::uint64_t>(speed_cmps),
+                                 std::memory_order_relaxed);
+  probe.sample_count.fetch_add(1, std::memory_order_relaxed);
+  if (static_cast<std::uint32_t>(GetCurrentThreadId()) ==
+      probe.game_thread_id.load(std::memory_order_relaxed)) {
+    probe.samples_on_game_thread.fetch_add(1, std::memory_order_relaxed);
+  }
+  const double lead_cm =
+      (difference_cm[0] * velocity_cmps[0] +
+       difference_cm[1] * velocity_cmps[1] +
+       difference_cm[2] * velocity_cmps[2]) /
+      speed_cmps;
+  if (std::isfinite(lead_cm) &&
+      std::fabs(lead_cm) < kViewHistorySnapDistanceCm) {
+    probe.lead_sum_dcm.fetch_add(static_cast<std::int64_t>(lead_cm * 10.0),
+                                 std::memory_order_relaxed);
+    probe.lead_sum_dms.fetch_add(
+        static_cast<std::int64_t>(lead_cm / speed_cmps * 1000.0 * 10.0),
+        std::memory_order_relaxed);
+    probe.lead_count.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
@@ -1625,6 +2065,9 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         object != nullptr) {
       const std::uintptr_t manager = reinterpret_cast<std::uintptr_t>(object);
       context->observed_manager.store(manager, std::memory_order_release);
+      // Task group 0 probe: the render thread's own read of the host's player
+      // chain. Deliberately before the camera work, and independent of it.
+      SampleRenderXPhase(*context);
       const bool pose_finite =
           std::isfinite(location[0]) && std::isfinite(location[1]) &&
           std::isfinite(location[2]) && std::isfinite(rotation[0]) &&
@@ -2630,6 +3073,9 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   AnomalyGenerationHandleV1 player_handle{};
   const bool player_valid = QueryPlayer(context, origin_cm, base_cm,
                                         player_sequence, player_handle);
+  // Task group 0 probe: cache the pawn chain and publish the snapshot the
+  // render-thread read is compared with. Read-only; the camera ignores it.
+  UpdateRenderXProbe(context, base_cm, player_valid);
   // The camera anchor is the Pawn root location that `QueryPlayer` already
   // fills. `base_cm` cancels out of the published world position (the detour
   // adds it back), so it only has to be stable and cheap. Resolving the
@@ -3504,6 +3950,61 @@ void UpdateDisplay(Context &context) noexcept {
           : static_cast<double>(judder_car_sum) /
                 static_cast<double>(judder_car_count) / 10.0;
   context.display.probe_height_step_cm = probe.height_step_cm;
+  {
+    const RenderXProbe &render_x = context.render_x;
+    const std::uint64_t samples =
+        render_x.sample_count.load(std::memory_order_relaxed);
+    const std::uint64_t sum_dcm =
+        render_x.sum_dcm.load(std::memory_order_relaxed);
+    const std::uint64_t sum_dms =
+        render_x.sum_dms.load(std::memory_order_relaxed);
+    const std::int64_t lead_count =
+        render_x.lead_count.load(std::memory_order_relaxed);
+    const std::int64_t lead_sum_dcm =
+        render_x.lead_sum_dcm.load(std::memory_order_relaxed);
+    const std::int64_t lead_sum_dms =
+        render_x.lead_sum_dms.load(std::memory_order_relaxed);
+    const std::uint64_t speed_sum_cmps =
+        render_x.speed_sum_cmps.load(std::memory_order_relaxed);
+    context.display.render_x_state = render_x.resolve_state;
+    context.display.render_x_code = render_x.resolve_code;
+    context.display.render_x_failures =
+        render_x.read_failures.load(std::memory_order_relaxed);
+    context.display.render_x_samples = samples;
+    context.display.render_x_valid = samples != 0;
+    context.display.render_x_peak_cm =
+        static_cast<double>(
+            render_x.peak_dcm.load(std::memory_order_relaxed)) /
+        10.0;
+    context.display.render_x_avg_cm =
+        samples == 0 ? 0.0
+                     : static_cast<double>(sum_dcm) /
+                           static_cast<double>(samples) / 10.0;
+    context.display.render_x_peak_ms =
+        static_cast<double>(
+            render_x.peak_dms.load(std::memory_order_relaxed)) /
+        10.0;
+    context.display.render_x_avg_ms =
+        samples == 0 ? 0.0
+                     : static_cast<double>(sum_dms) /
+                           static_cast<double>(samples) / 10.0;
+    context.display.render_x_speed_kmh =
+        samples == 0 ? 0.0
+                     : static_cast<double>(speed_sum_cmps) /
+                           static_cast<double>(samples) * 0.036;
+    context.display.render_x_lead_cm =
+        lead_count == 0 ? 0.0
+                        : static_cast<double>(lead_sum_dcm) /
+                              static_cast<double>(lead_count) / 10.0;
+    context.display.render_x_lead_ms =
+        lead_count == 0 ? 0.0
+                        : static_cast<double>(lead_sum_dms) /
+                              static_cast<double>(lead_count) / 10.0;
+    context.display.render_x_chain_cm = render_x.chain_max_cm;
+    context.display.render_x_chain_mismatches = render_x.chain_mismatches;
+    context.display.render_x_gt_samples =
+        render_x.samples_on_game_thread.load(std::memory_order_relaxed);
+  }
   const std::uint64_t interval_min_raw =
       diag.tick_interval_min_ns.load(std::memory_order_relaxed);
   context.display.tick_interval_valid = interval_min_raw != UINT64_MAX;
@@ -3697,6 +4198,10 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   // A fresh session re-runs the P0 probe from scratch. Stop already dropped the
   // old subscription, so nothing can be in flight while this resets.
   context->probe = Probe{};
+  // Task group 0: resolve `ue5.GWorld` from the Lifecycle domain, where
+  // signature learning is allowed. The Game tick retries slowly on failure.
+  context->render_x.Reset();
+  TryResolveRenderX(*context);
   context->detour_hz = 0.0;
   context->next_vehicle_query_elapsed = 0.0;
   context->vehicle_cached_valid = false;
@@ -3841,6 +4346,7 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->diag.tick_interval_min_ns.store(UINT64_MAX,
                                                  std::memory_order_relaxed);
         context->diag.tick_interval_max_ns.store(0, std::memory_order_relaxed);
+        context->render_x.ResetWindow();
         context->diag.slip_max_step_ddeg.store(0,
                                                std::memory_order_relaxed);
         context->update_rate_window = 0.0;
@@ -4012,7 +4518,7 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "A --");
   }
   DrawStatusLine(ui, localizer, "diag.judder",
-                 "A: anchor through the game projection, peak/avg px", line);
+                 "A px peak/avg", line);
   if (display.rotation_valid) {
     std::snprintf(line, sizeof(line), "P %.2f / %.2f  R %.2f / %.2f deg",
                   display.pitch_peak_degrees, display.pitch_avg_degrees,
@@ -4021,7 +4527,7 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "P --  R --");
   }
   DrawStatusLine(ui, localizer, "diag.rotation",
-                 "P/R: pitch and roll residual per frame, peak/avg deg", line);
+                 "P/R peak/avg deg", line);
   if (display.lens_valid) {
     std::snprintf(line, sizeof(line), "F %.2f / %.2f deg",
                   display.lens_peak_degrees, display.lens_avg_degrees);
@@ -4029,11 +4535,10 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "F --");
   }
   DrawStatusLine(ui, localizer, "diag.lens_residual",
-                 "F: field of view residual per frame, peak/avg deg", line);
+                 "F peak/avg deg", line);
   std::snprintf(line, sizeof(line), "B %.2f",
                 display.borrow_strength);
-  DrawStatusLine(ui, localizer, "diag.borrow",
-                 "B: how much of the Game's camera position is borrowed", line);
+  DrawStatusLine(ui, localizer, "diag.borrow", "B", line);
   if (display.flow_valid) {
     std::snprintf(line, sizeof(line), "W %.2f / %.2f cm",
                   display.flow_peak_cm, display.flow_avg_cm);
@@ -4041,8 +4546,7 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "W --");
   }
   DrawStatusLine(ui, localizer, "diag.flow",
-                 "W: the camera's own speed jump per frame, peak/avg cm",
-                 line);
+                 "W peak/avg cm", line);
   if (display.frame_valid) {
     std::snprintf(line, sizeof(line), "T %.1f / %.1f ms",
                   display.frame_peak_ms, display.frame_mean_ms);
@@ -4050,7 +4554,44 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "T --");
   }
   DrawStatusLine(ui, localizer, "diag.frame_pacing",
-                 "T: frame length, peak / mean ms", line);
+                 "T peak/avg ms", line);
+
+  // Task group 0: the gate for the whole hook route. Order matters. `chain` is
+  // the control (same chain, Game tick, against the host snapshot); if it is
+  // not ~0 the offsets are stale and `phase` is meaningless.
+  if (display.render_x_state == kRenderXReady) {
+    std::snprintf(line, sizeof(line), "ok  n=%llu  gt=%llu/%llu  f=%llu",
+                  static_cast<unsigned long long>(display.render_x_samples),
+                  static_cast<unsigned long long>(display.render_x_gt_samples),
+                  static_cast<unsigned long long>(display.render_x_samples),
+                  static_cast<unsigned long long>(
+                      display.render_x_failures));
+  } else if (display.render_x_state == kRenderXFailed) {
+    std::snprintf(line, sizeof(line), "failed %u", display.render_x_code);
+  } else {
+    std::snprintf(line, sizeof(line), "wait");
+  }
+  DrawStatusLine(ui, localizer, "diag.render_x_state", "X GWorld", line);
+  std::snprintf(line, sizeof(line), "%.2f cm / %llu",
+                display.render_x_chain_cm,
+                static_cast<unsigned long long>(
+                    display.render_x_chain_mismatches));
+  DrawStatusLine(ui, localizer, "diag.render_x_chain",
+                 "X chain diff / count", line);
+  if (display.render_x_valid) {
+    std::snprintf(line, sizeof(line), "%.1f / %.1f cm  %.1f / %.1f ms",
+                  display.render_x_avg_cm, display.render_x_peak_cm,
+                  display.render_x_avg_ms, display.render_x_peak_ms);
+  } else {
+    std::snprintf(line, sizeof(line), "--");
+  }
+  DrawStatusLine(ui, localizer, "diag.render_x_phase",
+                 "X phase avg/peak", line);
+  std::snprintf(line, sizeof(line), "%+.1f cm %+.1f ms  %.0f km/h",
+                display.render_x_lead_cm, display.render_x_lead_ms,
+                display.render_x_speed_kmh);
+  DrawStatusLine(ui, localizer, "diag.render_x_lead", "X along travel",
+                 line);
 
   if (!display.probe_ahud_service) {
     std::snprintf(line, sizeof(line), "no service");
@@ -4063,12 +4604,11 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   } else {
     std::snprintf(line, sizeof(line), "wait");
   }
-  DrawStatusLine(ui, localizer, "diag.probe_frame_rate",
-                 "Probe frames/s vs Game ticks/s, <1.0 leaves steps visible",
+  DrawStatusLine(ui, localizer, "diag.probe_frame_rate", "Probe fps / tick",
                  line);
   std::snprintf(line, sizeof(line), "%.1f cm", display.probe_bounds_offset_cm);
   DrawStatusLine(ui, localizer, "diag.probe_bounds_offset",
-                 "Probe bounds-centre lever arm, <20 cm unusable", line);
+                 "Probe bounds offset", line);
   if (display.probe_bounds_yaw_valid) {
     std::snprintf(line, sizeof(line), "%.1f deg",
                   display.probe_camera_minus_bounds_degrees);
@@ -4076,17 +4616,16 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "--");
   }
   DrawStatusLine(ui, localizer, "diag.probe_camera_vs_bounds",
-                 "Probe camera yaw minus bounds yaw, drift shows the slip",
-                 line);
-  std::snprintf(line, sizeof(line), "%.1f / %.1f Hz", display.detour_hz,
-                display.update_hz);
-  DrawStatusLine(ui, localizer, "diag.detour_rate",
-                 "Presenter / Game tick", line);
+                 "Probe yaw - bounds", line);
+  std::snprintf(line, sizeof(line), "%.1f / %.1f Hz  thr %llu",
+                display.detour_hz, display.update_hz,
+                static_cast<unsigned long long>(display.detour_thread_count));
+  DrawStatusLine(ui, localizer, "diag.detour_rate", "detour / tick", line);
   std::snprintf(line, sizeof(line), "%.2f / %.2f / %.2f / %.2f ms",
                 display.tick_ms_last, display.tick_ms_avg, display.tick_ms_p99,
                 display.tick_ms_max);
-  DrawStatusLine(ui, localizer, "diag.tick_cost",
-                 "Camera tick (last/avg/p99/max)", line);
+  DrawStatusLine(ui, localizer, "diag.tick_cost", "tick ms last/avg/p99/max",
+                 line);
   // The presentation numbers come first: the diagnostics body scrolls, so
   // anything appended after the counters is off screen on a small window.
   if (display.render_speed_valid) {
@@ -4097,7 +4636,7 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "-- / -- m/s");
   }
   DrawStatusLine(ui, localizer, "diag.render_speed",
-                 "Camera-vs-car speed, 0.5 s, <3 m/s", line);
+                 "cam-car speed m/s", line);
   if (display.render_turn_valid) {
     std::snprintf(line, sizeof(line), "%.1f / %.1f deg/s",
                   display.render_turn_floor_dps, display.render_turn_peak_dps);
@@ -4105,10 +4644,9 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "-- / -- deg/s");
   }
   DrawStatusLine(ui, localizer, "diag.render_turn",
-                 "Camera-vs-car turn rate, 0.5 s, should match", line);
+                 "cam-car turn deg/s", line);
   std::snprintf(line, sizeof(line), "%.1f cm", display.car_step_cm);
-  DrawStatusLine(ui, localizer, "diag.car_step",
-                 "Anchor step per tick, the scale for the two above", line);
+  DrawStatusLine(ui, localizer, "diag.car_step", "anchor cm/tick", line);
   if (display.judder_car_valid) {
     std::snprintf(line, sizeof(line), "C %.1f / %.1f px",
                   display.judder_car_peak_px, display.judder_car_avg_px);
@@ -4116,7 +4654,7 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "C --");
   }
   DrawStatusLine(ui, localizer, "diag.judder_car",
-                 "C: raw Game-tick car position, same projection, px", line);
+                 "C px peak/avg", line);
   if (display.tick_interval_valid) {
     std::snprintf(line, sizeof(line), "T %.1f / %.1f ms",
                   display.tick_interval_min_ms, display.tick_interval_max_ms);
@@ -4124,24 +4662,22 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(line, sizeof(line), "T --");
   }
   DrawStatusLine(ui, localizer, "diag.tick_interval",
-                 "T: Game tick interval, min / max ms", line);
+                 "tick interval ms", line);
   std::snprintf(line, sizeof(line), "H %.1f cm", display.probe_height_step_cm);
   DrawStatusLine(ui, localizer, "diag.height_step",
-                 "Mesh bound radius step per tick, moves the eye up and down",
-                 line);
+                 "bounds radius cm/tick", line);
   std::snprintf(line, sizeof(line), "%.2f / %.2f deg",
                 display.probe_camera_yaw_step_max_degrees,
                 display.probe_camera_yaw_step_avg_degrees);
   DrawStatusLine(ui, localizer, "diag.probe_camera_yaw_step",
-                 "Game camera yaw step per tick, max/avg, >0.3 is noise", line);
-  DrawCountLine(ui, localizer, "diag.snap", "View snaps",
+                 "cam yaw step deg", line);
+  DrawCountLine(ui, localizer, "diag.snap", "view snaps",
                 display.snap_total);
   static constexpr const char *kSnapKeys[kSnapReasonCount] = {
       "diag.snap_motion", "diag.snap_teleport", "diag.snap_inactive",
       "diag.snap_preset", "diag.snap_user_reset"};
   static constexpr const char *kSnapFallbacks[kSnapReasonCount] = {
-      "  motion reset", "  teleport step", "  camera idle",
-      "  preset switch", "  user reset"};
+      "  motion", "  teleport", "  idle", "  preset", "  user"};
   for (std::size_t index = 0; index < kSnapReasonCount; ++index) {
     if (display.snap_by_reason[index] == 0) {
       continue;
@@ -4150,46 +4686,37 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                   display.snap_by_reason[index]);
   }
   DrawCountLine(ui, localizer, "diag.yaw_switches",
-                "Car yaw: camera vs slip-limit", display.yaw_source_switches);
+                "yaw source switches", display.yaw_source_switches);
   DrawCountLine(ui, localizer, "diag.observed_failures",
-                "Observed pose read failures",
-                display.observed_read_failures);
-  DrawCountLine(ui, localizer, "diag.lease_failures", "Hook lease failures",
+                "pose read failures", display.observed_read_failures);
+  DrawCountLine(ui, localizer, "diag.lease_failures", "hook lease failures",
                 display.lease_failures);
-  DrawCountLine(ui, localizer, "diag.torn_reads", "Torn view reads",
+  DrawCountLine(ui, localizer, "diag.torn_reads", "torn reads",
                 display.view_read_torn);
   DrawCountLine(ui, localizer, "diag.detour_missing",
-                "Detour calls without a pose", display.detour_no_publish);
-  DrawCountLine(ui, localizer, "diag.detour_threads", "Detour threads",
-                display.detour_thread_count);
+                "detour no pose", display.detour_no_publish);
   DrawCountLine(ui, localizer, "diag.vehicle_polls",
-                "Vehicle service polls", display.vehicle_polls);
+                "vehicle polls", display.vehicle_polls);
   DrawCountLine(ui, localizer, "diag.camera_yaw_fallback",
-                "Ticks without the Game-tick car yaw",
-                display.camera_yaw_esp_misses);
+                "ticks no car yaw", display.camera_yaw_esp_misses);
   std::snprintf(line, sizeof(line), "%.1f km/h",
                 display.slip_signed_speed_kmh);
-  DrawStatusLine(ui, localizer, "diag.signed_speed",
-                 "Vehicle forward speed (signed)", line);
+  DrawStatusLine(ui, localizer, "diag.signed_speed", "forward speed", line);
   std::snprintf(line, sizeof(line), "%.1f / %.1f deg",
                 display.slip_from_position_degrees,
                 display.slip_from_speed_degrees);
-  DrawStatusLine(ui, localizer, "diag.slip_compare",
-                 "Slip: from position / from speed, <3 deg apart", line);
+  DrawStatusLine(ui, localizer, "diag.slip_compare", "slip pos/speed", line);
   DrawCountLine(ui, localizer, "diag.slip_flips",
-                "Slip sign changes, >3 suspicious",
-                display.slip_sign_changes);
+                "slip sign flips", display.slip_sign_changes);
   // The thresholds are printed next to the values so the panel can be read
   // without knowing what "large" means for each number.
   std::snprintf(line, sizeof(line), "%.1f deg",
                 display.slip_max_step_degrees);
-  DrawStatusLine(ui, localizer, "diag.slip_step",
-                 "Largest slip step per tick, 0.5 s, <2 deg", line);
+  DrawStatusLine(ui, localizer, "diag.slip_step", "slip step deg/tick", line);
   DrawCountLine(ui, localizer, "diag.vehicle_gaps",
-                "Ticks on a stale vehicle snapshot",
-                display.vehicle_gap_ticks);
+                "stale vehicle ticks", display.vehicle_gap_ticks);
   DrawCountLine(ui, localizer, "diag.sequence_jumps",
-                "Player sequence jumps", display.player_sequence_jumps);
+                "player seq jumps", display.player_sequence_jumps);
 }
 
 void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
