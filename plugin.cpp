@@ -844,6 +844,12 @@ struct RenderXProbe final {
   // `anchor_enabled` and the snapshot fields.
   std::uint8_t insurance_state{kAnchorInsuranceWaiting};
   std::uint8_t logged_insurance_state{0xFF};
+  // Fail closed for the route B hooks that dereference the game's FViewInfo /
+  // FSceneRenderer layout. The profile hash is the only runtime witness we
+  // have for those offsets; patterns only prove that the function entry still
+  // exists. A missing/mismatched profile disables the camera instead of
+  // writing through a moved field.
+  std::atomic_bool version_gate{};
   bool chain_verified{};
   bool chain_failed{};
   std::uint32_t chain_fail_streak{};
@@ -990,6 +996,7 @@ struct RenderXProbe final {
     lead_count.store(0, std::memory_order_relaxed);
     insurance_state = kAnchorInsuranceWaiting;
     logged_insurance_state = 0xFF;
+    version_gate.store(false, std::memory_order_relaxed);
     chain_verified = false;
     chain_failed = false;
     chain_fail_streak = 0;
@@ -1960,6 +1967,8 @@ void EvaluateAnchorInsurance(Context &context) noexcept {
     }
   }
   probe.insurance_state = next;
+  probe.version_gate.store(next == kAnchorInsuranceReady,
+                           std::memory_order_release);
   if (next != kAnchorInsuranceReady) {
     probe.anchor_enabled.store(false, std::memory_order_release);
   }
@@ -1975,7 +1984,7 @@ void EvaluateAnchorInsurance(Context &context) noexcept {
     } else if (next == kAnchorInsuranceHashMismatch) {
       std::snprintf(message, sizeof(message),
                     "anchor gate: profile hash mismatch (got %.*s, want %.*s); "
-                    "X anchor disabled, borrow stays active",
+                    "camera hooks disabled until the plugin is updated",
                     static_cast<int>(hash_size > 0 ? hash_size - 1 : 0),
                     hash.data(),
                     static_cast<int>(kExpectedProfileHash.size()),
@@ -1983,11 +1992,12 @@ void EvaluateAnchorInsurance(Context &context) noexcept {
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, message);
     } else if (next == kAnchorInsuranceServiceMissing) {
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
-          "anchor gate: ue5 build service unavailable; X anchor disabled");
+          "anchor gate: ue5 build service unavailable; route B disabled, "
+          "legacy view hook only");
     } else {
       std::snprintf(message, sizeof(message),
                     "anchor gate: profile hash unreadable (size=%zu); "
-                    "X anchor disabled",
+                    "camera hooks disabled",
                     hash_size);
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, message);
     }
@@ -2415,6 +2425,7 @@ void ANOMALY_CALL RenderTransformDetour(void *self,
   bool publish = false;
   bool orientation_valid = false;
   if (context != nullptr && self != nullptr &&
+      context->render_x.version_gate.load(std::memory_order_acquire) &&
       reinterpret_cast<std::uintptr_t>(self) ==
           context->render_x.watched_proxy.load(std::memory_order_relaxed)) {
     const auto *value = reinterpret_cast<const double *>(
@@ -2870,7 +2881,8 @@ bool IsRouteBFullScreenView(void *view) noexcept {
 }
 
 bool ApplyRouteBFov(void *view, const RenderXProbe &probe) noexcept {
-  if (view == nullptr) {
+  if (view == nullptr ||
+      !probe.version_gate.load(std::memory_order_acquire)) {
     return false;
   }
   const float desired =
@@ -2941,7 +2953,8 @@ bool UpdateRouteBPrevViewHistory(void *view) noexcept {
 void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
                                   const double forward[3]) noexcept {
   RenderXProbe &probe = context.render_x;
-  if (!context.started.load(std::memory_order_acquire)) {
+  if (!context.started.load(std::memory_order_acquire) ||
+      !probe.version_gate.load(std::memory_order_acquire)) {
     return;
   }
   const std::uint32_t render_thread =
@@ -3041,6 +3054,10 @@ void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
 // camera the renderer will later use.
 bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
   RenderXProbe &probe = context.render_x;
+  if (!probe.version_gate.load(std::memory_order_acquire)) {
+    probe.prepare_anchor_off.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   // A failed attempt this frame must not leave an older frame's view list
   // looking fresh to the transform/late hooks.
   probe.route_b_early_views_valid.store(false, std::memory_order_release);
@@ -3157,7 +3174,8 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
 
 bool ApplyRouteBView(Context &context, void *self,
                      void *view_matrices) noexcept {
-  if (context.render_x.render_thread_id.load(std::memory_order_acquire) == 0 ||
+  if (!context.render_x.version_gate.load(std::memory_order_acquire) ||
+      context.render_x.render_thread_id.load(std::memory_order_acquire) == 0 ||
       !context.render_x.anchor_enabled.load(std::memory_order_acquire)) {
     return false;
   }
@@ -3295,7 +3313,8 @@ void ANOMALY_CALL ViewUniformDetour(void *self, void *view_matrices,
         }
       }
       bool route_b_this_view = false;
-      if (context->enabled.load(std::memory_order_acquire)) {
+      if (context->enabled.load(std::memory_order_acquire) &&
+          probe.version_gate.load(std::memory_order_acquire)) {
         route_b_this_view = early_this_view;
         if (!early_this_view) {
           if (ApplyRouteBView(*context, self, view_matrices)) {
@@ -3414,6 +3433,9 @@ void ANOMALY_CALL PrepareViewStateDetour(void *self,
 }
 
 bool EnsurePrepareViewStateHook(Context &context) noexcept {
+  if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
+    return false;
+  }
   if (context.prepare_view_state_hook_id.load(std::memory_order_acquire) !=
           0 &&
       HookReady(context.hook)) {
@@ -3517,6 +3539,9 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
 }
 
 bool EnsureViewUniformHook(Context &context) noexcept {
+  if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
+    return false;
+  }
   if (context.view_uniform_hook_id.load(std::memory_order_acquire) != 0 &&
       HookReady(context.hook)) {
     return true;
@@ -3588,6 +3613,9 @@ bool EnsureViewUniformHook(Context &context) noexcept {
 }
 
 bool EnsureTransformHook(Context &context) noexcept {
+  if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
+    return false;
+  }
   if (context.transform_hook_id.load(std::memory_order_acquire) != 0 &&
       HookReady(context.hook)) {
     return true;
@@ -3646,6 +3674,15 @@ bool EnsureTransformHook(Context &context) noexcept {
 }
 
 bool EnsureHook(Context &context) noexcept {
+  // 2.5 has no build service. Preserve its legacy view-point hook rather than
+  // turning an optional service into a hard requirement; 2.6+ with a build
+  // service present is fail-closed on a hash mismatch.
+  const bool legacy_without_build =
+      context.render_x.insurance_state == kAnchorInsuranceServiceMissing;
+  if (!context.render_x.version_gate.load(std::memory_order_acquire) &&
+      !legacy_without_build) {
+    return false;
+  }
   if (context.view_hook_id.load(std::memory_order_acquire) != 0 &&
       context.hook_ready.load(std::memory_order_acquire)) {
     return true;
@@ -6615,9 +6652,23 @@ void RetryHookIfNeeded(Context &context) noexcept {
     return;
   }
   context.next_hook_retry = context.elapsed + kHookRetrySeconds;
-  static_cast<void>(EnsurePrepareViewStateHook(context));
-  static_cast<void>(EnsureTransformHook(context));
-  static_cast<void>(EnsureViewUniformHook(context));
+  // The profile hash is the layout witness for the route B hooks. Patterns
+  // prove the entry point exists; they cannot prove that FViewInfo or
+  // FSceneRenderer still have the fields we write. If the gate is closed,
+  // stay out of the game instead of guessing. The legacy view-point hook is
+  // kept only when the host genuinely has no build service (2.5).
+  const bool version_gate =
+      context.render_x.version_gate.load(std::memory_order_acquire);
+  const bool legacy_without_build =
+      context.render_x.insurance_state == kAnchorInsuranceServiceMissing;
+  if (!version_gate && !legacy_without_build) {
+    return;
+  }
+  if (version_gate) {
+    static_cast<void>(EnsurePrepareViewStateHook(context));
+    static_cast<void>(EnsureTransformHook(context));
+    static_cast<void>(EnsureViewUniformHook(context));
+  }
   static_cast<void>(EnsureHook(context));
 }
 
@@ -7308,7 +7359,7 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
         "ok", "hash", "pattern", "service", "offset", "off", "read"};
     const std::size_t gate =
         display.anchor_gate < 7U ? display.anchor_gate : 6U;
-    DrawStatusLine(ui, localizer, "diag.anchor_gate", "X gate",
+    DrawStatusLine(ui, localizer, "diag.anchor_gate", "Version gate",
                    kGateValues[gate]);
     std::snprintf(line, sizeof(line), "%llu / %llu",
                   static_cast<unsigned long long>(

@@ -105,7 +105,7 @@
     "anchor.state.disabled": "已禁用",
     "anchor.state.hash_mismatch": "hash 不匹配",
     "anchor.state.resolve_failed": "pattern 失败",
-    "diag.anchor_gate": "X 门禁",
+    "diag.anchor_gate": "版本门禁",
     "diag.anchor_fallback": "X 回退/读错",
     "diag.borrow": "B 借用强度",
     "diag.render_x_state": "X GWorld",
