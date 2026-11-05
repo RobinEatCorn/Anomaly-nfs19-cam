@@ -33,6 +33,11 @@
       "minVersion": 1
     },
     {
+      "id": "anomaly.window",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
       "id": "anomaly.localization",
       "minVersion": 1
     },
@@ -83,6 +88,7 @@
   "capabilities": [
     "configuration",
     "ui",
+    "ui-window",
     "input",
     "json",
     "interop-signature",
