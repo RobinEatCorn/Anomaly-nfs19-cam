@@ -18,3 +18,7 @@ CMakeUserPresets.json
 
 # 本地 SDK 路径覆盖（如自定义了 AnomalySDK_DIR）
 /*.local.cmake
+
+# 本地逆向/截图产物（不进入插件包）
+/analysis/
+/capture/

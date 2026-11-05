@@ -4,7 +4,7 @@
 
 **用 NFS 2015 的 Action Camera 替换 NTE 的驾驶追车视角**
 
-![platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6) ![language](https://img.shields.io/badge/C%2B%2B-20-00599C) ![abi](https://img.shields.io/badge/Anomaly%20ABI-v1-2bb5a0) ![license](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
+![platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6) ![language](https://img.shields.io/badge/language-C%2B%2B-20-00599C) ![abi](https://img.shields.io/badge/Anomaly%20ABI-v1-2bb5a0) ![license](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
 
 </div>
 
@@ -30,15 +30,37 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 本仓库是**独立的 CMake 工程**，只消费安装好的 `AnomalySDK`，不参与 Anomaly 仓库的构建，
 也不包含宿主内部头文件或对 Runtime 的修改。插件通过公开的纯 C ABI v1 服务工作：
 
-- `anomaly.interop.signature` + `anomaly.interop.hook` 接管 CameraManager 的视点函数；
-- `anomaly.nte.player` / `anomaly.nte.vehicle` 读取相机所需的快照（两者在宿主侧都是缓存拷贝或
-  低频轮询；不租用 `anomaly.nte.entities` / `anomaly.nte.actors`）；
-- `anomaly.core` 的 `read_memory` 读取 `ue5.GWorld` 链（X 锚点）；
-- `anomaly.ue5.build`（可选）用 `profile_hash` 给硬编码的偏移表做版本门禁；
+- `anomaly.interop.signature` + `anomaly.interop.hook` 解析并 hook 相机/渲染函数；
+- `anomaly.nte.player` / `anomaly.nte.vehicle` 读取车的位置、速度和朝向快照；
+- `anomaly.core` 的 `read_memory` 读取 `ue5.GWorld` 链和车辆/相机对象；
+- `anomaly.ue5.build`（可选）用 `profile_hash` 给 route B / FOV 的硬编码偏移做版本门禁；
 - `anomaly.config` + `anomaly.json` 持久化并解析设置（不依赖第三方 JSON 库）；
-- `anomaly.ui` / `anomaly.localization` / `anomaly.input` 提供窗口、翻译和 F7 快捷键。
+- `anomaly.ui` / `anomaly.localization` / `anomaly.input` 提供窗口、翻译和 F7 快捷键；
+- `anomaly.window`（可选）使用 2.6+ 的托管窗口；没有时退回直接 UI。
 
-不扫描 GObjects，不调用 `ProcessEvent`；`ue5.GWorld` 只按 profile 的 pattern 解析一次全局槽位。
+### 相机与渲染路径
+
+相机模型由 `chase_cam.hpp` 推进；Game tick 只发布车辆样本，最终的追车视图在渲染线程应用：
+
+- `FPrimitiveSceneProxy::OnTransformChanged`：拿到这个渲染帧真正用于画车的车辆变换；
+- `FSceneRenderer::PrepareViewStateForVisibility`：在视锥裁剪和 TAA 历史推进之前写入最终机位；
+- `FViewInfo::SetupUniformBufferParameters`：同一帧的晚段兜底；
+- `FSceneView::UpdateViewMatrix` / `SetupViewFrustum`：重建视图矩阵、`ViewFrustum` 和
+  `CullingFrustum`，避免车体与裁剪/TAA 使用不同机位。
+
+route B 的最终机位由 NFS 模型和渲染线程车辆变换合成：
+
+```text
+fresh car = 渲染线程 proxy 平移 + 车身锚点高度
+eye       = fresh car + (NFS 模型 eye - NFS 模型 car) * cameraScale
+eye.z    += originOffsetCm
+rotation  = NFS 模型的 pitch / yaw / roll
+```
+
+模型 pose 暂时不可用时回退到固定的 route B 机架；再不可用时保留游戏原相机。这样相机和车体
+共用渲染帧，不再依赖 game-tick 位置去追渲染帧中的车。
+
+不扫描 GObjects，不调用 `ProcessEvent`；`ue5.GWorld` 只在 profile pattern 命中后解析一次全局槽位。
 
 ## 目录
 
@@ -50,7 +72,7 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 ├── pluginmaster.json     第三方插件源条目
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
 ├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
-├── plugin.cpp            ABI 入口、生命周期、视点 detour、UI
+├── plugin.cpp            ABI 入口、生命周期、hooks、相机/渲染接线、UI
 ├── chase_cam.hpp         NFS 2015 相机模型（两个预设）
 ├── view_blend.hpp        渲染帧插值
 ├── localization.hpp      插件自己的本地化 helper（不依赖宿主内部头文件）
@@ -128,7 +150,8 @@ anomaly-plugin validate .\build\package\Nfs2015ChaseCam
 anomaly-test-host --plugin .\build\package\Nfs2015ChaseCam --reload 10 --ticks 60
 ```
 
-离线 TestHost 没有游戏适配器，NTE 服务会保持 `UNAVAILABLE`；它只验证包能正常加载、卸载和重载。
+离线 TestHost 没有游戏适配器，NTE 服务和 build 门禁会保持不可用；它只验证包能正常加载、卸载、
+重载，以及门禁关闭时不会留下 hook lease。
 
 手动安装时，把 `build\package\Nfs2015ChaseCam` 整个目录复制到 `Anomaly\plugins\Nfs2015ChaseCam`，
 或者在游戏目录前缀上直接安装：
@@ -145,39 +168,98 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 
 - `F7` 开关相机。插件只在检测到当前驾驶载具时接管视角；未驾驶时保持游戏原相机。
 - 默认预设是 **NFS 2015（实机数据）**：车后约 5.10 m、高 1.49 m，look-at 高度 1.225 m，
-  FOV 43.0–63.1°（垂直），速度位移在 0–50 mph 内后拉 1.3 m，roll 上限 4.7°。
+  FOV 43.0–63.1°（垂直；16:9 下约 70–95° 水平），速度位移在 0–50 mph 内后拉 1.3 m，
+  roll 上限 4.7°。
 - **电影化重建** 使用 `NFS2015_PRESET`：机位与视野更夸张，漂移推近/下压、侧倾与 NOS FOV 都更大，
   属于观感重建而非实机数据。
-- 窗口中可调整机位距离/高度缩放、车身原点偏移、视口宽高比、速度/加速距离倍率、侧倾强度、
-  刹车俯仰强度、镜头震动强度与“仅在漂移时侧倾”。
-- **锚点来源** 有三档：**X 锚定**（默认，在视点 detour 里读同一时刻的 `root+280`）、
-  **borrow 估计**（旧行为，用游戏相机位置反推）和**纯模型**（不锚定）。窗口状态行显示当前
-  实际使用的锚点与 `fb` 回退次数；诊断里的 `X 门禁` 给出 `ok / hash / pattern / service /
-  offset / off` 的原因。
-- **版本保险**：启动时用 `anomaly.ue5.build` 的 `profile_hash` 对比本包验证过的 profile。
-  hash 不匹配、pattern 解析失败、同链校验连续失败或服务缺失时，X 路径自动禁用并回退到 borrow，
-  相机继续工作，状态行不会静默。
-- 相机模型在视点 detour（渲染时钟）里推进，Game tick 只写车样本；`Camera update rate` 显示实际 tick 频率，`View output / interp`
-  显示视点 detour 的输出频率和命中渲染帧插值的比例。低于 60 Hz 时 detour 会用最近两次快照
-  插值，不再对车辆基准做前向预测；同时会用原始游戏相机位姿的帧间位移把机位补到当前渲染帧，
-  避免车身和机位差一帧。
-- Game-tick 样本的基准是 Pawn 根位置（驾驶时它就是载具 actor 的根组件）。它在发布时被 `render_offset`
-  减掉、又被 detour 加回来，因此不参与世界坐标，只需要稳定——固定用它换掉了原来每 tick
-  一次的 `component_bounds` 反射查找（那是 tick 耗时的主要来源）。
+- `Camera distance / height scale` 缩放 NFS 模型相对车的机位偏移；`Car origin offset (cm)`
+  是最终的垂直微调。route B 以车辆 proxy 的地面 pivot 为锚，所以默认值是 `-70 cm`，用来抵消
+  旧 +70 cm 车身中心高度；已有配置会保留用户自己的值，不会被覆盖。
+- 窗口中还可调整视口宽高比、速度/加速距离倍率、侧倾强度、刹车俯仰强度、镜头震动强度与
+  “仅在漂移时侧倾”。
+
+### 锚点来源
+
+驾驶时车辆位置有四路来源，面板的 `Anchor` 行会显示本帧实际使用的来源：
+
+| 选项 | 来源 | 用途 |
+|---|---|---|
+| **X anchored** | 视点 detour 当刻读取的玩家 `root+280` | 轻量、稳定的车 root 位置；也是默认值 |
+| **Vehicle mesh** | 角色胶囊 `AttachParent` 的 `VehicleMesh`；优先 SceneProxy 的 `LocalToWorld`，退回 `ComponentToWorld` | 最贴近渲染器画车用的车身变换；受版本门禁保护 |
+| **Borrow estimate** | 用游戏相机位置反推车身（低通估计） | 兼容旧行为；FOV/motion 仍来自模型 |
+| **Pure model** | 只使用 Game-tick 的车辆样本 | 完全不让相机锁到游戏相机；用于诊断 |
+
+route B 的最终位置并不直接等于这里选中的锚点：锚点用于模型/presenter 的基准和回退；
+渲染线程的车辆 proxy 变换是最终位置的基准。`fb` 是锚点回退次数，不是车辆抖动计数。
+
+### NFS 镜头（FOV）
+
+`Apply NFS lens (FOV)` 打开时，route B 会把 NFS 模型算出的水平 FOV 写入当前 `FViewInfo`，并按
+新旧 FOV 比例缩放投影矩阵；面板 `FOV` 显示实际水平 FOV。关闭后保留游戏原 FOV。
+
+FOV 写入和 route B 一样受版本门禁保护；模型 lens 不可用或值超出 1–179° 时跳过，不会写入。
+
+### 相机模型时间
+
+Game tick 只写车样本；相机模型在视点 detour 中推进并发布 pose，route B 在渲染线程把模型 pose
+和这个渲染帧的车辆变换合成。渲染路径无分配、无自有锁、无日志；只用栈缓冲、原子快照和宿主
+hook lease。
+
+## 状态行与诊断
+
+主窗口常用状态：
+
+- `Camera` / `View-point hook`：相机是否启用、基础视点 hook 是否成功；
+- `Anchor` + `版本门禁`：当前锚点来源、`ok / hash / pattern / service / offset / off / read`
+  门禁结果，以及回退次数；
+- `水平 FOV`、`镜头-车辆距离（输出 / 原始）`、`速度`、`侧滑角`、`漂移量`；
+- `渲染钩`、`视图钩 R/G/线程`、`路线B 应用/回退`：route B 各阶段的调用和回退计数；
+- `渲染龄` / `视图←变换龄`：route B 使用的车辆变换和视图之间差多少毫秒。
+
+诊断面板里的 `渲染 vs 代理`、`X 相位差`、`相机相对车速度/转向`、`tick 间隔`、`视野` 和
+`C px` 是定位渲染相位、帧长和锚点问题的常驻探针。它们只读取计数和样本，不参与相机计算；
+排查结束后可以忽略，不需要为了正常使用关闭。
+
+诊断开关（`Diagnostic: ...`）会刻意关闭某些通道，仅用于二分问题：
+
+- `position and yaw only`：关闭 pitch/roll/镜头写入；
+- `zero lag, newest tick position`：绕过插值窗口；
+- `keep the Game's position` / `rotation`：保留游戏对应通道；
+- `Lock to the Game's camera (0 = pure model)`：只影响 borrow 分支的强度。
+
+## 版本保险与安全边界
+
+插件的 route B 会直接写 UE 的 `FViewInfo` / `FSceneRenderer` 字段，因此不能对任意游戏版本
+无条件启用。当前策略是 **fail-closed**：
+
+- 启动时读取 `anomaly.ue5.build` 的 `profile_hash`，只有与验证过的 profile 完全一致才打开
+  `version_gate`；
+- 2.6+ 且 build service 存在时，门禁关闭就不创建 route B / `FViewInfo` FOV / 视点 hook，
+  也不写任何游戏内存；面板显示 `版本门禁`，相机保持游戏原样；
+- 所有需要的函数入口仍通过运行时 pattern 解析；pattern 不命中则不安装；
+- 渲染路径再次检查 render thread、全屏 view、view state、generation/新鲜度、有限值和
+  proxy 所有权；
+- hook 回调使用宿主 generation lease；热重载时先撤 callback 再释放 hook。
+
+**2.5 兼容**：2.5 没有可选的 build service，route B 和 `FViewInfo` FOV 写入关闭，只保留旧的
+基础视点 hook（它仍按旧路径写 CameraManager 的镜头）；2.6+ 如果 build service 存在但 hash
+不匹配，则相机完全不接管。
+
+这不是“任何未知版本都绝不会崩”的数学保证：如果游戏/Anomaly 更新后 profile hash 没有变化、
+但字段实际移动，或者 UE 对象在渲染线程被释放，原始内存访问仍可能触发 Windows access violation；
+C++ `try/catch` 捕获不到这类异常。遇到新版本请先更新 profile hash 与偏移表，再发布新插件。
 
 ## 冲突与限制
 
 - 与 **Camera Tools**、**BetterPose** 的相机 Hook 互斥：CameraManager 的视点函数同一时间只能有一个
   所有者。先停用其他相机插件，或在窗口里点 **Retry hook**。
 - 插件不做镜头碰撞射线，贴墙时可能穿模。
-- 相机模型的原点是「根组件 bounds 底面 + 车身原点偏移」。根组件覆盖整车（含轮胎），所以它
-  比车身网格底面更贴近地面；若希望相机相对车身更高，把 `Car origin offset (cm)` 调大即可
-  （±150 cm）。日志 `anomaly-platform.log` 里的 `vehicle snapshot available: ...` 记录了载具
-  服务是否可用及其轮询间隔。
-- 前向运动预测已移除（它会把逐帧变化的 `velocity * dt` 叠到机位上，反而放大抖动）；detour
-  仍用原始游戏相机位姿的帧间位移补偿发布延迟，这是测得位移而不是速度外推。
-- 插件只读取公开快照，不修改游戏内存中的相机状态（`FOV` 复选框用于把 NFS 镜头写回 CameraManager
-  的 `FMinimalViewInfo`，与内建相机插件的行为一致）。
+- route B 只处理全屏游戏 view；反射、场景捕获、阴影等小 view 保持游戏原相机。
+- `Camera distance / height scale` 和 `Car origin offset` 改的是相机，不改变车辆物理或游戏碰撞。
+- 已知遗留：重刹车/漂移时模型仍可能出现一次点头式 pitch，当前不在本版验收范围。
+- 版本保险是**有意降级**：profile 不匹配时相机功能不会工作，优先保证不把游戏写崩；更新插件
+  后再恢复。
+- 前向运动预测已移除（它会把逐帧变化的 `velocity * dt` 叠到机位上，反而放大抖动）。
 
 ## 与 Anomaly 内建版本的关系
 
@@ -191,6 +273,16 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 
 `local` 分支上另有 ACE loader-hook 冻结策略和全局 `/utf-8` 编译选项两个提交；它们不属于相机特性，
 也没有移植到这里。`/utf-8` 只在本工程的 target 上设置，ACE 行为由 Runtime 自己决定。
+
+## 待触发
+
+以下项目只有在未来出现明确需求或新证据时才做，不属于本版：
+
+- 把速度、车头朝向、yaw rate 从 Game-tick 差分迁移到渲染帧差分（当前 X/route B 只解决位置）；
+- 刹车重减速的点头 pitch 进行单独的模型/信号修正；
+- 如果游戏改变 `FViewInfo` / `FSceneRenderer` 布局，更新 `kExpectedProfileHash`、偏移表和
+  pattern，而不是放宽门禁；
+- 如 Anomaly 改变 hook 服务 ABI，升级时重新验证 `anomaly.interop.hook` 与 lease 行为。
 
 ## 发布
 

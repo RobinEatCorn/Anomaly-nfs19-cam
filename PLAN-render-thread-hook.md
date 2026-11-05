@@ -6,6 +6,11 @@
 > 取代 v1（本文件历史版本）与 `NOTES-render-thread-hook.md`（保留作来源）。
 > 配套背景：`PLAN-camera-timing.md`（§9 验收指标、§10 反模式、§11 设计原则仍然有效）。
 > 基线：`nfs2015-chase-cam` HEAD = `22f7827`（探针 + 差异报告已提交）。
+>
+> **最终状态（2026-11-06）**：任务组 0–5 完成，用户终审选择结局①（无可见车抖、无画质问题）。
+> 最终实现走 **route B**：NFS 模型 pose + 渲染线程车辆 proxy 变换，在 pre-visibility / transform /
+> view-uniform 三处应用；FOV 由同一模型写入。所有布局相关 hook 由精确 `profile_hash` fail-closed
+> 门禁保护。细节见 `README.md` 和任务组 4/5 记录。
 
 ---
 
@@ -137,23 +142,28 @@
     `SampleRenderXPhase` 的每 8 ms 单次读；`root+280` 在模型空间补 `originOffsetCm`（Z）。
     `borrow_strength` 仍是 0=纯模型、1=完全锚定；X 模式下不再跟踪 `game_offset_cm`，回退时重新初始化。
   - 版本保险：`manifest.json` 增加可选 `anomaly.ue5.build` + `ue5-build`；`kExpectedProfileHash`
-    为实测 runtime profile `06e1b79ceb4b9a778cb2b88357fea9ac2a6c34e06ba759d3b62048a979fd11bd`；
-    `X 门禁` 状态显示 `ok/hash/pattern/service/offset/off/read`，主窗口 `锚点` 行显示五态 + `fb` 计数。
+    当前为实测 runtime profile `0e3aaa6d640b06ca08a5f89a71ef6377b13165c545fe636deafe1805f222a3f8`；
+    `版本门禁` 状态显示 `ok/hash/pattern/service/offset/off/read`，主窗口 `锚点` 行显示
+    `X / 车锚定 / borrow / 纯模型` 及 `fb` 计数。最终此门禁扩展到 route B/FOV 和 2.6+ 视点
+    hook；见任务组 3/5 与 README。
   - 构建/测试：`./build-mingw.sh` 干净；`nfs2015_chase_cam_test.exe` 全绿；`anomaly-test-host
     --reload 2 --ticks 60` 通过（TestHost 没有 build 服务，验证 service-missing 回退不崩）。
     本机没有 wine，`--run-tests` 未用，验收夹具直接在 Windows 侧运行。
-  - 待游戏内验证：安装后看 `锚点`、`X 门禁`、`X GWorld`、`X 回退/读错`；任务组 2 的三档对比。
+  - 历史待验证项：安装后看 `锚点`、`版本门禁`、`X GWorld`、`X 回退/读错`；后续任务组已完成终审。
 
 ### 📦 任务组 2：A/B 实测与判定
 
 - **难度评级**：⭐⭐ [中等]
 - **目标**：用数据回答"直接读数 vs 相机估计 谁更好、够不够消抖"。
 - **具体行动项**：
-  - [ ] 2.1 直行 + 漂移各跑，三种「锚点来源」分别记录「相机相对车身位移速度 最高」（每帧只取第一次
+  - [x] 2.1 直行 + 漂移各跑，三种「锚点来源」分别记录「相机相对车身位移速度 最高」（每帧只取第一次
         detour 调用，PLAN §4.1 教训）、「相对转向峰值」。
-  - [ ] 2.2 对照 1.5 门槛，得出 (A) 的结论：达标 / 有改善未达标 / 无改善。
-  - [ ] 2.3 判定：达标或明显优于 borrow → 进任务组 4；未达标 → 把数据写成升级 B 的证据，进任务组 3。
-- **验收**：三组对比数据 + 明确判定结论。
+  - [x] 2.2 对照 1.5 门槛，得出 (A) 的结论：达标 / 有改善未达标 / 无改善。
+  - [x] 2.3 判定：达标或明显优于 borrow → 进任务组 4；未达标 → 把数据写成升级 B 的证据，进任务组 3。
+- **2026-11-06 判定记录**：同刻锚点本身没有达到肉眼终审；最终没有继续重复三档 A/B，而是按
+  2.2/2.3 升级到 route B（NFS 模型 pose + 渲染线程 proxy 变换）。route B 通过用户终审，
+  因此不再保留 A/B 三档的旧对比表；历史数字见任务组 0/3 的实测记录。
+- **验收**：升级 B 的数据证据 + 用户终审结论（见任务组 4）。
 
 ### 📦 任务组 3（条件触发）：A2 渲染器变换逆向
 
@@ -192,7 +202,15 @@
   - 判读：这不再像单个车锚读错，更像**相机与近场的时间相位**（远景角位移小，近处车明显），
     或车辆网格/骨骼插值；先用“近处护栏/F7 关相机”对照确认。
   - 若确认相机相位，升级路线③：在渲染线程/渲染帧应用相机视图；需用户拍板，不先加补偿。
-- **验收**：确定的渲染器变换读取路径 + 相位/消抖证据。
+- **2026-11-06 终局（route B）**：
+  - 最终路径不是“只读 proxy 再让旧相机借用”，而是 `PublishRouteBModelPose` 发布 NFS 模型 pose，
+    route B 用渲染线程 proxy 的 fresh translation 合成最终 eye/rotation；
+  - 应用点覆盖 `PrepareViewStateForVisibility`、`OnTransformChanged` 后的视图刷新和
+    `SetupUniformBufferParameters` 兜底，解决 culling/TAA 与最终矩阵不一致；
+  - NFS 镜头 FOV 同步写入 `FViewInfo` 和投影矩阵；
+  - 用户 2026-11-06 确认：运镜正常、FOV 自然展开、漂移正常、无车抖、无 TAA/画质问题；
+  - 版本保险升级为精确 profile hash 的 fail-closed 门禁（见任务组 5/README）。
+- **验收**：确定的渲染器变换读取路径 + 相位/消抖证据 + 用户终审（通过）。
 
 ### 📦 任务组 4：用户最终确认（终审）
 
@@ -217,11 +235,16 @@
 - **难度评级**：⭐ [简单]
 - **目标**：收尾，不留死代码和过期文档。
 - **具体行动项**：
-  - [ ] 5.1 归档探针临时代码（若保留为诊断面板常驻功能则标注用途）。
-  - [ ] 5.2 更新 README（状态行、版本保险、锚点来源开关）、本计划、`NOTES` 标注"已被 PLAN 取代"。
-  - [ ] 5.3 "待触发"清单：速度/朝向/yaw_rate 迁移到渲染帧差分（Q2 第二步，仅在将来需要时）。
-  - [ ] 5.4 若结局③：结论写进 PLAN-camera-timing.md "已证伪路线"表。
-- **验收**：文档一致；`git status` 无未跟踪临时文件（`nte-game-analysis/` 大文件仍不提交）。
+  - [x] 5.1 归档探针临时代码（若保留为诊断面板常驻功能则标注用途）。探针保留为常驻诊断，用途和
+        读数说明已写入 README「状态行与诊断」；仍被面板引用的探针保留，未再保留脱离面板的死代码。
+  - [x] 5.2 更新 README（状态行、版本保险、锚点来源开关）、本计划、`NOTES` 标注"已被 PLAN 取代"。
+        README 已改为 route B / FOV / 四路锚点 / fail-closed 版本门禁的最终说明；`NOTES` 已归档。
+  - [x] 5.3 "待触发"清单：速度/朝向/yaw_rate 迁移到渲染帧差分（Q2 第二步，仅在将来需要时）。
+        已写入 README「待触发」，并保留刹车点头作为已知遗留。
+  - [x] 5.4 结局③未发生（用户选择结局①），因此不向 `PLAN-camera-timing.md` 的已证伪路线表追加
+        “route B 失败”结论；`PLAN-camera-timing.md` 继续作为历史分析文档保留。
+- **验收**：文档一致；`git status` 无未跟踪临时文件（`analysis/`、`capture/` 已加入 `.gitignore`，
+  `nte-game-analysis/` 大文件仍不提交）。
 
 ---
 

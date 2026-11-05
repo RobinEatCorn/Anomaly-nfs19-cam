@@ -1,6 +1,8 @@
-# 渲染线程车辆变换 Hook — 工作笔记
+# 渲染线程车辆变换 Hook — 工作笔记（已归档）
 
-> 临时工作文档。给下一个 session 接手用。
+> **已归档（2026-11-06）**：本文件是 v1 工作笔记，已被 `PLAN-render-thread-hook.md` 取代。
+> 当前实现、验收结果与安全门禁以 `README.md` / `PLAN-render-thread-hook.md` 为准；这里保留
+> 历史来源和当时的逆向线索。
 
 ## 背景（一句话）
 
@@ -23,7 +25,8 @@ Anomaly 是 NTE 的插件框架。`nfs2015-chase-cam` 是运行在 Anomaly 里�
 - `38c98ef` borrow 改为输入端锚定：从 `game_eye` 反推“游戏画的车位置”估计值，模型锚到该估计值。默认 `borrow_strength=1.0`。
 - AtSmooth 切向量改为非均匀 Catmull-Rom（在 cf5d976 内）。
 
-当前 `nfs2015-chase-cam` 工作区干净，HEAD = `38c98ef`。
+当时的 `nfs2015-chase-cam` HEAD = `38c98ef`；该节点之后由 v2 计划继续推进，最终 route B 已
+完成用户验收，见 `PLAN-render-thread-hook.md` 任务组 4。
 
 ## 游戏文件
 
