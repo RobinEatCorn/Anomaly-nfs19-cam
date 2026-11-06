@@ -2,7 +2,8 @@
 
 > 交接对象：执行 AI
 > 依据：`nfs2015-chase-cam/REPORT-slope-gradient.md`，以及用户在宏观决策轮次中确认的 Q1–Q4 选择。
-> 当前阶段：只做计划，不改代码。
+> 当前阶段：任务组 1–5 已完成并经过实机验收；最终记录见
+> `REPORT-slope-gradient.md` 第 9 节。
 
 ## 1. 目标与宏观共识
 

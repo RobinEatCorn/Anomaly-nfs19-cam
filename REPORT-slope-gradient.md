@@ -1,6 +1,9 @@
-# NFS 2015 追车相机：上下坡高度处理调查
+# NFS 2015 追车相机：上下坡高度处理调查与实施记录
 
 调查对象：`nfs2015-chase-cam` 当前移植版为什么在上下坡时“上坡偏高、下坡偏低”，以及 NFS 2015 原版用什么机制避免这个问题。
+
+> 实施状态（v1.1.0）：任务组 1–5 已完成并经过用户实机确认。§1–§8 保留实施前的调查和推断，
+> 其中“当前移植”指旧版；最终代码、符号、单位和实测值以 §9 为准。
 
 结论先行：
 
@@ -494,3 +497,237 @@ bool slope_gradient_trim{true};           // 次修复开关
 - 全部：`MaximumGradient = 10.0`
 
 逐车明细可用 `/tmp/gradient_values.json` 复现；提取脚本基于 `/tmp/fbs/frostbite3/ebx.py` 和现有的 51 个 `vehicle-blueprints/*.ebx`。
+
+---
+
+## 9. 实施与验收记录（v1.1.0）
+
+> §1–§8 保留实施前的调查与推断；其中“当前移植”指旧的 yaw-only 版本。最终实现以本节为准。
+
+### 9.1 最终采用的车体坐标架
+
+`CarState.pitch` 表示车头上仰，单位为弧度。相机模型使用 roll = 0 的车体基向量：
+
+```text
+forward = (cos pitch * cos yaw, cos pitch * sin yaw, sin pitch)
+right   = (-sin yaw, cos yaw, 0)
+up      = Cross(forward, right)
+
+pivot_world  = car.position + basis * pivot
+offset_world = basis * (rest - pivot)
+offset_world = RotateAxis(offset_world, basis.up,
+                          WrapPi(position_azimuth - car.yaw))
+desired      = pivot_world + offset_world
+```
+
+`basis * v` 即 `CarLocalToWorld(v, basis)`。pivot、rest 和 orbit 都在车体局部空间里完成，
+所以上坡时相机跟着车尾一起降低、下坡时一起升高。`pitch == 0` 仍走旧的 yaw-only 构造，
+保证平路输出逐分量不变。
+
+注视目标不放进车体坐标架，而是继续使用世界水平的车头偏移：
+
+```text
+look_world = car.position + RotateYaw(look_azimuth, look)
+view_pitch = brake_pitch - slope_look_pitch
+```
+
+因此位置跟坡、地平线不跟着 roll，也不引入坡度造成的左右倾斜。`view_pitch` 只绕相机
+right 轴旋转。
+
+### 9.2 符号、单位与 gradient 合成
+
+最终采用的约定如下：
+
+| 量 | 单位/符号 | 约定 |
+|---|---|---|
+| `CarState.pitch` | 弧度 | 车头上仰为正；来自渲染 proxy 的 forward |
+| `EffectivePitch()` | 弧度 | `slope_follow` 关闭时为 0；开启时限制在 ±89° |
+| `slope` | 弧度 | 只用于 gradient trim，限制在 `±slopeMaxGradientDegrees` |
+| `rest.z` | 米 | 车体局部 up 方向；基础值 1.49 m |
+| `slope_look_pitch_` | 弧度 | 正数表示视线向上；弹簧系数 6.0 |
+| `pitch_`（刹车） | 弧度 | 正数表示视线向下；与坡度合成时做减法 |
+| `position_azimuth - car.yaw` | 弧度 | 绕 `basis.up` 的相机 yaw 滞后 |
+
+gradient 只对限幅后的坡度生效，基础坐标架仍使用完整车身 pitch：
+
+```text
+effective_pitch = slope_follow ? clamp(car.pitch, -89°, +89°) : 0
+slope = clamp(effective_pitch, -max_gradient, +max_gradient)
+params = slope >= 0 ? slope_up : slope_down
+
+rest.z += slope * params.rest_position_scalar * slope_strength
+slope_look_target =
+    slope * params.look_at_angle_scalar * slope_strength
+```
+
+默认值仍是 37 车 action-camera 预设：
+
+```text
+Upwards:   LookAtAngleScalar = 0.5, RestPositionScalar = 2.0
+Downwards: LookAtAngleScalar = 0.3, RestPositionScalar = 0.25
+MaximumGradient = 10.0
+slopeFollow = true
+slopeStrength = 1.0
+```
+
+`slopeStrength` 和四个 gradient scalar 只作用于次级微调；`slopeStrength = 0` 或
+`MaximumGradient = 0` 时仍保留完整车身坐标架。`slopeFollow = false` 时
+`EffectivePitch()` 直接返回 0，行为退回旧的 yaw-only 机架。
+
+### 9.3 pitch 来源与 route B
+
+渲染线程的 `RenderTransformDetour()` 把 proxy 的 forward 做完整三维归一化，
+因此 `forward.z = sin(pitch)`。读取端同时兼容旧的水平归一化格式（`z = tan(pitch)`）：
+
+```text
+pitch = atan2(forward.z, hypot(forward.x, forward.y))
+```
+
+快照沿用现有 seqlock、`transform_valid`、`transform_orientation_valid` 和
+`transform_ns`：50 ms 内的快照优先；移动中最多保持最后值 250 ms；停车时保持最后一次
+朝向；换车、传送和重置会丢弃缓存。没有新增锁、内存分配或硬编码偏移。
+
+route B 的两个路径分工如下：
+
+- `BuildRouteBPoseFromCar()` 固定回退使用 `MakeCarBasis(car_yaw, body_pitch)` 变换
+  厘米单位的 rest；look 仍用 yaw-only 世界水平偏移；不叠 gradient。基准仍是
+  `kRouteBRestXM = -5.20`、`kRouteBRestZM = 1.55` 和 70 cm 锚点中心高度。
+- `BuildRouteBPoseFromModel()` 只把模型 eye 的偏移平移到 fresh car；模型 eye 已含坡度，
+  不再应用 pitch，避免双算。三个入口
+  `BuildRouteBPoseDirect()` / `ApplyRouteBAtRenderTransform()` / `ApplyRouteBEarly()`
+  共用这两个函数。
+
+### 9.4 配置、UI 与诊断
+
+settings schema 增加 7 个可选字段：
+
+```text
+slopeFollow = true
+slopeStrength = 1.0
+slopeMaxGradientDegrees = 10.0
+slopeUpLookAt = 0.5
+slopeUpRest = 2.0
+slopeDownLookAt = 0.3
+slopeDownRest = 0.25
+```
+
+`kSettingsSchemaVersion` 保持 1；旧配置缺少这些字段时使用默认值，不会重置用户设置。
+`LoadSettings()` 的字段数上限已从 24 提到 32。窗口只暴露“坡度跟随（车身俯仰）”总开关
+和“坡度构图强度”滑杆（0–2）；其余 scalar 留在设置文件。切换 Game/Cinematic preset 后
+会重新应用用户的坡度设置，避免被 `SetConfig()` 覆盖。
+
+`diagnosticFlatPose` 同时关闭模型层坡度和 route B 固定回退的 pitch，保持
+“position and yaw only”的诊断语义。
+
+### 9.5 实测几何与平路回归
+
+测试 helper 把车放在原点、yaw 固定，`pitch = ±10°` 或 `±20°`，速度/加速度/漂移为 0，
+`Reset()` 后测量相机到“过车体、法线为车体 up 的坡面”的垂直距离。容差 ±0.05 m。
+
+| 场景 | 实测坡面距离 |
+|---|---:|
+| 10° 上坡，`slopeStrength = 0` | 1.490 m |
+| 10° 下坡，`slopeStrength = 0` | 1.490 m |
+| 10° 上坡，默认 gradient | 1.839 m |
+| 10° 下坡，默认 gradient | 1.446 m |
+| 10° 上坡，`slopeFollow = false` | 2.353 m |
+| 10° 下坡，`slopeFollow = false` | 0.582 m |
+| 20° 上坡，默认 gradient | 1.839 m（trim 仍按 10°） |
+| 20° 下坡，默认 gradient | 1.446 m（trim 仍按 10°） |
+
+20° 场景下，实际相机位置与完整 20° 车身基向量的期望位置误差为 **0.000 m**，确认
+`MaximumGradient` 没有限制基础坐标架。
+
+视线 pitch（`CameraState.pitch_degrees`，正数向上）：
+
+```text
+下坡 -14.047°, 平地 -2.578°, 上坡 +7.798°
+```
+
+`slopeFollow = false` 时上坡视线回到平地的 -2.578°。上坡/下坡额外 roll 均为 0.000°。
+
+`BlendCarSample()` 的 pitch 线性插值测试使用 -10° → +30°：
+
+```text
+25%: 0.000 rad (0°)
+50%: 0.175 rad (10°)
+75%: 0.349 rad (20°)
+```
+
+平路回归仍通过原有容差，关键直线值没有漂移：
+
+| 检查 | 实测 | 期望 |
+|---|---:|---:|
+| 电影直线水平距离 | 5.285 m | 5.280 m |
+| 游戏直线水平距离 | 6.361 m | 6.350 m |
+| 电影直线高度 | 1.569 m | 1.570 m |
+| 游戏直线高度 | 1.781 m | 1.780 m |
+| 电影直线垂直 FOV | 56.696° | 56.800° |
+| 游戏直线垂直 FOV | 47.367° | 48.200° |
+
+漂移、刹车 pitch、FOV、震动、reset、插值等原有检查全部通过；测试夹具共 **107 项检查**。
+
+### 9.6 构建与 Windows 侧验证
+
+本机为 WSL2，Windows PE 可以直接通过互操作运行。使用的命令：
+
+```sh
+g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -I. \
+    tests/chase_cam_test.cpp -o /tmp/chase_cam_test
+/tmp/chase_cam_test
+
+g++ -std=c++20 -O1 -fsanitize=undefined \
+    -fno-sanitize-recover=all -I. tests/chase_cam_test.cpp \
+    -o /tmp/chase_cam_test_ubsan
+/tmp/chase_cam_test_ubsan
+
+./build-mingw.sh --run-tests
+ctest --test-dir build.mingw --output-on-failure
+
+pkg="$(wslpath -w build.mingw/package/Nfs2015ChaseCam)"
+anomaly-plugin validate "$pkg"
+anomaly-test-host --plugin "$pkg" --reload 10 --ticks 60
+```
+
+本机这两个 Windows 工具位于 `../build-ninja/bin`；`wslpath -w` 只转换传给 Windows
+程序的包目录参数。
+
+结果：
+
+- 原生测试：107/107 通过，`-Wall -Wextra -Wpedantic` 无警告；UBSan 无报告。
+- `./build-mingw.sh --run-tests`：通过；WSL2 直接执行 PE，纯 Linux 才回退到 wine。
+- `plugin.dll`：2.7 MB，PE32+ x86-64，只导入 `KERNEL32.dll` 和 `msvcrt.dll`，
+  导出 `AnomalyPluginEntryV1`。
+- `ctest`：1/1 通过。
+- `anomaly-plugin validate`：
+  `valid id=io.github.robineatcorn.nfs2015-chase-cam version=1.1.0 entry=plugin.dll`
+- `anomaly-test-host`：
+  `ok active=1 reloads=10 ticks=660 windows=11 text=132`，
+  停止后 `resource_leases_after_stop=0`、`resource_staging_after_stop=0`、
+  `hotkeys_after_stop=0`；`private_growth_bytes=1,519,616`（不同运行略有浮动），
+  预算 10,485,760。
+
+包目录为 `build.mingw/package/Nfs2015ChaseCam`。构建产物只留在忽略的 `build.mingw/`
+下；没有写入游戏目录，也没有提交 DLL、截图或临时探针。
+
+### 9.7 实机确认与交接
+
+用户反馈实机测试未发现问题。此前提供的验收清单覆盖 10° 上/下坡、坡顶起飞、刹车、
+漂移、倒车，以及相机高度、地平线、抖动和跳坡跟随。原计划需要实机确认的 gradient
+符号/缩放和一帧 pitch 延迟，用户未报告可见异常。
+
+仍然存在的边界：
+
+- **没有实现车身 roll 和腾空混合。** `onGround` 仍恒为 `true`；跳坡时相机继续按 proxy
+  的 pitch 跟随车头。本次实机未报告跳坡异常，但这仍是下一阶段的工作。
+- **route B 固定回退不叠 gradient。** 它只在模型 pose 短暂不可用时生效；与正常模型路径
+  可能有细微高度/视线差。模型合成路径没有二次叠加坡度。
+- **首次加载/重置后**还没有新的 proxy 变换时，会先按平地姿态运行。
+- gradient 的 `rad * scalar` 单位、`Upwards/Downwards` 的符号仍是基于资产字段和几何行为
+  的重建，不是 `NFS16.exe` 逐行反编译实证；当前数值经过实机观感确认，后续对照资产时
+  以这里的符号和表格为准。
+- 配置只公开总开关和构图强度；上下坡原始 scalar 需要编辑设置文件，符合 Q4 的最少界面控制。
+
+相关提交为 `5c957e6`、`30e9551`、`6bcf556`、`61e7167`、`97df83c`、`c310f97`、
+`dfd8d29`；文档收尾提交见 `git log` 最新记录。回滚时 revert 对应提交即可；坡度设置字段
+全部可选，旧配置不会因回滚或升级被清空。

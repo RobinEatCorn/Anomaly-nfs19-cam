@@ -120,7 +120,7 @@ cmake --build build.mingw
 ./build-mingw.sh                        # -> build.mingw/package/Nfs2015ChaseCam
 ./build-mingw.sh --zip                  # 另出 dist/Nfs2015ChaseCam-<version>.zip
 ./build-mingw.sh --install D:/Games/NTE # 装到 <game>/Anomaly/plugins/Nfs2015ChaseCam
-./build-mingw.sh --run-tests            # 用 wine 跑验收夹具
+./build-mingw.sh --run-tests            # 跑验收夹具；WSL2 直接运行，纯 Linux 用 wine
 ./build-mingw.sh --help                 # 全部选项
 ```
 
@@ -152,6 +152,16 @@ anomaly-test-host --plugin .\build\package\Nfs2015ChaseCam --reload 10 --ticks 6
 
 离线 TestHost 没有游戏适配器，NTE 服务和 build 门禁会保持不可用；它只验证包能正常加载、卸载、
 重载，以及门禁关闭时不会留下 hook lease。
+
+WSL2 里可以用 Linux `ctest` 直接执行交叉编译出的 Windows 夹具。`anomaly-plugin` 和
+`anomaly-test-host` 是 Windows 程序，包目录参数要先转成 Windows 路径：
+
+```sh
+ctest --test-dir build.mingw --output-on-failure
+pkg="$(wslpath -w build.mingw/package/Nfs2015ChaseCam)"
+anomaly-plugin validate "$pkg"
+anomaly-test-host --plugin "$pkg" --reload 10 --ticks 60
+```
 
 手动安装时，把 `build\package\Nfs2015ChaseCam` 整个目录复制到 `Anomaly\plugins\Nfs2015ChaseCam`，
 或者在游戏目录前缀上直接安装：
@@ -200,7 +210,8 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 | `slopeDownRest` | `0.25` | 0–4 | 下坡机位高度系数 |
 
 `slopeStrength` 和四个 gradient scalar 只影响次级微调；即使 `slopeMaxGradientDegrees = 0`
-或 `slopeStrength = 0`，相机仍会跟随完整车身俯仰。
+或 `slopeStrength = 0`，相机仍会跟随完整车身俯仰。坡度几何的离线验收值、构建/TestHost
+结果和实机确认记录见 [REPORT-slope-gradient.md](REPORT-slope-gradient.md)。
 
 ### 锚点来源
 
