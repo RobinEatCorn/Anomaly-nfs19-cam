@@ -66,6 +66,9 @@ struct CarSample final {
   result.car.brake = Lerp(from.car.brake, to.car.brake, t);
   // Angles are radians here, so WrapPi is the right shortest-arc helper.
   result.car.yaw = from.car.yaw + WrapPi(to.car.yaw - from.car.yaw) * t;
+  // Body pitch stays well inside +-90 degrees, so a plain linear blend is
+  // correct; WrapPi would only introduce a seam the angle does not have.
+  result.car.pitch = Lerp(from.car.pitch, to.car.pitch, t);
   for (std::size_t axis = 0; axis < 3; ++axis) {
     result.anchor_cm[axis] =
         Lerp(from.anchor_cm[axis], to.anchor_cm[axis], t);

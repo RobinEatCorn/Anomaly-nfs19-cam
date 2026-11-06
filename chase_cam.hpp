@@ -91,6 +91,37 @@ struct Vec3 final {
              Mul(axis, Dot(axis, v) * (1.0 - c)));
 }
 
+// Right-handed car body frame, yaw then pitch about the body's right axis.
+// `pitch` is positive when the nose points up; roll is deliberately not
+// modelled yet, so `up` stays perpendicular to both forward and right.
+struct CarBasis final {
+  Vec3 forward{};
+  Vec3 right{};
+  Vec3 up{};
+};
+
+[[nodiscard]] inline CarBasis MakeCarBasis(const double yaw,
+                                           const double pitch) noexcept {
+  const double cp = std::cos(pitch);
+  const double sp = std::sin(pitch);
+  const double cy = std::cos(yaw);
+  const double sy = std::sin(yaw);
+  CarBasis basis;
+  basis.forward = {cp * cy, cp * sy, sp};
+  // The body's right axis does not change with pitch (there is no roll).
+  basis.right = {-sy, cy, 0.0};
+  basis.up = Cross(basis.forward, basis.right);
+  return basis;
+}
+
+// Rotate a car-local vector into world space. At pitch 0 this is the same
+// operation as RotateYaw(yaw, local), including the component order.
+[[nodiscard]] inline Vec3 CarLocalToWorld(const Vec3 local,
+                                          const CarBasis& basis) noexcept {
+  return Add(Add(Mul(basis.forward, local.x), Mul(basis.right, local.y)),
+             Mul(basis.up, local.z));
+}
+
 [[nodiscard]] inline double Clamp(const double value, const double low,
                                   const double high) noexcept {
   return (std::min)(high, (std::max)(low, value));
@@ -226,6 +257,27 @@ struct Config final {
   // Maximum braking pitch, degrees.
   double max_pitch_degrees{3.0};
 
+  // --- Slope following (car body frame + NFS GradientAdjustments) --------
+  // When false the rig is yaw-only again: no body-frame pitch, no gradient.
+  bool slope_follow{true};
+  // Slope angle fed to the gradient trim, degrees. Only the secondary trim is
+  // clamped; the body frame still follows the full car pitch.
+  double slope_max_gradient_degrees{10.0};
+  // Multiplier for the gradient trim only. 0 = body follow without trim.
+  double slope_strength{1.0};
+  // Gradient trim per slope direction. Defaults are the NFS 2015 37-car
+  // action preset: up 0.5 / 2.0, down 0.3 / 0.25.
+  struct GradientParams final {
+    // Extra view pitch per radian of slope (dimensionless).
+    double look_at_angle_scalar{0.5};
+    // Extra car-local rest height per radian of slope, metres/radian.
+    double rest_position_scalar{2.0};
+  };
+  GradientParams slope_up{0.5, 2.0};
+  GradientParams slope_down{0.3, 0.25};
+  // Spring rate for the gradient look pitch (1/s).
+  double slope_look_spring{6.0};
+
   // Local look-at point X at low / high speed, metres ahead of the car origin.
   // NFS 2015 uses about 0.66-0.96 m here; it is not a far-away road target.
   double look_ahead_min{7.0};
@@ -305,6 +357,13 @@ struct Config final {
   cfg.roll_only_in_drift = false;
   cfg.max_pitch_degrees = 3.0;
 
+  cfg.slope_follow = true;
+  cfg.slope_max_gradient_degrees = 10.0;
+  cfg.slope_strength = 1.0;
+  cfg.slope_up = {0.5, 2.0};
+  cfg.slope_down = {0.3, 0.25};
+  cfg.slope_look_spring = 6.0;
+
   cfg.look_ahead_min = 7.0;
   cfg.look_ahead_max = 17.0;
 
@@ -382,6 +441,13 @@ struct Config final {
   cfg.roll_only_in_drift = false;
   cfg.max_pitch_degrees = 4.5;
 
+  cfg.slope_follow = true;
+  cfg.slope_max_gradient_degrees = 10.0;
+  cfg.slope_strength = 1.0;
+  cfg.slope_up = {0.5, 2.0};
+  cfg.slope_down = {0.3, 0.25};
+  cfg.slope_look_spring = 6.0;
+
   cfg.look_ahead_min = 0.786;
   cfg.look_ahead_max = 0.786;
 
@@ -407,6 +473,9 @@ struct CarState final {
   Vec3 position{};
   // Car-body yaw, radians. 0 = +X, positive turns toward +Y.
   double yaw{};
+  // Car-body pitch, radians. Positive = nose up. This is the body angle used
+  // by the rig frame, not the braking camera pitch (`ChaseCam::pitch_`).
+  double pitch{};
   // World-space velocity, m/s.
   Vec3 velocity{};
   // Yaw rate, rad/s.
@@ -487,6 +556,14 @@ class ChaseCam final {
     config_.pitch_scale = Clamp(value, 0.0, 2.0);
   }
 
+  void SetSlopeFollow(const bool value) noexcept {
+    config_.slope_follow = value;
+  }
+
+  void SetSlopeStrength(const double value) noexcept {
+    config_.slope_strength = Clamp(value, 0.0, 2.0);
+  }
+
   void SetShakeScale(const double value) noexcept {
     config_.shake_scale = Clamp(value, 0.0, 2.0);
   }
@@ -501,6 +578,7 @@ class ChaseCam final {
     drift_ = 0.0;
     roll_ = 0.0;
     pitch_ = 0.0;
+    slope_look_pitch_ = 0.0;
     fov_ = config_.min_fov;
     smooth_longitudinal_acceleration_ = 0.0;
     impact_ = 0.0;
@@ -540,6 +618,18 @@ class ChaseCam final {
 
     const Vec3 forward = ForwardFromYaw(car.yaw);
     const Vec3 right = RightFromYaw(car.yaw);
+
+    // Body pitch drives the position/orbit frame. The gradient trim sees a
+    // clamped slope so its effect stays bounded on very steep ground. With
+    // `slope_follow` off both are zero and the rig is yaw-only as before.
+    const double body_pitch = EffectivePitch(car);
+    const double gradient_limit =
+        (std::max)(0.0, config_.slope_max_gradient_degrees) *
+        kRadiansPerDegree;
+    const double slope = Clamp(body_pitch, -gradient_limit, gradient_limit);
+    const double slope_strength = Clamp(config_.slope_strength, 0.0, 2.0);
+    const Config::GradientParams& gradient =
+        slope >= 0.0 ? config_.slope_up : config_.slope_down;
 
     const double speed =
         (std::max)(0.0, std::hypot(car.velocity.x, car.velocity.y));
@@ -604,6 +694,11 @@ class ChaseCam final {
       rest.y += 0.25 * donut;
       rest.x += 0.35 * donut;
     }
+
+    // NFS `GradientAdjustments`: bounded trim along the car-local up axis.
+    // The body frame already follows the full pitch; this only adds the
+    // asymmetric uphill/downhill composition offset.
+    rest.z += slope * gradient.rest_position_scalar * slope_strength;
 
     // Never let the camera end up inside the car.
     rest.x = (std::min)(rest.x, -1.6);
@@ -689,6 +784,14 @@ class ChaseCam final {
             Clamp(config_.pitch_scale, 0.0, 2.0),
         config_.pitch_spring, dt);
 
+    // Gradient look trim. Positive means the view tilts up. The braking pitch
+    // above is positive when the view tilts down, so the two combine as
+    // `pitch_ - slope_look_pitch_` when the view is built below.
+    const double slope_look_target =
+        slope * gradient.look_at_angle_scalar * slope_strength;
+    slope_look_pitch_ = Damp(slope_look_pitch_, slope_look_target,
+                             config_.slope_look_spring, dt);
+
     const double fov_target =
         Lerp(config_.min_fov, config_.max_fov, speed01) +
         config_.nitrous_fov * Clamp(car.nitrous, 0.0, 1.0) +
@@ -718,10 +821,13 @@ class ChaseCam final {
         Add(car.position, RotateYaw(look_azimuth_, look));
     Vec3 view_forward = Normalize(Sub(look_world, camera_position));
 
-    // Braking pitch: rotate the view around the camera's right axis.
+    // Braking pitch and slope look pitch both rotate the view around the
+    // camera's right axis. Braking is positive down, slope look is positive
+    // up, hence the subtraction.
     const Vec3 right0 = Normalize(Cross(Vec3{0.0, 0.0, 1.0}, view_forward));
-    if (std::fabs(pitch_) > 1e-6) {
-      view_forward = Normalize(RotateAxis(view_forward, right0, pitch_));
+    const double view_pitch = pitch_ - slope_look_pitch_;
+    if (std::fabs(view_pitch) > 1e-6) {
+      view_forward = Normalize(RotateAxis(view_forward, right0, view_pitch));
     }
 
     const Vec3 right1 = Normalize(Cross(Vec3{0.0, 0.0, 1.0}, view_forward));
@@ -744,6 +850,18 @@ class ChaseCam final {
   }
 
  private:
+  // Car-body pitch used by the rig frame, radians (nose up positive).
+  // `slope_follow` is the master switch; non-finite input is ignored so a bad
+  // sample cannot poison the camera. The limit only keeps cos(pitch) away from
+  // zero; a real car never gets near it.
+  [[nodiscard]] double EffectivePitch(const CarState& car) const noexcept {
+    if (!config_.slope_follow || !std::isfinite(car.pitch)) {
+      return 0.0;
+    }
+    constexpr double kPitchLimit = 89.0 * kRadiansPerDegree;
+    return Clamp(car.pitch, -kPitchLimit, kPitchLimit);
+  }
+
   [[nodiscard]] double SafeSlip(const CarState& car) const noexcept {
     const double speed = std::hypot(car.velocity.x, car.velocity.y);
     if (speed < 0.75) {
@@ -755,12 +873,29 @@ class ChaseCam final {
   [[nodiscard]] Vec3 DesiredPosition(const CarState& car,
                                      const double position_azimuth,
                                      const Vec3& rest) const noexcept {
-    const Vec3 pivot_world = Add(car.position, RotateYaw(car.yaw, config_.pivot));
-    const Vec3 offset = Sub(rest, config_.pivot);
-    // The offset from the pivot is car-local, so it turns with the camera's
-    // *absolute* azimuth. Using only the lag here leaves the camera on the
-    // world axis whenever the car is not facing +X.
-    return Add(pivot_world, RotateYaw(position_azimuth, offset));
+    const double pitch = EffectivePitch(car);
+    // Flat road, or `slope_follow` off: keep the exact legacy construction so
+    // the existing flat-road acceptance numbers cannot drift.
+    if (pitch == 0.0) {
+      const Vec3 pivot_world =
+          Add(car.position, RotateYaw(car.yaw, config_.pivot));
+      const Vec3 offset = Sub(rest, config_.pivot);
+      // The offset from the pivot is car-local, so it turns with the camera's
+      // *absolute* azimuth. Using only the lag here leaves the camera on the
+      // world axis whenever the car is not facing +X.
+      return Add(pivot_world, RotateYaw(position_azimuth, offset));
+    }
+
+    // On a slope the whole rig lives in the car body frame: the pivot turns
+    // with the body, the rest offset turns with the body, and the camera's yaw
+    // lag orbits around the body's up axis instead of world Z.
+    const CarBasis basis = MakeCarBasis(car.yaw, pitch);
+    const Vec3 pivot_world =
+        Add(car.position, CarLocalToWorld(config_.pivot, basis));
+    Vec3 offset = CarLocalToWorld(Sub(rest, config_.pivot), basis);
+    offset = RotateAxis(offset, basis.up,
+                        WrapPi(position_azimuth - car.yaw));
+    return Add(pivot_world, offset);
   }
 
   Config config_;
@@ -776,6 +911,7 @@ class ChaseCam final {
   double drift_{};
   double roll_{};
   double pitch_{};
+  double slope_look_pitch_{};
   double fov_{};
 
   double smooth_longitudinal_acceleration_{};
