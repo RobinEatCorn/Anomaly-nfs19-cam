@@ -25,10 +25,13 @@
 
 namespace {
 
+using nfs2015_chase::CarBasis;
+using nfs2015_chase::CarLocalToWorld;
 using nfs2015_chase::CarState;
 using nfs2015_chase::ChaseCam;
 using nfs2015_chase::Config;
 using nfs2015_chase::ForwardFromYaw;
+using nfs2015_chase::MakeCarBasis;
 using nfs2015_chase::Vec3;
 
 constexpr double kToleranceDistance = 0.16;
@@ -82,6 +85,38 @@ struct Result final {
                                      nfs2015_chase::kDegreesPerRadian;
   result.roll_degrees = view.roll_degrees;
   result.fov_y_degrees = view.fov_y_degrees;
+  return result;
+}
+
+struct SlopeResult final {
+  double plane_distance{};
+  double view_pitch_degrees{};
+  double roll_degrees{};
+  double yaw{};
+  Vec3 camera_position{};
+};
+
+// Park the car at the origin with no speed, acceleration or drift. `Reset()`
+// settles the springs on that operating point. The plane distance is measured
+// along the car body's up axis, so a yaw-only rig on a slope reports a much
+// larger (uphill) or smaller (downhill) value than the body-frame rig.
+[[nodiscard]] SlopeResult RunSlopeScenario(const Config& config,
+                                           const double pitch_degrees,
+                                           const double yaw = 0.3) noexcept {
+  ChaseCam camera(config);
+  CarState car;
+  car.yaw = yaw;
+  car.pitch = pitch_degrees * nfs2015_chase::kRadiansPerDegree;
+  camera.Reset(car);
+  const auto view = camera.Update(0.0, car);
+  const CarBasis basis = MakeCarBasis(car.yaw, car.pitch);
+  const Vec3 offset = nfs2015_chase::Sub(view.position, car.position);
+  SlopeResult result;
+  result.plane_distance = nfs2015_chase::Dot(offset, basis.up);
+  result.view_pitch_degrees = view.pitch_degrees;
+  result.roll_degrees = view.roll_degrees;
+  result.yaw = car.yaw;
+  result.camera_position = view.position;
   return result;
 }
 
@@ -167,6 +202,110 @@ int main() {
   CheckDrift("cinematic heavy drift", CinematicPreset(), 3.0, 3.6, 1.2, 58.3,
              -12.0);
   CheckDrift("game heavy drift", GamePreset(), 4.7, 5.3, 2.0, 47.3, -3.0);
+
+  // --- Slope follow: body frame and GradientAdjustments -------------------
+  // The body-frame rig keeps a nearly constant height above the slope. The
+  // gradient trim is asymmetric: full 2.0 m/rad uphill, only 0.25 m/rad
+  // downhill, and both are clamped to 10 degrees while the base frame follows
+  // the complete car pitch.
+  {
+    const Config game = GamePreset();
+    const double base_height = game.rest.z;
+    const double slope_10 = 10.0 * nfs2015_chase::kRadiansPerDegree;
+
+    Config body_only = game;
+    body_only.slope_strength = 0.0;
+    const SlopeResult up_base = RunSlopeScenario(body_only, 10.0);
+    const SlopeResult down_base = RunSlopeScenario(body_only, -10.0);
+    ExpectNear("slope 10 up, body frame only", up_base.plane_distance,
+               base_height, kToleranceHeight);
+    ExpectNear("slope 10 down, body frame only", down_base.plane_distance,
+               base_height, kToleranceHeight);
+
+    const SlopeResult flat = RunSlopeScenario(game, 0.0);
+    const SlopeResult up = RunSlopeScenario(game, 10.0);
+    const SlopeResult down = RunSlopeScenario(game, -10.0);
+    ExpectNear("slope 10 up, default gradient", up.plane_distance,
+               base_height + slope_10 * 2.0, kToleranceHeight);
+    ExpectNear("slope 10 down, default gradient", down.plane_distance,
+               base_height - slope_10 * 0.25, kToleranceHeight);
+
+    std::printf("     slope view pitch: down %.3f, flat %.3f, up %.3f deg\n",
+                down.view_pitch_degrees, flat.view_pitch_degrees,
+                up.view_pitch_degrees);
+    Expect("uphill view pitch rises",
+           up.view_pitch_degrees > flat.view_pitch_degrees + 3.0);
+    Expect("downhill view pitch falls",
+           down.view_pitch_degrees < flat.view_pitch_degrees - 3.0);
+    ExpectNear("uphill slope adds no roll", up.roll_degrees, 0.0, 0.01);
+    ExpectNear("downhill slope adds no roll", down.roll_degrees, 0.0, 0.01);
+
+    Config yaw_only = game;
+    yaw_only.slope_follow = false;
+    const auto old_height = [&](const double pitch) {
+      return -game.rest.x * std::sin(pitch) +
+             game.rest.z * std::cos(pitch);
+    };
+    const SlopeResult up_off = RunSlopeScenario(yaw_only, 10.0);
+    const SlopeResult down_off = RunSlopeScenario(yaw_only, -10.0);
+    ExpectNear("slope off 10 up is yaw-only", up_off.plane_distance,
+               old_height(slope_10), kToleranceHeight);
+    ExpectNear("slope off 10 down is yaw-only", down_off.plane_distance,
+               old_height(-slope_10), kToleranceHeight);
+    ExpectNear("slope off keeps the flat view pitch",
+               up_off.view_pitch_degrees, flat.view_pitch_degrees, 0.01);
+
+    const double slope_20 = 20.0 * nfs2015_chase::kRadiansPerDegree;
+    const SlopeResult up_20 = RunSlopeScenario(game, 20.0);
+    const SlopeResult down_20 = RunSlopeScenario(game, -20.0);
+    ExpectNear("slope 20 up keeps the 10-degree trim",
+               up_20.plane_distance,
+               base_height + slope_10 * 2.0, kToleranceHeight);
+    ExpectNear("slope 20 down keeps the 10-degree trim",
+               down_20.plane_distance,
+               base_height - slope_10 * 0.25, kToleranceHeight);
+
+    const Vec3 rest_up_20{game.rest.x, 0.0,
+                          base_height + slope_10 * 2.0};
+    const Vec3 expected_up_20 =
+        CarLocalToWorld(rest_up_20, MakeCarBasis(up_20.yaw, slope_20));
+    const double up_20_error = nfs2015_chase::Length(
+        nfs2015_chase::Sub(up_20.camera_position, expected_up_20));
+    ExpectNear("slope 20 up uses the full body pitch", up_20_error, 0.0,
+               0.02);
+
+    const Vec3 rest_down_20{game.rest.x, 0.0,
+                            base_height - slope_10 * 0.25};
+    const Vec3 expected_down_20 =
+        CarLocalToWorld(rest_down_20, MakeCarBasis(down_20.yaw, -slope_20));
+    const double down_20_error = nfs2015_chase::Length(
+        nfs2015_chase::Sub(down_20.camera_position, expected_down_20));
+    ExpectNear("slope 20 down uses the full body pitch", down_20_error, 0.0,
+               0.02);
+  }
+
+  // The render-clock sample blend interpolates body pitch linearly. Unlike
+  // yaw it has no +-180 seam, so a plain Lerp is the correct curve.
+  {
+    nfs2015_chase::CarSample from;
+    from.car.pitch = -10.0 * nfs2015_chase::kRadiansPerDegree;
+    nfs2015_chase::CarSample to;
+    to.car.pitch = 30.0 * nfs2015_chase::kRadiansPerDegree;
+    const auto blended_pitch = [&](const double alpha) {
+      return nfs2015_chase::BlendCarSample(from, to, alpha).car.pitch;
+    };
+    ExpectNear("slope pitch blend at 25%", blended_pitch(0.25),
+               0.0, 1e-9);
+    ExpectNear("slope pitch blend at 50%", blended_pitch(0.5),
+               10.0 * nfs2015_chase::kRadiansPerDegree, 1e-9);
+    ExpectNear("slope pitch blend at 75%", blended_pitch(0.75),
+               20.0 * nfs2015_chase::kRadiansPerDegree, 1e-9);
+    Expect("slope pitch blend is monotonic",
+           blended_pitch(0.0) < blended_pitch(0.25) &&
+               blended_pitch(0.25) < blended_pitch(0.5) &&
+               blended_pitch(0.5) < blended_pitch(0.75) &&
+               blended_pitch(0.75) < blended_pitch(1.0));
+  }
 
   // The game POV stores horizontal FOV. The retail 70..95 horizontal range
   // corresponds to 43.0..63.1 vertical at 16:9.
