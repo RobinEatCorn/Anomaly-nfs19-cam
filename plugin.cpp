@@ -8383,7 +8383,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
       StringView(kPluginId),
       StringView("NFS 2015 Chase Cam"),
       StringView("RobinEatCorn"),
-      StringView("1.1.0"),
+      StringView("1.1.1"),
       Load,
       Start,
       Stop,

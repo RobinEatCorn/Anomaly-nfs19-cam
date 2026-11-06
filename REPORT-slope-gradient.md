@@ -2,7 +2,7 @@
 
 调查对象：`nfs2015-chase-cam` 当前移植版为什么在上下坡时“上坡偏高、下坡偏低”，以及 NFS 2015 原版用什么机制避免这个问题。
 
-> 实施状态（v1.1.0）：任务组 1–5 已完成并经过用户实机确认。§1–§8 保留实施前的调查和推断，
+> 实施状态（v1.1.1）：任务组 1–5 已完成并经过用户实机确认。§1–§8 保留实施前的调查和推断，
 > 其中“当前移植”指旧版；最终代码、符号、单位和实测值以 §9 为准。
 
 结论先行：
@@ -500,7 +500,7 @@ bool slope_gradient_trim{true};           // 次修复开关
 
 ---
 
-## 9. 实施与验收记录（v1.1.0）
+## 9. 实施与验收记录（v1.1.1）
 
 > §1–§8 保留实施前的调查与推断；其中“当前移植”指旧的 yaw-only 版本。最终实现以本节为准。
 
@@ -700,12 +700,12 @@ anomaly-test-host --plugin "$pkg" --reload 10 --ticks 60
   导出 `AnomalyPluginEntryV1`。
 - `ctest`：1/1 通过。
 - `anomaly-plugin validate`：
-  `valid id=io.github.robineatcorn.nfs2015-chase-cam version=1.1.0 entry=plugin.dll`
+  `valid id=io.github.robineatcorn.nfs2015-chase-cam version=1.1.1 entry=plugin.dll`
 - `anomaly-test-host`：
   `ok active=1 reloads=10 ticks=660 windows=11 text=132`，
   停止后 `resource_leases_after_stop=0`、`resource_staging_after_stop=0`、
-  `hotkeys_after_stop=0`；`private_growth_bytes=1,519,616`（不同运行略有浮动），
-  预算 10,485,760。
+  `hotkeys_after_stop=0`；`private_growth_bytes` 约 1.39 MB（1,388,544 bytes；不同运行
+  略有浮动），预算 10,485,760。
 
 包目录为 `build.mingw/package/Nfs2015ChaseCam`。构建产物只留在忽略的 `build.mingw/`
 下；没有写入游戏目录，也没有提交 DLL、截图或临时探针。
@@ -729,5 +729,5 @@ anomaly-test-host --plugin "$pkg" --reload 10 --ticks 60
 - 配置只公开总开关和构图强度；上下坡原始 scalar 需要编辑设置文件，符合 Q4 的最少界面控制。
 
 相关提交为 `5c957e6`、`30e9551`、`6bcf556`、`61e7167`、`97df83c`、`c310f97`、
-`dfd8d29`；文档收尾提交见 `git log` 最新记录。回滚时 revert 对应提交即可；坡度设置字段
-全部可选，旧配置不会因回滚或升级被清空。
+`dfd8d29`、`d2fec66`；本记录的版本号随 v1.1.1 发布同步更新。回滚时 revert 对应提交即可；
+坡度设置字段全部可选，旧配置不会因回滚或升级被清空。

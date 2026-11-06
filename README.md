@@ -328,7 +328,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先更新 profile h
 ## 发布
 
 `manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
-`io.github.robineatcorn.nfs2015-chase-cam`，当前版本 `1.1.0`。ID 一旦发布就不应再变。
+`io.github.robineatcorn.nfs2015-chase-cam`，当前版本 `1.1.1`。ID 一旦发布就不应再变。
 
 1. 同步升版本：`manifest.json` 的 `version`、`pluginmaster.json` 的 `Version` 和 ZIP 文件名。
 2. 构建 Release 包，跑 `ctest`、`anomaly-plugin validate` 和 `anomaly-test-host`（见上一节）。
@@ -336,16 +336,16 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先更新 profile h
 
    ```powershell
    Compress-Archive -Path .\build\package\Nfs2015ChaseCam\* `
-     -DestinationPath .\dist\Nfs2015ChaseCam-1.1.0.zip -Force
+     -DestinationPath .\dist\Nfs2015ChaseCam-1.1.1.zip -Force
    ```
 
    WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`。
 4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
 
    ```sh
-   gh release create v1.1.0 dist/Nfs2015ChaseCam-1.1.0.zip \
-     --title "NFS 2015 Chase Cam 1.1.0" \
-     --notes "route B 渲染线程机位、NFS FOV 与版本门禁安全加固"
+   gh release create v1.1.1 dist/Nfs2015ChaseCam-1.1.1.zip \
+     --title "NFS 2015 Chase Cam 1.1.1" \
+     --notes "坡度跟随、车身坐标架与 NFS GradientAdjustments"
    ```
 
 5. 最后更新 `pluginmaster.json` 的 `Version` 与 `DownloadLinkInstall` / `DownloadLinkUpdate`，
