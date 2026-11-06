@@ -280,6 +280,15 @@ constexpr std::uintptr_t kSceneRendererAllViewsOffset = 0x3C8;
 constexpr std::uintptr_t kSceneRendererAllViewCountOffset = 0x3D0;
 constexpr std::int32_t kRouteBMaxEarlyViews = 64;
 constexpr std::int64_t kVehicleRenderTransformMaxAgeNs = 50'000'000;
+// While the car is moving, the camera can bridge a missed render transform for
+// this long. Beyond it the proxy is treated as gone (pause, stream, on foot)
+// and the rig returns to the flat body frame instead of keeping a stale slope.
+constexpr std::int64_t kRenderPitchHoldNs = 250'000'000;
+// `OnTransformChanged` only fires when the proxy transform changes. A parked
+// car can sit on one slope indefinitely without a new publish, so below this
+// speed the last pitch stays valid; the hold expiry above only applies while
+// the car is moving, where an old snapshot really means a render hitch.
+constexpr double kRenderPitchStationarySpeedCmps = 200.0;
 // Route B's local mount. The car proxy translation is the chassis pivot at the
 // ground; the +0.70 m centre height matches the existing vehicle anchor. The
 // look point is deliberately in front of the nose so the chase framing does
@@ -427,6 +436,25 @@ AnomalyByteSpanV1 Bytes(const std::string_view value) noexcept {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+
+// Body pitch (nose up positive) from the vehicle proxy's forward/nose vector.
+// The vector may be fully normalised (z = sin pitch) or horizontally
+// normalised (z = tan pitch, the historical publish format), so atan2 is the
+// correct inverse for both; asin(z) would only work for the former.
+[[nodiscard]] bool BodyPitchFromForward(const double forward[3],
+                                        double &pitch) noexcept {
+  if (!std::isfinite(forward[0]) || !std::isfinite(forward[1]) ||
+      !std::isfinite(forward[2])) {
+    return false;
+  }
+  const double horizontal_squared =
+      forward[0] * forward[0] + forward[1] * forward[1];
+  if (!(horizontal_squared > 1e-8)) {
+    return false;
+  }
+  pitch = std::atan2(forward[2], std::sqrt(horizontal_squared));
+  return std::isfinite(pitch);
 }
 
 template <typename Service>
@@ -1495,6 +1523,15 @@ struct Context final {
   std::int64_t sample_last_ns{};
   // Bumped by the Game tick when the model must restart (world, preset, reset).
   std::uint64_t sample_epoch{};
+  // Latest body pitch published by the render-thread transform hook, radians
+  // (nose up positive). Game-tick only, so plain fields are enough.
+  // `render_pitch_floor_ns` rejects a snapshot from before the last reset or
+  // teleport; `render_pitch_ns` is the snapshot's own timestamp.
+  bool render_pitch_valid{};
+  double render_pitch_radians{};
+  std::int64_t render_pitch_ns{};
+  std::int64_t render_pitch_floor_ns{};
+  std::uintptr_t render_pitch_proxy{};
   std::atomic_bool reset_requested{};
   std::atomic<std::uint64_t> reset_feedback_until{};
   std::atomic_bool hook_retry_requested{};
@@ -2435,17 +2472,20 @@ void ANOMALY_CALL RenderTransformDetour(void *self,
       translation[axis] = value[axis];
     }
     // The proxy matrix is row-major; row 0 is the local +X (nose) basis.
-    // Normalise it because the proxy may carry a component scale.
+    // Normalise the full vector, not only its horizontal part: consumers use
+    // forward.z as sin(pitch) for the body frame. The proxy may carry a
+    // component scale.
     const auto *matrix = reinterpret_cast<const double *>(
         reinterpret_cast<std::uintptr_t>(self) + 0xE0);
     forward[0] = matrix[0];
     forward[1] = matrix[1];
     forward[2] = matrix[2];
-    const double horizontal_squared =
-        forward[0] * forward[0] + forward[1] * forward[1];
+    const double length_squared = forward[0] * forward[0] +
+                                  forward[1] * forward[1] +
+                                  forward[2] * forward[2];
     if (std::isfinite(forward[0]) && std::isfinite(forward[1]) &&
-        std::isfinite(forward[2]) && horizontal_squared > 1e-8) {
-      const double inverse_length = 1.0 / std::sqrt(horizontal_squared);
+        std::isfinite(forward[2]) && length_squared > 1e-8) {
+      const double inverse_length = 1.0 / std::sqrt(length_squared);
       forward[0] *= inverse_length;
       forward[1] *= inverse_length;
       forward[2] *= inverse_length;
@@ -2631,12 +2671,88 @@ bool ReadRouteBSnapshot(const RenderXProbe &probe, double car_cm[3],
   return false;
 }
 
+// The camera model's pitch source. Same seqlock and proxy checks as route B,
+// but only the body pitch is needed. `atan2` handles both the old horizontally
+// normalised vector and the new 3D one.
+bool ReadRenderPitch(const RenderXProbe &probe, double &pitch,
+                     std::uintptr_t &proxy,
+                     std::int64_t &timestamp_ns) noexcept {
+  double car_cm[3]{};
+  double forward[3]{};
+  std::uintptr_t snapshot_proxy{};
+  std::int64_t snapshot_ns{};
+  if (!ReadRouteBSnapshot(probe, car_cm, forward, snapshot_proxy,
+                          snapshot_ns)) {
+    return false;
+  }
+  if (!BodyPitchFromForward(forward, pitch)) {
+    return false;
+  }
+  proxy = snapshot_proxy;
+  timestamp_ns = snapshot_ns;
+  return true;
+}
+
+// Update the cached body pitch from the render-thread snapshot and return the
+// value for this Game tick. Fresh snapshots win; while moving, a short render
+// gap holds the last good value and then falls back to flat. A parked car keeps
+// the last orientation because the transform hook may not fire again until it
+// moves. The snapshot must also be newer than the last reset/teleport floor, so
+// an old slope cannot leak into the new frame.
+double UpdateRenderPitch(Context &context) noexcept {
+  double pitch = 0.0;
+  std::uintptr_t proxy = 0;
+  std::int64_t snapshot_ns = 0;
+  const bool read = ReadRenderPitch(context.render_x, pitch, proxy,
+                                    snapshot_ns);
+  const std::uintptr_t watched =
+      context.render_x.watched_proxy.load(std::memory_order_relaxed);
+  // A different watched proxy is a different car. Drop the cached attitude
+  // before trying the new one; otherwise a parked car switch could keep the
+  // old car's slope indefinitely.
+  if (context.render_pitch_valid && watched != 0 &&
+      watched != context.render_pitch_proxy) {
+    context.render_pitch_valid = false;
+    context.render_pitch_radians = 0.0;
+    context.render_pitch_ns = 0;
+    context.render_pitch_proxy = 0;
+  }
+  const std::int64_t now_ns = NowNanoseconds();
+  if (read && proxy == watched &&
+      snapshot_ns >= context.render_pitch_floor_ns) {
+    const std::int64_t age = now_ns - snapshot_ns;
+    if (age >= 0 && age <= kVehicleRenderTransformMaxAgeNs) {
+      context.render_pitch_valid = true;
+      context.render_pitch_radians = pitch;
+      context.render_pitch_ns = snapshot_ns;
+      context.render_pitch_proxy = proxy;
+    }
+  }
+  if (!context.render_pitch_valid) {
+    return 0.0;
+  }
+  const std::int64_t held = now_ns - context.render_pitch_ns;
+  const double speed_cmps =
+      std::hypot(context.velocity_cmps[0], context.velocity_cmps[1]);
+  const bool parked = !(speed_cmps >= kRenderPitchStationarySpeedCmps);
+  if (held < 0 || (!parked && held > kRenderPitchHoldNs)) {
+    context.render_pitch_valid = false;
+    context.render_pitch_radians = 0.0;
+    context.render_pitch_ns = 0;
+    context.render_pitch_proxy = 0;
+    return 0.0;
+  }
+  return context.render_pitch_radians;
+}
+
 bool BuildRouteBPoseFromCar(const double car_cm[3],
                             const double forward[3], double eye[3],
                             double rotation[3]) noexcept {
-  const double horizontal = std::sqrt(forward[0] * forward[0] +
-                                      forward[1] * forward[1]);
-  if (!(horizontal > 1e-4)) {
+  // The fallback uses the same body basis as the chase model's position frame.
+  // `forward` may be fully normalised or only horizontally normalised; the
+  // helper handles both.
+  double body_pitch = 0.0;
+  if (!BodyPitchFromForward(forward, body_pitch)) {
     return false;
   }
   const double car_yaw = std::atan2(forward[1], forward[0]);
@@ -2653,8 +2769,14 @@ bool BuildRouteBPoseFromCar(const double car_cm[3],
                                  kRouteBRestZM * 100.0};
   const nfs2015_chase::Vec3 look_offset{kRouteBLookAheadM * 100.0, 0.0,
                                         kRouteBLookHeightM * 100.0};
+  // `rest` is in centimetres, matching `car_cm`; the basis is unitless, so
+  // CarLocalToWorld keeps the centimetre scale.
+  const nfs2015_chase::CarBasis basis =
+      nfs2015_chase::MakeCarBasis(car_yaw, body_pitch);
   const nfs2015_chase::Vec3 eye_vec =
-      nfs2015_chase::Add(car, nfs2015_chase::RotateYaw(car_yaw, rest));
+      nfs2015_chase::Add(car, nfs2015_chase::CarLocalToWorld(rest, basis));
+  // The look target stays in the world-horizontal nose frame: the rig climbs
+  // with the body, but the horizon must not tilt with the slope.
   const nfs2015_chase::Vec3 look_vec =
       nfs2015_chase::Add(car, nfs2015_chase::RotateYaw(car_yaw, look_offset));
   const nfs2015_chase::Vec3 delta =
@@ -2747,6 +2869,9 @@ bool BuildRouteBPoseFromModel(const RenderXProbe &probe,
   if (age < 0 || age > 100'000'000) {
     return false;
   }
+  // `model_eye` already contains the body-frame slope from the chase model.
+  // Only its translation moves to this render frame; applying the pitch again
+  // here would double the slope.
   const double fresh_car[3] = {
       car_cm[0],
       car_cm[1],
@@ -2839,12 +2964,15 @@ bool BuildRouteBPoseDirect(const RenderXProbe &probe, double eye[3],
       !std::isfinite(forward[1]) || !std::isfinite(forward[2])) {
     return false;
   }
-  const double horizontal_squared =
-      forward[0] * forward[0] + forward[1] * forward[1];
-  if (!(horizontal_squared > 1e-8)) {
+  // Same full normalization as the detour: forward.z must be sin(pitch), not
+  // tan(pitch), for the fallback's body frame.
+  const double length_squared = forward[0] * forward[0] +
+                                forward[1] * forward[1] +
+                                forward[2] * forward[2];
+  if (!(length_squared > 1e-8)) {
     return false;
   }
-  const double inverse_length = 1.0 / std::sqrt(horizontal_squared);
+  const double inverse_length = 1.0 / std::sqrt(length_squared);
   forward[0] *= inverse_length;
   forward[1] *= inverse_length;
   forward[2] *= inverse_length;
@@ -4706,6 +4834,17 @@ double WrappedAngle(const double angle) noexcept {
   return nfs2015_chase::WrapPi(angle);
 }
 
+// A world change, teleport, or model reset must not carry the old slope's
+// pitch into the new frame. The floor also rejects a still-fresh snapshot that
+// was published before the reset.
+void ResetRenderPitch(Context &context) noexcept {
+  context.render_pitch_valid = false;
+  context.render_pitch_radians = 0.0;
+  context.render_pitch_ns = 0;
+  context.render_pitch_floor_ns = NowNanoseconds();
+  context.render_pitch_proxy = 0;
+}
+
 bool WorldChanged(Context &context) noexcept {
   if (context.session == nullptr || context.session->snapshot == nullptr) {
     return false;
@@ -4852,6 +4991,7 @@ void UpdateMotion(Context &context, const double origin_cm[3],
           }
         } else {
           NoteViewSnap(context, kSnapReasonTeleport);
+          ResetRenderPitch(context);
           for (std::size_t axis = 0; axis < 3; ++axis) {
             context.velocity_cmps[axis] = 0.0;
             context.acceleration_cmps2[axis] = 0.0;
@@ -5044,6 +5184,7 @@ void LockPresenter(Context &context) noexcept {
 // Ask the render side to restart the model. The epoch travels with the samples,
 // so the renderer notices even if it was not running at the time.
 void RequestPresenterReset(Context &context) noexcept {
+  ResetRenderPitch(context);
   context.chase_initialized = false;
   ++context.sample_epoch;
 }
@@ -5691,6 +5832,10 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   car.position = {origin_cm[0] / 100.0, origin_cm[1] / 100.0,
                   origin_cm[2] / 100.0};
   car.yaw = car_yaw;
+  // The Game-tick snapshot has no body attitude; the rendered vehicle proxy is
+  // the only source for the slope frame. A fresh pitch is held briefly across
+  // a missed render frame and zeroed after a reset or teleport.
+  car.pitch = UpdateRenderPitch(context);
   car.velocity = world_velocity;
   car.yaw_rate = context.yaw_rate;
   nfs2015_chase::Vec3 acceleration{
