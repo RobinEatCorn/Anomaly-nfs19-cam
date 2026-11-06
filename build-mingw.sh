@@ -51,7 +51,7 @@ usage() {
       --clean             先 clean 再全量重编（保留构建树与缓存）
       --configure-only    只 configure，不编译
       --no-tests          不构建相机模型验收夹具（nfs2015_chase_cam_test.exe）
-      --run-tests         用 wine 跑验收夹具；没有 wine 时报错
+      --run-tests         跑验收夹具；WSL2 直接运行 PE，纯 Linux 用 wine
       --no-verify         跳过 plugin.dll 的导入/导出校验
       --install DIR       构建后安装到游戏根目录（<DIR>/Anomaly/plugins/Nfs2015ChaseCam）
                           WSL 里可以直接写 Windows 路径，如 D:/Games/NTE
@@ -130,12 +130,16 @@ if ! grep -q 'Thread model: posix' <<<"$toolchain_info"; then
 fi
 objdump="$(command -v x86_64-w64-mingw32-objdump || true)"
 
-# wine 只在 --run-tests 时才需要，提前检查，避免编译完才发现跑不了
+# wine 只在纯 Linux 的 --run-tests 时需要。WSL2 的 binfmt_misc 可以直接
+# 执行 PE，不必为了一个测试夹具装 wine。
 runner=""
 if [[ $RUN_TESTS -eq 1 ]]; then
-    runner="$(command -v wine64 || command -v wine || true)"
-    [[ -n "$runner" ]] ||
-        die "--run-tests 需要 wine；也可以在 Windows 上直接跑 ctest --test-dir $BUILD_DIR"
+    if [[ -z "${WSL_DISTRO_NAME:-}" ]] &&
+       ! grep -qi microsoft /proc/version 2>/dev/null; then
+        runner="$(command -v wine64 || command -v wine || true)"
+        [[ -n "$runner" ]] ||
+            die "--run-tests 需要 wine 或 WSL2 互操作；也可以直接跑 ctest --test-dir $BUILD_DIR"
+    fi
 fi
 
 # ---------------------------------------------------------------- AnomalySDK
@@ -260,7 +264,11 @@ fi
 
 if [[ $RUN_TESTS -eq 1 ]]; then
     info "验收夹具"
-    "$runner" "$BUILD_DIR/nfs2015_chase_cam_test.exe"
+    if [[ -n "$runner" ]]; then
+        "$runner" "$BUILD_DIR/nfs2015_chase_cam_test.exe"
+    else
+        "$BUILD_DIR/nfs2015_chase_cam_test.exe"
+    fi
 fi
 
 # ---------------------------------------------------------------- 结果
