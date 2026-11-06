@@ -564,6 +564,22 @@ class ChaseCam final {
     config_.slope_strength = Clamp(value, 0.0, 2.0);
   }
 
+  void SetSlopeMaxGradientDegrees(const double value) noexcept {
+    config_.slope_max_gradient_degrees = Clamp(value, 0.0, 89.0);
+  }
+
+  void SetSlopeGradientParams(const Config::GradientParams& up,
+                              const Config::GradientParams& down) noexcept {
+    config_.slope_up.look_at_angle_scalar =
+        Clamp(up.look_at_angle_scalar, 0.0, 2.0);
+    config_.slope_up.rest_position_scalar =
+        Clamp(up.rest_position_scalar, 0.0, 4.0);
+    config_.slope_down.look_at_angle_scalar =
+        Clamp(down.look_at_angle_scalar, 0.0, 2.0);
+    config_.slope_down.rest_position_scalar =
+        Clamp(down.rest_position_scalar, 0.0, 4.0);
+  }
+
   void SetShakeScale(const double value) noexcept {
     config_.shake_scale = Clamp(value, 0.0, 2.0);
   }

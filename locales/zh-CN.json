@@ -11,6 +11,8 @@
     "preset.cinematic": "电影化重建",
     "setting.fov": "应用 NFS 镜头（FOV）",
     "setting.camera_scale": "机位距离 / 高度缩放",
+    "setting.slope_follow": "坡度跟随（车身俯仰）",
+    "setting.slope_strength": "坡度构图强度",
     "setting.speed_distance": "速度 / 加速距离倍率",
     "setting.origin_offset": "车身原点偏移（厘米）",
     "setting.aspect_ratio": "视口宽高比",

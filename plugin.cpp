@@ -103,6 +103,22 @@ constexpr double kMaximumPitchScale = 2.0;
 constexpr double kDefaultShakeScale = 1.0;
 constexpr double kMinimumShakeScale = 0.0;
 constexpr double kMaximumShakeScale = 2.0;
+// Slope following. The UI exposes only the master switch and the composition
+// strength; the gradient scalars stay in the settings file.
+constexpr double kDefaultSlopeStrength = 1.0;
+constexpr double kMinimumSlopeStrength = 0.0;
+constexpr double kMaximumSlopeStrength = 2.0;
+constexpr double kDefaultSlopeMaxGradientDegrees = 10.0;
+constexpr double kMinimumSlopeMaxGradientDegrees = 0.0;
+constexpr double kMaximumSlopeMaxGradientDegrees = 30.0;
+constexpr double kDefaultSlopeUpLookAt = 0.5;
+constexpr double kDefaultSlopeUpRest = 2.0;
+constexpr double kDefaultSlopeDownLookAt = 0.3;
+constexpr double kDefaultSlopeDownRest = 0.25;
+constexpr double kMinimumSlopeLookAt = 0.0;
+constexpr double kMaximumSlopeLookAt = 2.0;
+constexpr double kMinimumSlopeRest = 0.0;
+constexpr double kMaximumSlopeRest = 4.0;
 // Braking pitch needs a speed-based signal, not the position-derived
 // acceleration: coasting drag, curbs, and sample noise all look like braking
 // in the latter. A dead zone plus a short hold rejects those single-tick dips.
@@ -388,7 +404,14 @@ constexpr std::string_view kSettingsSchema = R"json(
     "diagnosticFlatPose":{"type":"boolean"},
     "diagnosticZeroLag":{"type":"boolean"},
     "diagnosticSkipPosition":{"type":"boolean"},
-    "diagnosticSkipRotation":{"type":"boolean"}
+    "diagnosticSkipRotation":{"type":"boolean"},
+    "slopeFollow":{"type":"boolean"},
+    "slopeStrength":{"type":"number","minimum":0.0,"maximum":2.0},
+    "slopeMaxGradientDegrees":{"type":"number","minimum":0.0,"maximum":30.0},
+    "slopeUpLookAt":{"type":"number","minimum":0.0,"maximum":2.0},
+    "slopeUpRest":{"type":"number","minimum":0.0,"maximum":4.0},
+    "slopeDownLookAt":{"type":"number","minimum":0.0,"maximum":2.0},
+    "slopeDownRest":{"type":"number","minimum":0.0,"maximum":4.0}
   }
 }
 )json";
@@ -1175,6 +1198,8 @@ struct DisplayState final {
   double roll_scale{kDefaultRollScale};
   double pitch_scale{kDefaultPitchScale};
   double shake_scale{kDefaultShakeScale};
+  bool slope_follow{true};
+  double slope_strength{kDefaultSlopeStrength};
   bool roll_only_in_drift{};
   bool diagnostic_flat_pose{};
   bool diagnostic_zero_lag{};
@@ -1384,6 +1409,14 @@ struct Context final {
   std::atomic<double> roll_scale{kDefaultRollScale};
   std::atomic<double> pitch_scale{kDefaultPitchScale};
   std::atomic<double> shake_scale{kDefaultShakeScale};
+  std::atomic_bool slope_follow{true};
+  std::atomic<double> slope_strength{kDefaultSlopeStrength};
+  std::atomic<double> slope_max_gradient_degrees{
+      kDefaultSlopeMaxGradientDegrees};
+  std::atomic<double> slope_up_look_at{kDefaultSlopeUpLookAt};
+  std::atomic<double> slope_up_rest{kDefaultSlopeUpRest};
+  std::atomic<double> slope_down_look_at{kDefaultSlopeDownLookAt};
+  std::atomic<double> slope_down_rest{kDefaultSlopeDownRest};
   std::atomic_bool roll_only_in_drift{};
   // Bisect switch: hold every attitude term at zero and stop writing the lens,
   // so only position and yaw survive. One click decides whether the twitch is
@@ -2745,15 +2778,28 @@ double UpdateRenderPitch(Context &context) noexcept {
   return context.render_pitch_radians;
 }
 
+// The route B fallback is the only path that applies body pitch outside the
+// chase model. It must obey the same master switch and flat-pose diagnostic so
+// disabling slope follow also disables the fallback tilt.
+[[nodiscard]] bool RouteBFollowPitch(const Context &context) noexcept {
+  return context.slope_follow.load(std::memory_order_acquire) &&
+         !context.diagnostic_flat_pose.load(std::memory_order_acquire);
+}
+
 bool BuildRouteBPoseFromCar(const double car_cm[3],
-                            const double forward[3], double eye[3],
+                            const double forward[3],
+                            const bool follow_pitch, double eye[3],
                             double rotation[3]) noexcept {
   // The fallback uses the same body basis as the chase model's position frame.
   // `forward` may be fully normalised or only horizontally normalised; the
-  // helper handles both.
+  // helper handles both. The master switch and the flat-pose diagnostic keep
+  // the fallback yaw-only too.
   double body_pitch = 0.0;
   if (!BodyPitchFromForward(forward, body_pitch)) {
     return false;
+  }
+  if (!follow_pitch) {
+    body_pitch = 0.0;
   }
   const double car_yaw = std::atan2(forward[1], forward[0]);
   // FViewMatrices and FViewInfo store world positions in Unreal units
@@ -2908,8 +2954,9 @@ bool BuildRouteBPoseFromModel(const RenderXProbe &probe,
          std::isfinite(forward[2]);
 }
 
-bool BuildRouteBPose(const RenderXProbe &probe, double eye[3],
-                     double rotation[3], std::int64_t &age_ns) noexcept {
+bool BuildRouteBPose(const RenderXProbe &probe, const bool follow_pitch,
+                     double eye[3], double rotation[3],
+                     std::int64_t &age_ns) noexcept {
   double car_cm[3]{};
   double forward[3]{};
   std::uintptr_t proxy{};
@@ -2923,7 +2970,7 @@ bool BuildRouteBPose(const RenderXProbe &probe, double eye[3],
     return false;
   }
   return BuildRouteBPoseFromModel(probe, car_cm, forward, eye, rotation) ||
-         BuildRouteBPoseFromCar(car_cm, forward, eye, rotation);
+         BuildRouteBPoseFromCar(car_cm, forward, follow_pitch, eye, rotation);
 }
 
 // The pre-visibility pass can run before the render transform notification
@@ -2932,7 +2979,8 @@ bool BuildRouteBPose(const RenderXProbe &probe, double eye[3],
 // directly (not as a prediction): if the matrix has already advanced, this
 // keeps route B on the exact same car frame as the draw; if it has not, the
 // snapshot fallback is used.
-bool BuildRouteBPoseDirect(const RenderXProbe &probe, double eye[3],
+bool BuildRouteBPoseDirect(const RenderXProbe &probe, const bool follow_pitch,
+                           double eye[3],
                            double rotation[3]) noexcept {
   double snapshot_car[3]{};
   double snapshot_forward[3]{};
@@ -2990,7 +3038,7 @@ bool BuildRouteBPoseDirect(const RenderXProbe &probe, double eye[3],
     return false;
   }
   return BuildRouteBPoseFromModel(probe, car_cm, forward, eye, rotation) ||
-         BuildRouteBPoseFromCar(car_cm, forward, eye, rotation);
+         BuildRouteBPoseFromCar(car_cm, forward, follow_pitch, eye, rotation);
 }
 
 bool IsRouteBFullScreenView(void *view) noexcept {
@@ -3130,8 +3178,9 @@ void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
   }
   double eye[3]{};
   double rotation[3]{};
+  const bool follow_pitch = RouteBFollowPitch(context);
   if (!BuildRouteBPoseFromModel(probe, car_cm, forward, eye, rotation) &&
-      !BuildRouteBPoseFromCar(car_cm, forward, eye, rotation)) {
+      !BuildRouteBPoseFromCar(car_cm, forward, follow_pitch, eye, rotation)) {
     return;
   }
   SceneViewSetupFrustumFn setup_frustum =
@@ -3234,9 +3283,10 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
   double eye[3]{};
   double rotation[3]{};
   std::int64_t age_ns = 0;
-  if (BuildRouteBPoseDirect(probe, eye, rotation)) {
+  const bool follow_pitch = RouteBFollowPitch(context);
+  if (BuildRouteBPoseDirect(probe, follow_pitch, eye, rotation)) {
     probe.route_b_early_direct.fetch_add(1, std::memory_order_relaxed);
-  } else if (!BuildRouteBPose(probe, eye, rotation, age_ns)) {
+  } else if (!BuildRouteBPose(probe, follow_pitch, eye, rotation, age_ns)) {
     probe.prepare_pose_fail.fetch_add(1, std::memory_order_relaxed);
     probe.route_b_early_fallbacks.fetch_add(1, std::memory_order_relaxed);
     return false;
@@ -3332,7 +3382,8 @@ bool ApplyRouteBView(Context &context, void *self,
   double eye[3]{};
   double rotation[3]{};
   std::int64_t age_ns = 0;
-  if (!BuildRouteBPose(context.render_x, eye, rotation, age_ns)) {
+  if (!BuildRouteBPose(context.render_x, RouteBFollowPitch(context), eye,
+                       rotation, age_ns)) {
     return false;
   }
 
@@ -3961,7 +4012,13 @@ bool SettingsValid(const std::uint32_t preset, const double camera_scale,
                    const double speed_distance_scale,
                    const double roll_scale,
                    const double pitch_scale,
-                   const double shake_scale) noexcept {
+                   const double shake_scale,
+                   const double slope_strength,
+                   const double slope_max_gradient_degrees,
+                   const double slope_up_look_at,
+                   const double slope_up_rest,
+                   const double slope_down_look_at,
+                   const double slope_down_rest) noexcept {
   return std::isfinite(camera_scale) &&
          camera_scale >= kMinimumCameraScale &&
          camera_scale <= kMaximumCameraScale &&
@@ -3978,7 +4035,25 @@ bool SettingsValid(const std::uint32_t preset, const double camera_scale,
          std::isfinite(pitch_scale) && pitch_scale >= kMinimumPitchScale &&
          pitch_scale <= kMaximumPitchScale &&
          std::isfinite(shake_scale) && shake_scale >= kMinimumShakeScale &&
-         shake_scale <= kMaximumShakeScale && preset <= 1U;
+         shake_scale <= kMaximumShakeScale &&
+         std::isfinite(slope_strength) &&
+         slope_strength >= kMinimumSlopeStrength &&
+         slope_strength <= kMaximumSlopeStrength &&
+         std::isfinite(slope_max_gradient_degrees) &&
+         slope_max_gradient_degrees >= kMinimumSlopeMaxGradientDegrees &&
+         slope_max_gradient_degrees <= kMaximumSlopeMaxGradientDegrees &&
+         std::isfinite(slope_up_look_at) &&
+         slope_up_look_at >= kMinimumSlopeLookAt &&
+         slope_up_look_at <= kMaximumSlopeLookAt &&
+         std::isfinite(slope_up_rest) &&
+         slope_up_rest >= kMinimumSlopeRest &&
+         slope_up_rest <= kMaximumSlopeRest &&
+         std::isfinite(slope_down_look_at) &&
+         slope_down_look_at >= kMinimumSlopeLookAt &&
+         slope_down_look_at <= kMaximumSlopeLookAt &&
+         std::isfinite(slope_down_rest) &&
+         slope_down_rest >= kMinimumSlopeRest &&
+         slope_down_rest <= kMaximumSlopeRest && preset <= 1U;
 }
 
 bool AppendText(char *&cursor, char *const end,
@@ -4035,6 +4110,20 @@ bool PersistSettings(Context &context) noexcept {
       context.pitch_scale.load(std::memory_order_acquire);
   const double shake_scale =
       context.shake_scale.load(std::memory_order_acquire);
+  const bool slope_follow =
+      context.slope_follow.load(std::memory_order_acquire);
+  const double slope_strength =
+      context.slope_strength.load(std::memory_order_acquire);
+  const double slope_max_gradient_degrees =
+      context.slope_max_gradient_degrees.load(std::memory_order_acquire);
+  const double slope_up_look_at =
+      context.slope_up_look_at.load(std::memory_order_acquire);
+  const double slope_up_rest =
+      context.slope_up_rest.load(std::memory_order_acquire);
+  const double slope_down_look_at =
+      context.slope_down_look_at.load(std::memory_order_acquire);
+  const double slope_down_rest =
+      context.slope_down_rest.load(std::memory_order_acquire);
   const bool roll_only_in_drift =
       context.roll_only_in_drift.load(std::memory_order_acquire);
   const bool fov_enabled =
@@ -4054,7 +4143,10 @@ bool PersistSettings(Context &context) noexcept {
   if (!ConfigReady(context.config) ||
       !SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
                      speed_distance_scale, roll_scale, pitch_scale,
-                     shake_scale) ||
+                     shake_scale, slope_strength,
+                     slope_max_gradient_degrees, slope_up_look_at,
+                     slope_up_rest, slope_down_look_at,
+                     slope_down_rest) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
     // A UI write landed while the fields were being read; keep the revision
     // unpersisted so the next tick writes a coherent document.
@@ -4079,6 +4171,20 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, aspect_ratio) &&
       AppendText(cursor, end, ",\"fovEnabled\":") &&
       AppendText(cursor, end, fov_enabled ? "true" : "false") &&
+      AppendText(cursor, end, ",\"slopeFollow\":") &&
+      AppendText(cursor, end, slope_follow ? "true" : "false") &&
+      AppendText(cursor, end, ",\"slopeStrength\":") &&
+      AppendNumber(cursor, end, slope_strength) &&
+      AppendText(cursor, end, ",\"slopeMaxGradientDegrees\":") &&
+      AppendNumber(cursor, end, slope_max_gradient_degrees) &&
+      AppendText(cursor, end, ",\"slopeUpLookAt\":") &&
+      AppendNumber(cursor, end, slope_up_look_at) &&
+      AppendText(cursor, end, ",\"slopeUpRest\":") &&
+      AppendNumber(cursor, end, slope_up_rest) &&
+      AppendText(cursor, end, ",\"slopeDownLookAt\":") &&
+      AppendNumber(cursor, end, slope_down_look_at) &&
+      AppendText(cursor, end, ",\"slopeDownRest\":") &&
+      AppendNumber(cursor, end, slope_down_rest) &&
       AppendText(cursor, end, ",\"speedDistanceScale\":") &&
       AppendNumber(cursor, end, speed_distance_scale) &&
       AppendText(cursor, end, ",\"rollScale\":") &&
@@ -4130,6 +4236,19 @@ void SetDefaults(Context &context) noexcept {
   context.roll_scale.store(kDefaultRollScale, std::memory_order_release);
   context.pitch_scale.store(kDefaultPitchScale, std::memory_order_release);
   context.shake_scale.store(kDefaultShakeScale, std::memory_order_release);
+  context.slope_follow.store(true, std::memory_order_release);
+  context.slope_strength.store(kDefaultSlopeStrength,
+                               std::memory_order_release);
+  context.slope_max_gradient_degrees.store(
+      kDefaultSlopeMaxGradientDegrees, std::memory_order_release);
+  context.slope_up_look_at.store(kDefaultSlopeUpLookAt,
+                                 std::memory_order_release);
+  context.slope_up_rest.store(kDefaultSlopeUpRest,
+                              std::memory_order_release);
+  context.slope_down_look_at.store(kDefaultSlopeDownLookAt,
+                                   std::memory_order_release);
+  context.slope_down_rest.store(kDefaultSlopeDownRest,
+                                std::memory_order_release);
   context.roll_only_in_drift.store(false, std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.diagnostic_zero_lag.store(false, std::memory_order_release);
@@ -4242,11 +4361,13 @@ bool LoadSettings(Context &context) noexcept {
   const AnomalyJsonServiceV1 &json = *context.json;
   std::uint32_t kind{};
   std::size_t field_count{};
+  // The schema has 24 properties today. Keep headroom so a future optional
+  // field does not make existing documents unreadable.
   if (json.kind(json.user, root, &kind).code != ANOMALY_STATUS_V1_OK ||
       kind != ANOMALY_JSON_V1_OBJECT ||
       json.object_size(json.user, root, &field_count).code !=
           ANOMALY_STATUS_V1_OK ||
-      field_count < 6 || field_count > 24) {
+      field_count < 6 || field_count > 32) {
     return false;
   }
   bool enabled{};
@@ -4279,6 +4400,13 @@ bool LoadSettings(Context &context) noexcept {
   double anchor_source_number = static_cast<double>(kAnchorSourceDefault);
   bool diagnostic_skip_position = false;
   bool diagnostic_skip_rotation = false;
+  bool slope_follow = true;
+  double slope_strength = kDefaultSlopeStrength;
+  double slope_max_gradient_degrees = kDefaultSlopeMaxGradientDegrees;
+  double slope_up_look_at = kDefaultSlopeUpLookAt;
+  double slope_up_rest = kDefaultSlopeUpRest;
+  double slope_down_look_at = kDefaultSlopeDownLookAt;
+  double slope_down_rest = kDefaultSlopeDownRest;
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
                                      speed_distance_scale));
   static_cast<void>(JsonObjectNumber(json, root, "rollScale", roll_scale));
@@ -4300,9 +4428,26 @@ bool LoadSettings(Context &context) noexcept {
                                       diagnostic_skip_position));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticSkipRotation",
                                       diagnostic_skip_rotation));
+  static_cast<void>(JsonObjectBoolean(json, root, "slopeFollow",
+                                      slope_follow));
+  static_cast<void>(JsonObjectNumber(json, root, "slopeStrength",
+                                     slope_strength));
+  static_cast<void>(JsonObjectNumber(json, root, "slopeMaxGradientDegrees",
+                                     slope_max_gradient_degrees));
+  static_cast<void>(JsonObjectNumber(json, root, "slopeUpLookAt",
+                                     slope_up_look_at));
+  static_cast<void>(JsonObjectNumber(json, root, "slopeUpRest",
+                                     slope_up_rest));
+  static_cast<void>(JsonObjectNumber(json, root, "slopeDownLookAt",
+                                     slope_down_look_at));
+  static_cast<void>(JsonObjectNumber(json, root, "slopeDownRest",
+                                     slope_down_rest));
   if (!SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
                      speed_distance_scale, roll_scale, pitch_scale,
-                     shake_scale)) {
+                     shake_scale, slope_strength,
+                     slope_max_gradient_degrees, slope_up_look_at,
+                     slope_up_rest, slope_down_look_at,
+                     slope_down_rest)) {
     return false;
   }
   context.enabled.store(enabled, std::memory_order_release);
@@ -4316,6 +4461,16 @@ bool LoadSettings(Context &context) noexcept {
   context.roll_scale.store(roll_scale, std::memory_order_release);
   context.pitch_scale.store(pitch_scale, std::memory_order_release);
   context.shake_scale.store(shake_scale, std::memory_order_release);
+  context.slope_follow.store(slope_follow, std::memory_order_release);
+  context.slope_strength.store(slope_strength, std::memory_order_release);
+  context.slope_max_gradient_degrees.store(
+      slope_max_gradient_degrees, std::memory_order_release);
+  context.slope_up_look_at.store(slope_up_look_at,
+                                 std::memory_order_release);
+  context.slope_up_rest.store(slope_up_rest, std::memory_order_release);
+  context.slope_down_look_at.store(slope_down_look_at,
+                                   std::memory_order_release);
+  context.slope_down_rest.store(slope_down_rest, std::memory_order_release);
   context.roll_only_in_drift.store(roll_only_in_drift,
                                    std::memory_order_release);
   context.diagnostic_flat_pose.store(diagnostic_flat_pose,
@@ -5584,6 +5739,20 @@ void UpdateCamera(Context &context, const double dt) noexcept {
       context.pitch_scale.load(std::memory_order_acquire);
   const double shake_scale =
       context.shake_scale.load(std::memory_order_acquire);
+  const bool slope_follow =
+      context.slope_follow.load(std::memory_order_acquire);
+  const double slope_strength =
+      context.slope_strength.load(std::memory_order_acquire);
+  const double slope_max_gradient_degrees =
+      context.slope_max_gradient_degrees.load(std::memory_order_acquire);
+  const double slope_up_look_at =
+      context.slope_up_look_at.load(std::memory_order_acquire);
+  const double slope_up_rest =
+      context.slope_up_rest.load(std::memory_order_acquire);
+  const double slope_down_look_at =
+      context.slope_down_look_at.load(std::memory_order_acquire);
+  const double slope_down_rest =
+      context.slope_down_rest.load(std::memory_order_acquire);
   bool roll_only_in_drift =
       context.roll_only_in_drift.load(std::memory_order_acquire);
   // The bisect switch: no attitude, no lens. Position and yaw only.
@@ -5592,6 +5761,7 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   const double effective_roll_scale = diagnostic_flat_pose ? 0.0 : roll_scale;
   const double effective_pitch_scale = diagnostic_flat_pose ? 0.0 : pitch_scale;
   const double effective_shake_scale = diagnostic_flat_pose ? 0.0 : shake_scale;
+  const bool effective_slope_follow = !diagnostic_flat_pose && slope_follow;
   if (diagnostic_flat_pose) {
     fov_enabled = false;
     roll_only_in_drift = true;
@@ -5611,6 +5781,12 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   context.chase.SetRollScale(effective_roll_scale);
   context.chase.SetPitchScale(effective_pitch_scale);
   context.chase.SetShakeScale(effective_shake_scale);
+  context.chase.SetSlopeFollow(effective_slope_follow);
+  context.chase.SetSlopeStrength(slope_strength);
+  context.chase.SetSlopeMaxGradientDegrees(slope_max_gradient_degrees);
+  context.chase.SetSlopeGradientParams(
+      {slope_up_look_at, slope_up_rest},
+      {slope_down_look_at, slope_down_rest});
   context.chase.SetRollOnlyInDrift(roll_only_in_drift);
   UnlockPresenter(context);
   if (context.reset_requested.exchange(false, std::memory_order_acq_rel)) {
@@ -6768,6 +6944,10 @@ void UpdateDisplay(Context &context) noexcept {
       context.pitch_scale.load(std::memory_order_acquire);
   context.display.shake_scale =
       context.shake_scale.load(std::memory_order_acquire);
+  context.display.slope_follow =
+      context.slope_follow.load(std::memory_order_acquire);
+  context.display.slope_strength =
+      context.slope_strength.load(std::memory_order_acquire);
   context.display.roll_only_in_drift =
       context.roll_only_in_drift.load(std::memory_order_acquire);
   context.display.diagnostic_flat_pose =
@@ -7835,6 +8015,33 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
         context->camera_scale.store(
             nfs2015_chase::Clamp(static_cast<double>(scale),
                                  kMinimumCameraScale, kMaximumCameraScale),
+            std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+
+      const std::string slope_follow_label = context->localizer.Label(
+          "setting.slope_follow", "Follow slope (body pitch)",
+          "chase-slope-follow");
+      int slope_follow = display.slope_follow ? 1 : 0;
+      if (ui->checkbox(ui->user, StringView(slope_follow_label),
+                       &slope_follow) != 0) {
+        context->slope_follow.store(slope_follow != 0,
+                                    std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+
+      const std::string slope_strength_label = context->localizer.Label(
+          "setting.slope_strength", "Slope composition strength",
+          "chase-slope-strength");
+      float slope_strength = static_cast<float>(display.slope_strength);
+      if (ui->slider_float(ui->user, StringView(slope_strength_label),
+                           &slope_strength,
+                           static_cast<float>(kMinimumSlopeStrength),
+                           static_cast<float>(kMaximumSlopeStrength)) != 0) {
+        context->slope_strength.store(
+            nfs2015_chase::Clamp(static_cast<double>(slope_strength),
+                                 kMinimumSlopeStrength,
+                                 kMaximumSlopeStrength),
             std::memory_order_release);
         MarkSettingsDirty(*context);
       }
