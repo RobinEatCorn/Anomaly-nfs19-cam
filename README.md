@@ -183,11 +183,12 @@ cmake --build build.mingw
 ./build-mingw.sh --zip                  # 另出 dist/Nfs2015ChaseCam-<version>.zip
 ./build-mingw.sh --install D:/Games/NTE # 装到 <game>/Anomaly/plugins/robineatcorn.nfs2015-chase-cam
 ./build-mingw.sh --run-tests            # 跑验收夹具；WSL2 直接运行，纯 Linux 用 wine
+./verify-release.sh --allow-missing-host-tools  # 发布前检查包/ZIP/清单
 ./build-mingw.sh --help                 # 全部选项
 ```
 
-需要 `x86_64-w64-mingw32-g++-posix`：GCC 的 win32 线程模型里 libstdc++ 没有
-`std::mutex`。SDK 默认取 `../Anomaly/.build/windows-vs2022/package/sdk`，可以用 `--sdk`
+需要 `x86_64-w64-mingw32-g++-posix` 和 Python 3（发布检查及无 `zip` 命令时的
+ZIP 打包）：GCC 的 win32 线程模型里 libstdc++ 没有 `std::mutex`。SDK 默认取 `../Anomaly/.build/windows-vs2022/package/sdk`，可以用 `--sdk`
 或 `ANOMALY_SDK_DIR` 覆盖。等价的手工步骤：
 
 ```sh
@@ -235,7 +236,9 @@ cmake --install build --config RelWithDebInfo --prefix C:\path\to\game --compone
 两种方式都会得到 `<game>\Anomaly\plugins\robineatcorn.nfs2015-chase-cam`，然后在游戏内
 **Plugins > 已安装** 里启用。
 WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目录。发布 ZIP 的流程见
-下面的[发布](#发布)一节：ZIP 根目录必须直接包含 `manifest.json`。
+下面的[发布](#发布)一节：ZIP 根目录必须直接包含 `manifest.json`。发布前可以运行
+`./verify-release.sh --allow-missing-host-tools` 检查 manifest、包内容、ZIP 根目录和 DLL
+导入/导出；完整宿主工具与实机矩阵见 [RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。
 
 ## 使用
 
@@ -396,6 +399,10 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 `manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
 `robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.0`。ID 一旦发布就不应再变。
 
+发布门禁、离线/实机测试矩阵、产物哈希和回滚步骤记录在
+[RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。完整发布前至少完成两个不同地图、
+两次完整重启的实机验收；当前代码和离线包已准备好，Windows 宿主工具与剩余实机项仍需补跑。
+
 1. 同步升版本：`manifest.json` 的 `version`、`pluginmaster.json` 的 `Version` 和 ZIP 文件名。
 2. 构建 Release 包，跑 `ctest`、`anomaly-plugin validate` 和 `anomaly-test-host`（见上一节）。
 3. 生成 ZIP。压缩的是包目录**里面的内容**，ZIP 根部必须直接有 `manifest.json` 和 `plugin.dll`：
@@ -405,7 +412,9 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
      -DestinationPath .\dist\Nfs2015ChaseCam-2.0.0.zip -Force
    ```
 
-   WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`。
+   WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`；
+没有 `zip` 命令时脚本会自动使用 Python `zipfile`。发布前运行
+`./verify-release.sh --allow-missing-host-tools` 检查 ZIP 根目录和包内容。
 4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
 
    ```sh

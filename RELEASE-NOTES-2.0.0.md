@@ -1,6 +1,6 @@
 # NFS 2015 Chase Cam 2.0.0
 
-Anomaly 2.7.0 适配版本，完成任务组 1（加载/编译）、任务组 2（无载具服务时的相机恢复）和任务组 3（精确车速 + route B advisory witness）的代码。
+Anomaly 2.7.0 适配版本，完成任务组 1（加载/编译）、任务组 2（无载具服务时的相机恢复）、任务组 3（精确车速 + route B advisory witness）和任务组 4（发布检查与回滚文档）的代码/文档。完整实机矩阵与 Windows 宿主工具验收仍需补跑。
 
 ## 破坏性变更
 
@@ -75,6 +75,29 @@ Anomaly 2.7.0 适配版本，完成任务组 1（加载/编译）、任务组 2�
 - **速度显示**：诊断面板的速度直接显示精确 getter 的绝对值；速度来源显示
   `精确` 或 `位置微分`。
 
+## 发布验证
+
+完整矩阵、产物哈希和待执行项见 [RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。
+
+- 离线：MinGW 2.7.0 SDK 构建、`ctest`、manifest schema、ID/版本/pluginmaster 一致性、
+  ZIP 根目录、DLL 导入/导出均通过。
+- 实机：插件加载、锚点门禁、精确 `GetForwardSpeedKmH` 和 route B 已观察正常；
+  用户确认 route B 修复后车辆不再抖动。静止进出车、加速、重刹、倒车、漂移、换车、
+  地图切换、F7/UI 与 Camera Tools/BetterPose 共存仍待实机勾选。
+- Windows 宿主工具 `anomaly-plugin validate`、`anomaly-test-host --reload 10 --ticks 60`
+  当前环境不可用，不能标记为通过；发布前需在 Windows 开发机补跑。
+
+## 回滚
+
+- **回退到 1.1.1**：旧 ID 不被 2.7.0 加载，需要同时回退 Anomaly Runtime 到 2.6.0；
+  保留 `v1.1.1` tag/Release，旧设置目录不会被迁移脚本删除。
+- **2.7.0 下禁用 2.0.0**：退出游戏，删除或改名
+  `Anomaly/plugins/robineatcorn.nfs2015-chase-cam`（或在插件列表禁用后重启），
+  然后收集 `anomaly-runtime.jsonl` 和 `anomaly-runtime.log`。
+- 如果迁移脚本改过 `plugin-enablement.json` / `ui-window-state.json`，可用脚本生成的
+  `.bak-*` 备份恢复旧 ID 条目。
+- 出现 route B 黑屏/崩溃时不要放宽 profile hash 或删除门禁；保持 fail-closed 并附日志。
+
 ## 从 1.1.1 迁移
 
 仓库新增 `migrate-2.7.ps1`。默认只预览，`-Apply` 才写入；不会删除旧设置或旧安装目录。
@@ -118,12 +141,21 @@ powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
 - `plugin.dll` 仅导入 `KERNEL32.dll` / `msvcrt.dll`，导出 `AnomalyPluginEntryV1`；
 - `ctest` / `nfs2015_chase_cam_test` 通过；
 - manifest 通过 2.7.0 JSON Schema 校验；
+- ID/版本/pluginmaster、包内容、ZIP 根目录和字节一致性通过 `verify-release.sh`；
 - 安装版 2.7.0 profile hash 已采集并加入 allowlist（`c6d97f...`）；
 - `migrate-2.7.ps1` 在临时 Anomaly 目录上完成预览和 `-Apply` 测试。
+
+发布产物：
+
+- `plugin.dll`：2,217,943 bytes，SHA-256
+  `7fbf360d3c49440c0a3c67f47d6c18dda8d15fa602850b839612031751c4b01b`；
+- `Nfs2015ChaseCam-2.0.0.zip`：817,243 bytes，SHA-256
+  `cd28d67b3f214676bf7b6aba8861a664958d7671c42c1b86f332501e263b4708`。
 
 Windows/实机侧仍需复验：
 
 - MSVC 构建（当前环境没有 Visual Studio）；
 - `anomaly-plugin validate`；
 - `anomaly-test-host --plugin ... --reload 10 --ticks 60`；
-- 静止进车/下车、倒车、重刹、漂移、换车、地图切换和 Camera Tools/BetterPose 共存。
+- 静止进车/下车、加速、倒车、重刹、漂移、上下坡、换车、地图切换、F7/UI 和
+  Camera Tools/BetterPose 共存；至少两个地图、两次完整重启。

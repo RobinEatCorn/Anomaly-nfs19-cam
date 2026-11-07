@@ -2,7 +2,7 @@
 
 目标仓库：`Anomaly-nfs19-cam`（NFS 2015 Chase Cam）
 目标宿主：Anomaly `v2.7.0`
-当前插件版本：`2.0.0`（任务组 1、2、3 代码已完成；实机验证仍待执行）
+当前插件版本：`2.0.0`（任务组 1–3 代码完成；任务组 4 发布候选与离线检查完成；实机矩阵仍待执行）
 编写日期：2026-11-07
 
 ---
@@ -444,6 +444,18 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
 
 **预计**：0.5–1 天。
 
+**实现状态（2026-11-08）**：发布候选已完成，详细矩阵和产物哈希见
+[RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。
+
+- `verify-release.sh`：自动检查 manifest schema、ID/版本/pluginmaster、旧 vehicle
+  服务/capability、包内容、ZIP 根目录与字节一致性、`ctest`、DLL 导入/导出；
+  缺少 Windows 宿主工具时阻塞而不是静默通过。
+- `build-mingw.sh --zip`：没有 `zip` 命令时用 Python `zipfile` 打包，并校验
+  ZIP 根目录。
+- Release Notes 已写清仅支持 2.7.0+、旧 ID 不再加载、迁移方式、速度来源和回滚。
+- 离线检查通过；`anomaly-plugin validate`、`anomaly-test-host`、MSVC 和完整实机
+  矩阵仍被环境阻塞。用户已实机确认 route B 抖动修复，但不能替代全部场景。
+
 #### 4.1 测试矩阵
 
 离线：
@@ -490,6 +502,10 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
   - 或在 2.7.0 下关闭插件，等待修复。
 - 发布前至少在两个不同地图、两次完整重启后验证。
 
+**4.3 实现状态**：`RELEASE-NOTES-2.0.0.md` 和 `RELEASE-CHECKLIST-2.0.0.md`
+已记录两种回滚路径（1.1.1 + 2.6.0；2.7.0 下禁用/移除 2.0.0）、备份恢复方式，
+以及出现 route B 黑屏时必须保持 fail-closed 的约束。
+
 ---
 
 ## 4. 依赖关系与建议顺序
@@ -531,18 +547,18 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
 
 满足以下全部条件才算 2.7.0 适配完成：
 
-- [ ] manifest ID 为 `robineatcorn.nfs2015-chase-cam`，`pluginmaster.json` 一致。
-- [ ] manifest 不再包含 `anomaly.nte.vehicle` / `nte-vehicle`。
-- [ ] 2.7.0 SDK 下 MSVC / MinGW 均编译通过。
-- [ ] 精确车速 getter 与位置微分回退均可用，面板显示速度来源。
-- [ ] `anomaly-plugin validate` 通过。
-- [ ] `anomaly-test-host --reload 10 --ticks 60` 通过。
-- [ ] 启动日志无 `unknown-capability`、无 capability denied、无必需服务等待死循环。
-- [ ] 面板 `版本门禁 = ok`，route B / FOV / 视点 hook 正常。
-- [ ] 静止进车立即接管；下车立即恢复。
-- [ ] 加速、重刹、倒车、漂移、上下坡、换车、地图切换均通过实机检查。
-- [ ] 旧设置迁移路径可用，或者 README 明确说明重置方式。
-- [ ] Release note 明确“仅支持 Anomaly 2.7.0+，旧 ID 不再加载”。
+- [x] manifest ID 为 `robineatcorn.nfs2015-chase-cam`，`pluginmaster.json` 一致。
+- [x] manifest 不再包含 `anomaly.nte.vehicle` / `nte-vehicle`。
+- [ ] 2.7.0 SDK 下 MSVC / MinGW 均编译通过（MinGW 已通过；MSVC 待 Windows 环境）。
+- [ ] 精确车速 getter 与位置微分回退均可用，面板显示速度来源（精确 getter 已实机见到；位置微分回退待实机）。
+- [ ] `anomaly-plugin validate` 通过（当前环境缺少工具）。
+- [ ] `anomaly-test-host --reload 10 --ticks 60` 通过（当前环境缺少工具）。
+- [x] 启动日志无 `unknown-capability`、无 capability denied、无必需服务等待死循环。
+- [ ] 面板 `版本门禁 = ok`，route B / FOV / 视点 hook 正常（日志已见 route B late 应用；FOV/视点仍需逐个场景确认）。
+- [ ] 静止进车立即接管；下车立即恢复（待实机）。
+- [ ] 加速、重刹、倒车、漂移、上下坡、换车、地图切换均通过实机检查（待实机）。
+- [x] 旧设置迁移路径可用，或者 README 明确说明重置方式。
+- [x] Release note 明确“仅支持 Anomaly 2.7.0+，旧 ID 不再加载”。
 
 ---
 

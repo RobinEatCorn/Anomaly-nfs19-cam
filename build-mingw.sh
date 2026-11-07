@@ -251,15 +251,55 @@ if [[ -n "$INSTALL_PREFIX" ]]; then
 fi
 
 if [[ $MAKE_ZIP -eq 1 ]]; then
-    command -v zip >/dev/null 2>&1 || die "--zip 需要 zip 命令"
     version="$(awk -F'"' '/"version"[[:space:]]*:/ { print $4; exit }' \
         "$SOURCE_DIR/manifest.json")"
     [[ -n "$version" ]] || version="dev"
     mkdir -p "$SOURCE_DIR/dist"
     zip_path="$SOURCE_DIR/dist/$PACKAGE_NAME-$version.zip"
     rm -f -- "$zip_path"
-    # ZIP 根目录必须直接包含 manifest.json
-    (cd -- "$package_dir" && zip -qr "$zip_path" .)
+    # ZIP 根目录必须直接包含 manifest.json。优先用系统 zip；没有时用 Python
+    # 的 zipfile，WSL/CI 的最小镜像通常不带 zip 命令。
+    if command -v zip >/dev/null 2>&1; then
+        (cd -- "$package_dir" && zip -qr "$zip_path" .)
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$package_dir" "$zip_path" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+package = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+    for path in sorted(package.rglob("*")):
+        if path.is_file():
+            archive.write(path, path.relative_to(package).as_posix())
+PY
+    else
+        die "--zip 需要 zip 或 python3"
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$zip_path" <<'PY'
+import json
+import pathlib
+import sys
+import zipfile
+
+target = pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(target) as archive:
+    names = set(archive.namelist())
+    missing = {"manifest.json", "plugin.dll"} - names
+    if missing:
+        raise SystemExit(f"ZIP 根目录缺少: {sorted(missing)}")
+    if any(name.startswith("/") or name.startswith("../") for name in names):
+        raise SystemExit("ZIP 包含不安全路径")
+    manifest = json.loads(archive.read("manifest.json"))
+    if not manifest.get("id") or not manifest.get("version"):
+        raise SystemExit("ZIP 里的 manifest.json 缺少 id/version")
+    print(f"ZIP 校验：{manifest['id']} {manifest['version']}，{len(names)} 个文件")
+PY
+    else
+        warn "没有 python3，跳过 ZIP 内容校验"
+    fi
     ok "打包 $zip_path"
 fi
 
@@ -279,7 +319,9 @@ printf '  plugin.dll  %s，PE32+ x86-64\n' "$size"
 printf '  验收夹具    %s\n' "$BUILD_DIR/nfs2015_chase_cam_test.exe"
 cat <<EOF
 
-下一步（Windows 侧）
+下一步
+  ./verify-release.sh --allow-missing-host-tools
+  在 Windows 侧补跑:
   ctest --test-dir $BUILD_DIR --output-on-failure
   anomaly-plugin validate $package_dir
   anomaly-test-host --plugin $package_dir --reload 10 --ticks 60
