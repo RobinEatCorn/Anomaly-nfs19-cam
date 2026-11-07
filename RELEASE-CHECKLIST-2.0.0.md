@@ -132,6 +132,7 @@ C:\Program Files\Neverness To Everness\Client\WindowsNoEditor\HT\Binaries\Win64\
 
 4. 上传不可变的 GitHub Release 资源 `Nfs2015ChaseCam-2.0.0.zip`，再更新
    `pluginmaster.json` 的下载链接。先传 ZIP，再改索引，避免用户看到不存在的链接。
+   本次已发布：https://github.com/RobinEatCorn/Anomaly-nfs19-cam/releases/tag/v2.0.0
 5. Release 说明必须包含：
    - 仅支持 Anomaly 2.7.0+；
    - 旧 ID `io.github.robineatcorn.nfs2015-chase-cam` 不再加载；
@@ -176,4 +177,4 @@ Anomaly Runtime：
 | 离线门禁 | 本地 WSL/MinGW | **PASS（宿主工具 blocked）** |
 | Windows 宿主工具 | 待执行 | **BLOCKED** |
 | 实机矩阵 | 待执行 | **部分 PASS，其余 PENDING** |
-| GitHub Release 上传 | 待执行 | **PENDING** |
+| GitHub Release 上传 | RobinEatCorn | **DONE**：https://github.com/RobinEatCorn/Anomaly-nfs19-cam/releases/tag/v2.0.0 |
