@@ -20,10 +20,34 @@
 https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmaster.json
 ```
 
-插件会装到 `<game>/Anomaly/plugins/Nfs2015ChaseCam`。也可以从
+插件在线安装目录为 `<game>/Anomaly/plugins/robineatcorn.nfs2015-chase-cam`。也可以从
 [Releases](https://github.com/RobinEatCorn/Anomaly-nfs19-cam/releases) 下载
 `Nfs2015ChaseCam-<version>.zip`，把 ZIP **里面的内容**解压到该目录
 （`manifest.json` 必须直接在目录根部，不能多套一层文件夹）。
+
+## Anomaly 2.7.0 兼容性
+
+- **仅支持 Anomaly 2.7.0+**。1.1.1 及更早版本使用旧插件 ID，在 2.7.0 下无法加载。
+- 2.7.0 删除了 `anomaly.nte.vehicle` 服务和 `nte-vehicle` capability；本版本已同步删除，
+  车速暂时由 `anomaly.nte.player` 的玩家位置微分估计。
+- 2.0.0 完成了 manifest、capability 和 SDK 编译适配。profile hash 门禁与基于
+  `AttachParent` 的载具存在性检测属于 `PLAN-anomaly-2.7.md` 任务组 2：在那一组完成前，
+  2.7.0 上的相机可能仍停留在游戏原相机，或只在车速超过门限后接管。
+- 旧 ID 的启用状态、设置目录和窗口位置不会自动迁移；升级步骤见下面的
+  [从 1.1.1 升级](#从-111-升级)。完整变更列表见
+  [RELEASE-NOTES-2.0.0.md](RELEASE-NOTES-2.0.0.md)。
+
+### 从 1.1.1 升级
+
+1. 在 **Plugins > 已安装** 中停用旧版，退出游戏。
+2. 删除或改名旧安装目录（在线安装为 `Anomaly/plugins/io.github.robineatcorn.nfs2015-chase-cam`，
+   手动安装通常为 `Anomaly/plugins/Nfs2015ChaseCam`），避免同时存在两个同名描述符。
+3. 把旧设置复制到新 ID 目录：
+   `Anomaly/config/plugins/io.github.robineatcorn.nfs2015-chase-cam/`
+   → `Anomaly/config/plugins/robineatcorn.nfs2015-chase-cam/`；
+   文件名保持不变（`config-nfs2015-chase-cam-settings-v1.json`）。
+4. 需要保留窗口位置/收藏时，把旧 ID 对应的条目替换为新 ID；启用状态可在首次启动后
+   在插件列表里重新勾选。
 
 ## 实现方式
 
@@ -31,7 +55,7 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 也不包含宿主内部头文件或对 Runtime 的修改。插件通过公开的纯 C ABI v1 服务工作：
 
 - `anomaly.interop.signature` + `anomaly.interop.hook` 解析并 hook 相机/渲染函数；
-- `anomaly.nte.player` / `anomaly.nte.vehicle` 读取车的位置、速度和朝向快照；
+- `anomaly.nte.player` 读取玩家/车辆的位置、朝向和相机快照；
 - `anomaly.core` 的 `read_memory` 读取 `ue5.GWorld` 链和车辆/相机对象；
 - `anomaly.ue5.build`（可选）用 `profile_hash` 给 route B / FOV 的硬编码偏移做版本门禁；
 - `anomaly.config` + `anomaly.json` 持久化并解析设置（不依赖第三方 JSON 库）；
@@ -70,6 +94,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
+├── RELEASE-NOTES-2.0.0.md 2.7.0 适配与迁移说明
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
 ├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
 ├── plugin.cpp            ABI 入口、生命周期、hooks、相机/渲染接线、UI
@@ -96,7 +121,7 @@ cmake --build --preset default
 等价的手工命令是 `cmake -S . -B build -DAnomalySDK_DIR=...` 加
 `cmake --build build --config RelWithDebInfo`。
 
-可加载的包默认写到 `build\package\Nfs2015ChaseCam`，其中包含 `plugin.dll`、`manifest.json`
+可加载的包默认写到 `build\package\robineatcorn.nfs2015-chase-cam`，其中包含 `plugin.dll`、`manifest.json`
 和 `locales\`。导入库与 PDB 分别写到 `build\lib` 和 `build\symbols`，不会混进包目录。
 
 ### 用 MinGW-w64 构建（可选）
@@ -117,9 +142,9 @@ cmake --build build.mingw
 配置并编译，最后校验 `plugin.dll` 只导入系统模块、导出 `AnomalyPluginEntryV1`：
 
 ```sh
-./build-mingw.sh                        # -> build.mingw/package/Nfs2015ChaseCam
+./build-mingw.sh                        # -> build.mingw/package/robineatcorn.nfs2015-chase-cam
 ./build-mingw.sh --zip                  # 另出 dist/Nfs2015ChaseCam-<version>.zip
-./build-mingw.sh --install D:/Games/NTE # 装到 <game>/Anomaly/plugins/Nfs2015ChaseCam
+./build-mingw.sh --install D:/Games/NTE # 装到 <game>/Anomaly/plugins/robineatcorn.nfs2015-chase-cam
 ./build-mingw.sh --run-tests            # 跑验收夹具；WSL2 直接运行，纯 Linux 用 wine
 ./build-mingw.sh --help                 # 全部选项
 ```
@@ -146,8 +171,8 @@ MSVC 构建的官方工具，但它们通过 `LoadLibrary` 加载纯 C ABI 的 D
 
 ```powershell
 ctest --preset default
-anomaly-plugin validate .\build\package\Nfs2015ChaseCam
-anomaly-test-host --plugin .\build\package\Nfs2015ChaseCam --reload 10 --ticks 60
+anomaly-plugin validate .\build\package\robineatcorn.nfs2015-chase-cam
+anomaly-test-host --plugin .\build\package\robineatcorn.nfs2015-chase-cam --reload 10 --ticks 60
 ```
 
 离线 TestHost 没有游戏适配器，NTE 服务和 build 门禁会保持不可用；它只验证包能正常加载、卸载、
@@ -158,19 +183,20 @@ WSL2 里可以用 Linux `ctest` 直接执行交叉编译出的 Windows 夹具。
 
 ```sh
 ctest --test-dir build.mingw --output-on-failure
-pkg="$(wslpath -w build.mingw/package/Nfs2015ChaseCam)"
+pkg="$(wslpath -w build.mingw/package/robineatcorn.nfs2015-chase-cam)"
 anomaly-plugin validate "$pkg"
 anomaly-test-host --plugin "$pkg" --reload 10 --ticks 60
 ```
 
-手动安装时，把 `build\package\Nfs2015ChaseCam` 整个目录复制到 `Anomaly\plugins\Nfs2015ChaseCam`，
-或者在游戏目录前缀上直接安装：
+手动安装时，把 `build\package\robineatcorn.nfs2015-chase-cam` 整个目录复制到
+`Anomaly\plugins\robineatcorn.nfs2015-chase-cam`，或者在游戏目录前缀上直接安装：
 
 ```powershell
 cmake --install build --config RelWithDebInfo --prefix C:\path\to\game --component GameRuntime
 ```
 
-两种方式都会得到 `<game>\Anomaly\plugins\Nfs2015ChaseCam`，然后在游戏内 **Plugins > 已安装** 里启用。
+两种方式都会得到 `<game>\Anomaly\plugins\robineatcorn.nfs2015-chase-cam`，然后在游戏内
+**Plugins > 已安装** 里启用。
 WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目录。发布 ZIP 的流程见
 下面的[发布](#发布)一节：ZIP 根目录必须直接包含 `manifest.json`。
 
@@ -328,24 +354,24 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先更新 profile h
 ## 发布
 
 `manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
-`io.github.robineatcorn.nfs2015-chase-cam`，当前版本 `1.1.1`。ID 一旦发布就不应再变。
+`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.0`。ID 一旦发布就不应再变。
 
 1. 同步升版本：`manifest.json` 的 `version`、`pluginmaster.json` 的 `Version` 和 ZIP 文件名。
 2. 构建 Release 包，跑 `ctest`、`anomaly-plugin validate` 和 `anomaly-test-host`（见上一节）。
 3. 生成 ZIP。压缩的是包目录**里面的内容**，ZIP 根部必须直接有 `manifest.json` 和 `plugin.dll`：
 
    ```powershell
-   Compress-Archive -Path .\build\package\Nfs2015ChaseCam\* `
-     -DestinationPath .\dist\Nfs2015ChaseCam-1.1.1.zip -Force
+   Compress-Archive -Path .\build\package\robineatcorn.nfs2015-chase-cam\* `
+     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.0.zip -Force
    ```
 
    WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`。
 4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
 
    ```sh
-   gh release create v1.1.1 dist/Nfs2015ChaseCam-1.1.1.zip \
-     --title "NFS 2015 Chase Cam 1.1.1" \
-     --notes "坡度跟随、车身坐标架与 NFS GradientAdjustments"
+   gh release create v2.0.0 dist/Nfs2015ChaseCam-2.0.0.zip \
+     --title "NFS 2015 Chase Cam 2.0.0" \
+     --notes "Anomaly 2.7.0 加载/编译适配；新插件 ID 与旧数据迁移说明"
    ```
 
 5. 最后更新 `pluginmaster.json` 的 `Version` 与 `DownloadLinkInstall` / `DownloadLinkUpdate`，

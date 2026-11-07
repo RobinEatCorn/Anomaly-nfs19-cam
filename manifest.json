@@ -1,11 +1,11 @@
 {
   "schemaVersion": 2,
-  "id": "io.github.robineatcorn.nfs2015-chase-cam",
+  "id": "robineatcorn.nfs2015-chase-cam",
   "name": "NFS 2015 Chase Cam",
   "description": "Replaces the driving camera with the NFS 2015 action camera model: a loose drift yaw spring, a car-local pivot orbit, drift push-in/drop, body-pitch slope follow, speed-based FOV and shake.",
   "author": "RobinEatCorn",
   "license": "AGPL-3.0-only",
-  "version": "1.1.1",
+  "version": "2.0.0",
   "entry": "plugin.dll",
   "api": {
     "major": 1,
@@ -70,11 +70,6 @@
       "optional": true
     },
     {
-      "id": "anomaly.nte.vehicle",
-      "minVersion": 1,
-      "optional": true
-    },
-    {
       "id": "anomaly.ue5.ahud",
       "minVersion": 1,
       "optional": true
@@ -97,7 +92,6 @@
     "memory-write",
     "nte-session-snapshot",
     "nte-player-snapshot",
-    "nte-vehicle",
     "ue5-ahud",
     "ue5-build"
   ]

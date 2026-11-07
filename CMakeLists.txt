@@ -9,7 +9,7 @@ project(Nfs2015ChaseCam LANGUAGES CXX)
 #   cmake -S . -B build -DAnomalySDK_DIR=<sdk>/lib/cmake/AnomalySDK
 #   cmake --build build --config RelWithDebInfo
 #
-# The resulting package is written to build/package/Nfs2015ChaseCam.
+# The resulting package is written to build/package/robineatcorn.nfs2015-chase-cam.
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "The Anomaly plugin ABI targets Windows x64")
@@ -24,7 +24,7 @@ find_package(AnomalySDK CONFIG REQUIRED)
 anomaly_add_plugin(nfs2015_chase_cam
     SOURCES plugin.cpp
     MANIFEST manifest.json
-    PACKAGE_NAME Nfs2015ChaseCam)
+    PACKAGE_NAME robineatcorn.nfs2015-chase-cam)
 
 # The package directory must only hold what the Runtime ships: the DLL, the
 # manifest and the localized catalogs. Import libraries and PDBs are build

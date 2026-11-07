@@ -24,6 +24,7 @@ VERIFY=1
 INSTALL_PREFIX=""
 MAKE_ZIP=0
 PACKAGE_NAME="Nfs2015ChaseCam"
+PACKAGE_DIR_NAME="robineatcorn.nfs2015-chase-cam"
 
 c_reset=$'\033[0m'; c_info=$'\033[36m'; c_ok=$'\033[32m'; c_warn=$'\033[33m'; c_err=$'\033[31m'
 if [[ ! -t 1 ]]; then c_reset=""; c_info=""; c_ok=""; c_warn=""; c_err=""; fi
@@ -38,7 +39,7 @@ usage() {
 用法: ./build-mingw.sh [选项]
 
 默认在 ./build.mingw 配置并编译，产物是
-./build.mingw/package/Nfs2015ChaseCam/{plugin.dll,manifest.json,locales}。
+./build.mingw/package/robineatcorn.nfs2015-chase-cam/{plugin.dll,manifest.json,locales}。
 
 选项
   -s DIR, --sdk DIR       AnomalySDK 安装前缀，或它的 lib/cmake/AnomalySDK 目录
@@ -53,7 +54,7 @@ usage() {
       --no-tests          不构建相机模型验收夹具（nfs2015_chase_cam_test.exe）
       --run-tests         跑验收夹具；WSL2 直接运行 PE，纯 Linux 用 wine
       --no-verify         跳过 plugin.dll 的导入/导出校验
-      --install DIR       构建后安装到游戏根目录（<DIR>/Anomaly/plugins/Nfs2015ChaseCam）
+      --install DIR       构建后安装到游戏根目录（<DIR>/Anomaly/plugins/robineatcorn.nfs2015-chase-cam）
                           WSL 里可以直接写 Windows 路径，如 D:/Games/NTE
       --zip               打包 dist/Nfs2015ChaseCam-<version>.zip（manifest.json 在 ZIP 根）
   -h, --help              显示本帮助
@@ -218,8 +219,8 @@ if [[ $CLEAN -eq 1 ]]; then info "build (clean-first)"; else info "build"; fi
 cmake "${build_args[@]}"
 ok "编译完成"
 
-dll="$BUILD_DIR/package/$PACKAGE_NAME/plugin.dll"
-package_dir="$BUILD_DIR/package/$PACKAGE_NAME"
+dll="$BUILD_DIR/package/$PACKAGE_DIR_NAME/plugin.dll"
+package_dir="$BUILD_DIR/package/$PACKAGE_DIR_NAME"
 [[ -f "$dll" ]] || die "编译成功但找不到 $dll"
 
 # ---------------------------------------------------------------- 校验
@@ -245,7 +246,7 @@ fi
 # ---------------------------------------------------------------- 安装 / 打包
 if [[ -n "$INSTALL_PREFIX" ]]; then
     install_prefix="$(to_unix_path "$INSTALL_PREFIX")"
-    info "install -> $install_prefix/Anomaly/plugins/$PACKAGE_NAME"
+    info "install -> $install_prefix/Anomaly/plugins/$PACKAGE_DIR_NAME"
     cmake --install "$BUILD_DIR" --prefix "$install_prefix" --component GameRuntime
 fi
 
