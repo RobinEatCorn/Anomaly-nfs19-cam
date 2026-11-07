@@ -8,9 +8,12 @@
 // Anomaly's NTE snapshots, then replaces the view point produced by the game's
 // camera manager. The game's own third-person camera is used as the car-yaw
 // sensor; the player snapshot supplies the car position. Anomaly 2.7.0 removed
-// `anomaly.nte.vehicle`, so speed currently comes from differentiating that
-// position; see the 2.7.0 adaptation plan for the planned signed-speed and
-// vehicle-presence work. No GObjects scan.
+// `anomaly.nte.vehicle`, so vehicle presence is recovered by calling the same
+// reflected getters that service used, through `ue5.objects` +
+// `ue5.process-event`; the player capsule's AttachParent remains the anchor and
+// the fallback. Speed comes from differentiating the player position and is
+// signed against the resolved car yaw, with hysteresis for reverse. No GObjects
+// scan.
 //
 // The `Probe` block below is the only code that reaches into the engine: it
 // resolves three reflected functions, takes the Pawn object handle and calls
@@ -55,6 +58,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -132,6 +136,44 @@ constexpr double kBrakingHoldSeconds = 0.12;
 constexpr std::uint64_t kResetFeedbackMilliseconds = 1500;
 constexpr double kFallbackPlayerCenterHeightCm = 90.0;
 constexpr double kMinimumVehicleSpeedMps = 6.0;
+// Presence comes from the reflected vehicle getters (20 Hz poll). When those
+// services are unavailable, the player capsule's AttachParent is the fallback:
+// fresh means the render-thread read saw a valid vehicle parent. `recent`
+// covers one missed poll while entering/exiting or while the renderer is
+// streaming. Speed is used only when neither signal can answer.
+constexpr double kVehiclePresenceGraceSeconds = 0.20;
+constexpr std::int64_t kVehiclePresenceFreshNs = 250'000'000;
+// The 2.6 vehicle service also returned GetForwardSpeedKmH. 2.7 removed the
+// service, not the reflected function: the movement component sits at the
+// offset the 2.6 profile validated, and the getter is still callable through
+// ue5.process-event. Exact speed is the smooth signal the old plugin used for
+// reverse, braking pitch and longitudinal acceleration.
+constexpr std::uint32_t kObjectInternalIndexOffset = 0x0C;
+constexpr std::uint32_t kObjectClassOffset = 0x10;
+constexpr std::uint32_t kObjectNameOffset = 0x18;
+constexpr std::uint32_t kUstructSuperStructOffset = 0x40;
+constexpr std::uint32_t kVehicleMovementComponentOffset = 0x378;
+// UE accepts both the Class:Function and Class.Function forms for a UFunction
+// path; try both so the exact-speed recovery does not depend on which one the
+// active build's StaticFindObject handles.
+constexpr std::string_view kVehicleSpeedFunctionPaths[2] = {
+    "/Script/HTGame.HTVehicleMovementComponent:GetForwardSpeedKmH",
+    "/Script/HTGame.HTVehicleMovementComponent.GetForwardSpeedKmH"};
+constexpr double kReverseSpeedKmh = 1.0;
+// Reverse is inferred from the angle between travel and the game-camera yaw.
+// Enter well past 90 degrees, leave earlier, and ignore walking-speed noise.
+constexpr double kReverseDecisionMinSpeedMps = 1.0;
+constexpr double kReverseEnterCosine = -0.70;  // about 134 degrees
+constexpr double kReverseExitCosine = -0.40;   // about 114 degrees
+// Position differentiation is noisier than the removed exact-speed sample.
+// Braking uses a larger dead zone and slower filters so suspension/step noise
+// cannot pump the pitch.
+constexpr double kDerivedBrakingPitchDeadzoneMps2 = 2.2;
+constexpr double kDerivedBrakingDecelerationSmoothing = 4.0;
+constexpr double kDerivedBrakingInputSmoothing = 6.0;
+// A frame hitch is not a brake. If the next motion sample arrives this late,
+// discard it instead of differentiating a one-off 100 ms gap into nose dive.
+constexpr double kBrakingMaxSampleIntervalSeconds = 0.10;
 constexpr double kMaximumPlausibleSpeedCmps = 30000.0;
 constexpr double kMaximumPlausibleAccelerationCmps2 = 5000.0;
 constexpr double kMaximumTeleportStepCm = 5000.0;
@@ -333,14 +375,19 @@ constexpr std::uint8_t kRenderXReady = 1;
 constexpr std::uint8_t kRenderXFailed = 2;
 
 // Version insurance for the X anchor (PLAN-render-thread-hook.md task group 1).
-// The offset table above was verified against this exact Anomaly NTE profile;
+// The offset table above was verified against these Anomaly NTE profiles;
 // `anomaly-cli --pid <pid> ue` reports the same value as `profileHash`. The
-// profile is hashed as its raw JSON text, so any edit - even whitespace - moves
-// this value and disables the X path instead of reading a layout that moved.
-// On a mismatch the camera keeps working through the borrow estimate, and the
-// panel says why.
-constexpr std::string_view kExpectedProfileHash =
-    "0e3aaa6d640b06ca08a5f89a71ef6377b13165c545fe636deafe1805f222a3f8";
+// profile is hashed as its raw JSON text, so any edit - even whitespace or line
+// endings - moves this value and disables the X path instead of reading a
+// layout that moved. Both known 2.7.0 spellings are accepted: the installed
+// CRLF profile and the repository's LF profile. On a mismatch the camera keeps
+// working through the borrow estimate, and the panel says why.
+constexpr std::string_view kAcceptedProfileHashes[] = {
+    // Anomaly 2.7.0 installed runtime (CRLF JSON).
+    "c6d97fd2e506e75a7da060096a1614b80ff1a3a6a3e1eaf185e25eb5b55c1f52",
+    // Anomaly 2.7.0 repository profile (LF JSON).
+    "c37a7b3d1802c74927797675c1723da01afaf637028315e5e265599d5119db2a",
+};
 constexpr std::uint8_t kAnchorInsuranceWaiting = 0;
 constexpr std::uint8_t kAnchorInsuranceReady = 1;
 constexpr std::uint8_t kAnchorInsuranceServiceMissing = 2;
@@ -567,6 +614,38 @@ bool PlayerReady(const AnomalyNtePlayerServiceV1 *service) noexcept {
   return service != nullptr && service->snapshot != nullptr;
 }
 
+bool PlayerHandlesReady(const AnomalyNtePlayerServiceV1 *service) noexcept {
+  return HasField<AnomalyNtePlayerServiceV1,
+                  decltype(AnomalyNtePlayerServiceV1::get_object_handles)>(
+             service,
+             offsetof(AnomalyNtePlayerServiceV1, get_object_handles)) &&
+         service->get_object_handles != nullptr;
+}
+
+bool Ue5ObjectsReady(const AnomalyUe5ObjectsServiceV1 *service) noexcept {
+  // find_exact is the appended V1 tail; older hosts only expose the registry
+  // snapshots and cannot resolve a UFunction by path.
+  return HasField<AnomalyUe5ObjectsServiceV1,
+                  decltype(AnomalyUe5ObjectsServiceV1::find_exact)>(
+             service, offsetof(AnomalyUe5ObjectsServiceV1, find_exact)) &&
+         service->find_exact != nullptr;
+}
+
+bool Ue5ProcessEventInvokeReady(
+    const AnomalyUe5ProcessEventServiceV1 *service) noexcept {
+  return HasField<AnomalyUe5ProcessEventServiceV1,
+                  decltype(AnomalyUe5ProcessEventServiceV1::invoke)>(
+             service, offsetof(AnomalyUe5ProcessEventServiceV1, invoke)) &&
+         service->invoke != nullptr;
+}
+
+// Exact-speed support needs the registry snapshot call to turn the raw vehicle
+// pointer returned by BP_GetCurrentDriveVehicle into a ProcessEvent handle.
+bool Ue5ObjectSnapshotReady(const AnomalyUe5ObjectsServiceV1 *service) noexcept {
+  return Ue5ObjectsReady(service) && service->generation != nullptr &&
+         service->snapshot_at != nullptr;
+}
+
 bool SnapshotValid(const std::uint32_t flags) noexcept {
   // STALE only means the sampler has not refreshed this tick (the interval is
   // configurable); the last sample is still the best known player/vehicle
@@ -630,6 +709,15 @@ enum YawSource : std::uint32_t {
   kYawSourceObserved = 1,
   kYawSourceVelocity = 2,
   kYawSourceNoObservation = 3,
+};
+
+// What produced the speed shown in the panel. Anomaly 2.7.0 has no exact
+// vehicle speed service, so the camera currently always reports `Derived`.
+// `Exact` remains reserved for task group 3 if the public-ABI query returns.
+enum SpeedSource : std::uint8_t {
+  kSpeedSourceUnavailable = 0,
+  kSpeedSourceDerived = 1,
+  kSpeedSourceExact = 2,
 };
 
 constexpr std::size_t kDiagnosticThreadSlots = 8;
@@ -911,6 +999,15 @@ struct RenderXProbe final {
   std::atomic<double> vehicle_anchor_cm[3]{};
   std::atomic<std::int64_t> vehicle_anchor_ns{};
   std::atomic<std::uintptr_t> vehicle_parent{};
+  // Game-tick presence signal derived from the same AttachParent read. The
+  // timestamp is refreshed on every valid parent sample, even while the car is
+  // parked and OnTransformChanged is not firing.
+  std::atomic_bool vehicle_present{};
+  std::atomic<std::int64_t> vehicle_present_ns{};
+  // Last successful presence sample, present or absent. Unlike
+  // `vehicle_present_ns` (last present), this lets the Game tick distinguish
+  // "no parent, so definitely on foot" from "the parent read failed".
+  std::atomic<std::int64_t> vehicle_sample_ns{};
   std::atomic<std::uint64_t> vehicle_read_failures{};
   std::atomic<std::uint64_t> vehicle_fallbacks{};
   // True when the anchor came from the scene proxy rather than the component
@@ -943,6 +1040,7 @@ struct RenderXProbe final {
   std::atomic<std::uint64_t> view_uniform_age_count{};
   std::atomic<std::uint64_t> route_b_applied{};
   std::atomic<std::uint64_t> route_b_fallbacks{};
+  std::atomic<std::uint64_t> route_b_witness_failures{};
   std::atomic<std::uint64_t> route_b_last_age_us{};
   // Pre-visibility applications. These are the authoritative route B writes:
   // the late SetupUniformBufferParameters path is skipped while this timestamp
@@ -1055,6 +1153,9 @@ struct RenderXProbe final {
     }
     vehicle_anchor_ns.store(0, std::memory_order_relaxed);
     vehicle_parent.store(0, std::memory_order_relaxed);
+    vehicle_present.store(false, std::memory_order_relaxed);
+    vehicle_present_ns.store(0, std::memory_order_relaxed);
+    vehicle_sample_ns.store(0, std::memory_order_relaxed);
     vehicle_read_failures.store(0, std::memory_order_relaxed);
     vehicle_fallbacks.store(0, std::memory_order_relaxed);
     vehicle_proxy_used.store(false, std::memory_order_relaxed);
@@ -1079,6 +1180,7 @@ struct RenderXProbe final {
     view_uniform_age_count.store(0, std::memory_order_relaxed);
     route_b_applied.store(0, std::memory_order_relaxed);
     route_b_fallbacks.store(0, std::memory_order_relaxed);
+    route_b_witness_failures.store(0, std::memory_order_relaxed);
     route_b_last_age_us.store(0, std::memory_order_relaxed);
     route_b_early_applied.store(0, std::memory_order_relaxed);
     route_b_early_fallbacks.store(0, std::memory_order_relaxed);
@@ -1166,9 +1268,12 @@ struct DisplayState final {
   bool hook_ready{};
   bool active{};
   bool driving{};
+  bool reversing{};
   bool player_valid{};
   bool fov_enabled{};
   std::uint32_t preset{};
+  std::uint8_t speed_source{kSpeedSourceUnavailable};
+  bool speed_sign_known{};
   double speed_kmh{};
   double slip_degrees{};
   double drift{};
@@ -1246,6 +1351,8 @@ struct DisplayState final {
   std::uint64_t anchor_fallbacks{};
   std::uint64_t anchor_read_failures{};
   bool vehicle_anchor_valid{};
+  bool vehicle_present{};
+  bool vehicle_presence_known{};
   bool vehicle_proxy_used{};
   bool vehicle_render_used{};
   bool transform_hook_valid{};
@@ -1263,6 +1370,7 @@ struct DisplayState final {
   double view_uniform_age_peak_ms{};
   std::uint64_t route_b_applied{};
   std::uint64_t route_b_fallbacks{};
+  std::uint64_t route_b_witness_failures{};
   std::uint64_t route_b_early_applied{};
   std::uint64_t route_b_early_fallbacks{};
   double route_b_last_age_ms{};
@@ -1360,6 +1468,11 @@ struct Context final {
   const AnomalyHookServiceV1 *hook{};
   const AnomalyNteSessionServiceV1 *session{};
   const AnomalyNtePlayerServiceV1 *player{};
+  // The old 2.6 vehicle snapshot called BP_GetCurrentDriveVehicle through the
+  // Host. 2.7 removed that service, but the same reflected getters are still
+  // callable through the generic UE5 object/ProcessEvent services.
+  const AnomalyUe5ObjectsServiceV1 *objects{};
+  const AnomalyUe5ProcessEventServiceV1 *events{};
   // Optional engine access. Only the probe uses this; it may be null on a host
   // without the `ue5.ahud` feature, and every use is guarded.
   const AnomalyUe5AhudServiceV1 *ahud{};
@@ -1462,6 +1575,13 @@ struct Context final {
   bool route_b_pattern_failure_logged{};
   bool prepare_view_state_hook_failure_logged{};
   bool prepare_view_state_pattern_failure_logged{};
+  // A deterministic pattern miss cannot be fixed by scanning the module again.
+  // Latch it so the 2 s hook retry does not re-scan .text forever; the camera
+  // stays on whatever path remains available.
+  bool early_route_b_unavailable{};
+  bool transform_pattern_unavailable{};
+  bool view_uniform_pattern_unavailable{};
+  bool view_point_pattern_unavailable{};
 
   // Published view snapshot. The location fields are offsets from the car,
   // not absolute world positions: the detour adds the latest car position so
@@ -1541,8 +1661,38 @@ struct Context final {
   AnomalyGenerationHandleV1 player_handle{};
   bool have_last_position{};
   bool have_last_yaw{};
+  bool reversing{};
+  bool speed_sign_known{true};
+  bool vehicle_present_last{};
+  double last_vehicle_present_time{};
+  std::uintptr_t last_vehicle_parent{};
+  // The old 2.6 vehicle service polled BP_GetCurrentDriveVehicle every 50 ms.
+  // Reproduce that exact presence signal through the generic UE5 services.
+  std::array<AnomalyGenerationHandleV1, 3> vehicle_getter_handles{};
+  std::array<double, 3> next_vehicle_getter_retry{};
+  double next_vehicle_query_time{};
+  bool vehicle_query_known{};
+  bool vehicle_query_present{};
+  std::uintptr_t vehicle_query_object{};
+  bool vehicle_query_speed_known{};
+  bool vehicle_query_speed_fresh{};
+  double vehicle_query_speed_kmh{};
+  // Exact-speed cache. The reflected function and the movement component
+  // handle stay valid while the vehicle object does, and ue5.objects'
+  // generation invalidates all of them when the registry is rebuilt.
+  std::uint64_t vehicle_objects_generation{};
+  std::uintptr_t vehicle_speed_object{};
+  AnomalyGenerationHandleV1 vehicle_speed_function{};
+  AnomalyGenerationHandleV1 vehicle_movement_handle{};
+  AnomalyGenerationHandleV1 vehicle_wheeled_class{};
+  bool vehicle_speed_wheeled{};
+  double next_vehicle_wheeled_class_retry{};
+  double next_vehicle_speed_function_retry{};
+  bool vehicle_speed_diag_logged{};
+  bool vehicle_speed_active_logged{};
   double last_vehicle_speed_mps{-1.0};
   double last_vehicle_speed_time{};
+  bool last_speed_exact{};
   double brake_deceleration_mps2{};
   double brake_input{};
   double brake_hold_until{};
@@ -1847,16 +1997,20 @@ bool ReadVehicleParentAnchor(const AnomalyCoreServiceV1 *core,
                              const std::uintptr_t root,
                              const double root_cm[3], double parent_cm[3],
                              std::uintptr_t &parent_out, bool &has_parent,
-                             bool &proxy_used,
+                             bool &attach_read_ok, bool &proxy_used,
                              std::uintptr_t &proxy_out) noexcept {
   parent_out = 0;
   has_parent = false;
+  attach_read_ok = false;
   proxy_used = false;
   proxy_out = 0;
   std::uintptr_t parent{};
   if (!ReadPointerAtOffset(core, root, kSceneComponentAttachParentOffset,
-                           parent) ||
-      parent == root) {
+                           parent)) {
+    return false;
+  }
+  attach_read_ok = true;
+  if (parent == 0 || parent == root) {
     return false;
   }
   has_parent = true;
@@ -1946,6 +2100,15 @@ bool HexEqualsIgnoreCase(const char *actual,
   return actual[expected.size()] == '\0';
 }
 
+bool AcceptedProfileHash(const char *actual) noexcept {
+  for (const std::string_view accepted : kAcceptedProfileHashes) {
+    if (HexEqualsIgnoreCase(actual, accepted)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void TryResolveRenderX(Context &context) noexcept {
   RenderXProbe &probe = context.render_x;
   if (probe.insurance_state != kAnchorInsuranceReady) {
@@ -1993,7 +2156,7 @@ void EvaluateAnchorInsurance(Context &context) noexcept {
         context.build->user, hash.data(), &hash_size);
     if (status.code == ANOMALY_STATUS_V1_OK && hash_size > 1 &&
         hash_size <= hash.size() && hash[0] != '\0') {
-      next = HexEqualsIgnoreCase(hash.data(), kExpectedProfileHash)
+      next = AcceptedProfileHash(hash.data())
                  ? kAnchorInsuranceReady
                  : kAnchorInsuranceHashMismatch;
     } else {
@@ -2017,12 +2180,12 @@ void EvaluateAnchorInsurance(Context &context) noexcept {
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
     } else if (next == kAnchorInsuranceHashMismatch) {
       std::snprintf(message, sizeof(message),
-                    "anchor gate: profile hash mismatch (got %.*s, want %.*s); "
-                    "camera hooks disabled until the plugin is updated",
+                    "anchor gate: profile hash mismatch (got %.*s, want one of "
+                    "%zu accepted 2.7.0 profiles); camera hooks disabled until "
+                    "the plugin is updated",
                     static_cast<int>(hash_size > 0 ? hash_size - 1 : 0),
                     hash.data(),
-                    static_cast<int>(kExpectedProfileHash.size()),
-                    kExpectedProfileHash.data());
+                    std::size(kAcceptedProfileHashes));
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, message);
     } else if (next == kAnchorInsuranceServiceMissing) {
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
@@ -2153,6 +2316,10 @@ void UpdateRenderXProbe(Context &context, const double base_cm[3],
 void SampleRenderXPhase(Context &context) noexcept {
   RenderXProbe &probe = context.render_x;
   if (!probe.anchor_enabled.load(std::memory_order_acquire)) {
+    probe.vehicle_present.store(false, std::memory_order_release);
+    probe.vehicle_present_ns.store(0, std::memory_order_relaxed);
+    probe.vehicle_sample_ns.store(0, std::memory_order_relaxed);
+    probe.vehicle_parent.store(0, std::memory_order_relaxed);
     return;
   }
   // The detour runs once per render pass; the passes of one frame are only a
@@ -2170,6 +2337,10 @@ void SampleRenderXPhase(Context &context) noexcept {
   }
   const std::uintptr_t root = probe.root.load(std::memory_order_relaxed);
   if (root == 0) {
+    probe.vehicle_present.store(false, std::memory_order_release);
+    probe.vehicle_present_ns.store(0, std::memory_order_relaxed);
+    probe.vehicle_sample_ns.store(0, std::memory_order_relaxed);
+    probe.vehicle_parent.store(0, std::memory_order_relaxed);
     return;
   }
   double render_cm[3]{};
@@ -2179,6 +2350,10 @@ void SampleRenderXPhase(Context &context) noexcept {
     probe.anchor_valid.store(false, std::memory_order_release);
     probe.vehicle_anchor_valid.store(false, std::memory_order_release);
     probe.vehicle_render_used.store(false, std::memory_order_relaxed);
+    probe.vehicle_present.store(false, std::memory_order_release);
+    probe.vehicle_present_ns.store(0, std::memory_order_relaxed);
+    probe.vehicle_sample_ns.store(0, std::memory_order_relaxed);
+    probe.vehicle_parent.store(0, std::memory_order_relaxed);
     probe.watched_proxy.store(0, std::memory_order_relaxed);
     return;
   }
@@ -2197,10 +2372,12 @@ void SampleRenderXPhase(Context &context) noexcept {
     double parent_cm[3]{};
     std::uintptr_t parent{};
     bool has_parent = false;
+    bool attach_read_ok = false;
     bool proxy_used = false;
     std::uintptr_t proxy{};
     if (ReadVehicleParentAnchor(context.core, root, render_cm, parent_cm,
-                                parent, has_parent, proxy_used, proxy)) {
+                                parent, has_parent, attach_read_ok, proxy_used,
+                                proxy)) {
       for (std::size_t axis = 0; axis < 3; ++axis) {
         probe.vehicle_anchor_cm[axis].store(parent_cm[axis],
                                             std::memory_order_relaxed);
@@ -2215,6 +2392,10 @@ void SampleRenderXPhase(Context &context) noexcept {
       probe.vehicle_anchor_ns.store(NowNanoseconds(),
                                     std::memory_order_relaxed);
       probe.vehicle_anchor_valid.store(true, std::memory_order_release);
+      const std::int64_t presence_ns = NowNanoseconds();
+      probe.vehicle_present_ns.store(presence_ns, std::memory_order_relaxed);
+      probe.vehicle_sample_ns.store(presence_ns, std::memory_order_relaxed);
+      probe.vehicle_present.store(true, std::memory_order_release);
       // Prefer the render thread's OnTransformChanged value when it belongs to this
       // exact proxy and is fresh. The Game-tick proxy read above and this
       // value are the same field, but the hook is written by the renderer at
@@ -2344,6 +2525,12 @@ void SampleRenderXPhase(Context &context) noexcept {
       probe.vehicle_anchor_valid.store(false, std::memory_order_release);
       probe.vehicle_proxy_used.store(false, std::memory_order_relaxed);
       probe.vehicle_render_used.store(false, std::memory_order_relaxed);
+      probe.vehicle_present.store(false, std::memory_order_release);
+      probe.vehicle_present_ns.store(0, std::memory_order_relaxed);
+      probe.vehicle_sample_ns.store(
+          attach_read_ok && !has_parent ? NowNanoseconds() : 0,
+          std::memory_order_relaxed);
+      probe.vehicle_parent.store(0, std::memory_order_relaxed);
       if (has_parent) {
         probe.vehicle_read_failures.fetch_add(1, std::memory_order_relaxed);
       }
@@ -3020,6 +3207,84 @@ bool IsRouteBFullScreenView(void *view) noexcept {
          rect[3] >= kRouteBMinViewHeight;
 }
 
+double Determinant4x4(const double matrix[16]) noexcept {
+  return matrix[0] *
+             (matrix[5] * (matrix[10] * matrix[15] -
+                           matrix[11] * matrix[14]) -
+              matrix[6] * (matrix[9] * matrix[15] -
+                           matrix[11] * matrix[13]) +
+              matrix[7] * (matrix[9] * matrix[14] -
+                           matrix[10] * matrix[13])) -
+         matrix[1] *
+             (matrix[4] * (matrix[10] * matrix[15] -
+                           matrix[11] * matrix[14]) -
+              matrix[6] * (matrix[8] * matrix[15] -
+                           matrix[11] * matrix[12]) +
+              matrix[7] * (matrix[8] * matrix[14] -
+                           matrix[10] * matrix[12])) +
+         matrix[2] *
+             (matrix[4] * (matrix[9] * matrix[15] -
+                           matrix[11] * matrix[13]) -
+              matrix[5] * (matrix[8] * matrix[15] -
+                           matrix[11] * matrix[12]) +
+              matrix[7] * (matrix[8] * matrix[13] -
+                           matrix[9] * matrix[12])) -
+         matrix[3] *
+             (matrix[4] * (matrix[9] * matrix[14] -
+                           matrix[10] * matrix[13]) -
+              matrix[5] * (matrix[8] * matrix[14] -
+                           matrix[10] * matrix[12]) +
+              matrix[6] * (matrix[8] * matrix[13] -
+                           matrix[9] * matrix[12]));
+}
+
+// A hash match proves the offsets were verified against this profile; it does
+// not prove that a particular FViewInfo is still a live full-screen view. Check
+// the fields route B is about to read and write before touching them, so a
+// changed view layout fails closed instead of writing a camera pose into an
+// unrelated object.
+bool IsRouteBViewWritable(void *view) noexcept {
+  if (!IsRouteBFullScreenView(view)) {
+    return false;
+  }
+  const auto address = reinterpret_cast<std::uintptr_t>(view);
+  double location[3]{};
+  double rotation[3]{};
+  double projection[16]{};
+  float fov = 0.0F;
+  std::memcpy(location,
+              reinterpret_cast<const void *>(address + kViewLocationOffset),
+              sizeof(location));
+  std::memcpy(rotation,
+              reinterpret_cast<const void *>(address + kViewRotationOffset),
+              sizeof(rotation));
+  std::memcpy(projection,
+              reinterpret_cast<const void *>(address + kViewMatricesOffset),
+              sizeof(projection));
+  std::memcpy(&fov, reinterpret_cast<const void *>(address + kViewFovOffset),
+              sizeof(fov));
+  for (double value : location) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  for (double value : rotation) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  for (double value : projection) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  if (!(std::fabs(Determinant4x4(projection)) > 1e-12) ||
+      !(fov > 1.0F) || !(fov < 179.0F)) {
+    return false;
+  }
+  return true;
+}
+
 bool ApplyRouteBFov(void *view, const RenderXProbe &probe) noexcept {
   if (view == nullptr ||
       !probe.version_gate.load(std::memory_order_acquire)) {
@@ -3332,13 +3597,20 @@ bool ApplyRouteBView(Context &context, void *self,
   // A full-screen game view is the only one this rigid chase pose should
   // replace. Reflection/scene-capture views often use small rectangles; they
   // must keep their own camera. Shadow views do not call this function.
+  if (!IsRouteBFullScreenView(self)) {
+    return false;
+  }
+  // Advisory witness: count suspicious view data but do not skip the pose.
+  // Route B must be applied on every eligible render frame; skipping an
+  // occasional frame here makes the vehicle visibly shake.
+  if (!IsRouteBViewWritable(self)) {
+    context.render_x.route_b_witness_failures.fetch_add(1,
+                                                        std::memory_order_relaxed);
+  }
   std::int32_t rect[4]{};
   std::memcpy(rect,
               reinterpret_cast<const void *>(self_address + kViewInfoRectOffset),
               sizeof(rect));
-  if (rect[2] < kRouteBMinViewWidth || rect[3] < kRouteBMinViewHeight) {
-    return false;
-  }
   ViewMatricesCtorFn ctor = g_view_matrices_ctor.load(std::memory_order_acquire);
   if (ctor == nullptr) {
     return false;
@@ -3576,6 +3848,9 @@ void ANOMALY_CALL PrepareViewStateDetour(void *self,
 }
 
 bool EnsurePrepareViewStateHook(Context &context) noexcept {
+  if (context.early_route_b_unavailable) {
+    return false;
+  }
   if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
     return false;
   }
@@ -3592,11 +3867,13 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
       context.prepare_view_state_hook_target.load(std::memory_order_acquire);
   if (target == 0) {
     if (!ResolveSignature(context, kPrepareViewStatePattern, target)) {
+      context.early_route_b_unavailable = true;
       if (!context.prepare_view_state_pattern_failure_logged) {
         context.prepare_view_state_pattern_failure_logged = true;
         Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
             "nfs2015 chase cam: PrepareViewStateForVisibility pattern not "
-            "found; route B stays on the late view hook");
+            "found; early route B disabled for this session, late view hook "
+            "stays active");
       }
       return false;
     }
@@ -3608,11 +3885,13 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
     std::uintptr_t update_matrix = 0;
     if (!ResolveSignature(context, kSceneViewUpdateMatrixPattern,
                           update_matrix)) {
+      context.early_route_b_unavailable = true;
       if (!context.route_b_pattern_failure_logged) {
         context.route_b_pattern_failure_logged = true;
         Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
             "nfs2015 chase cam: FSceneView::UpdateViewMatrix pattern not "
-            "found; route B stays on the late view hook");
+            "found; early route B disabled for this session, late view hook "
+            "stays active");
       }
       return false;
     }
@@ -3682,6 +3961,9 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
 }
 
 bool EnsureViewUniformHook(Context &context) noexcept {
+  if (context.view_uniform_pattern_unavailable) {
+    return false;
+  }
   if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
     return false;
   }
@@ -3696,6 +3978,10 @@ bool EnsureViewUniformHook(Context &context) noexcept {
       context.view_uniform_hook_target.load(std::memory_order_acquire);
   if (target == 0) {
     if (!ResolveSignature(context, kSetupUniformBufferPattern, target)) {
+      context.view_uniform_pattern_unavailable = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: SetupUniformBufferParameters pattern not found; "
+          "late route B/FOV hook disabled for this session");
       return false;
     }
     context.view_uniform_hook_target.store(target, std::memory_order_release);
@@ -3756,6 +4042,9 @@ bool EnsureViewUniformHook(Context &context) noexcept {
 }
 
 bool EnsureTransformHook(Context &context) noexcept {
+  if (context.transform_pattern_unavailable) {
+    return false;
+  }
   if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
     return false;
   }
@@ -3770,6 +4059,10 @@ bool EnsureTransformHook(Context &context) noexcept {
       context.transform_hook_target.load(std::memory_order_acquire);
   if (target == 0) {
     if (!ResolveSignature(context, kOnTransformChangedPattern, target)) {
+      context.transform_pattern_unavailable = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: OnTransformChanged pattern not found; render "
+          "transform hook disabled for this session");
       return false;
     }
     context.transform_hook_target.store(target, std::memory_order_release);
@@ -3817,6 +4110,9 @@ bool EnsureTransformHook(Context &context) noexcept {
 }
 
 bool EnsureHook(Context &context) noexcept {
+  if (context.view_point_pattern_unavailable) {
+    return false;
+  }
   // 2.5 has no build service. Preserve its legacy view-point hook rather than
   // turning an optional service into a hard requirement; 2.6+ with a build
   // service present is fail-closed on a hash mismatch.
@@ -3836,6 +4132,10 @@ bool EnsureHook(Context &context) noexcept {
   std::uintptr_t target = context.hook_target.load(std::memory_order_acquire);
   if (target == 0) {
     if (!ResolveSignature(context, kCameraViewPointPattern, target)) {
+      context.view_point_pattern_unavailable = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: CameraManager view-point pattern not found; "
+          "camera hook disabled for this session");
       return false;
     }
     context.hook_target.store(target, std::memory_order_release);
@@ -4902,8 +5202,12 @@ void ResetMotion(Context &context) noexcept {
   context.yaw_source = kYawSourceNone;
   context.have_last_position = false;
   context.have_last_yaw = false;
+  context.reversing = false;
+  context.speed_sign_known = true;
+  context.last_vehicle_parent = 0;
   context.last_vehicle_speed_mps = -1.0;
   context.last_vehicle_speed_time = 0.0;
+  context.last_speed_exact = false;
   context.brake_deceleration_mps2 = 0.0;
   context.brake_input = 0.0;
   context.brake_hold_until = 0.0;
@@ -4918,31 +5222,37 @@ void ResetMotion(Context &context) noexcept {
   RequestPresenterReset(context);
 }
 
-void UpdateBrakeInput(Context &context, const bool vehicle_valid,
-                      const bool speed_valid, const bool speed_fresh,
+void UpdateBrakeInput(Context &context, const bool speed_valid,
+                      const bool speed_fresh, const bool derived,
                       const double speed_kmh, const double dt) noexcept {
-  if (!vehicle_valid || !speed_valid) {
+  const double input_smoothing =
+      derived ? kDerivedBrakingInputSmoothing : kBrakingInputSmoothing;
+  const double deceleration_smoothing =
+      derived ? kDerivedBrakingDecelerationSmoothing
+              : kBrakingDecelerationSmoothing;
+  if (!speed_valid) {
     context.brake_input = nfs2015_chase::Damp(
-        context.brake_input, 0.0, kBrakingInputSmoothing, dt);
+        context.brake_input, 0.0, input_smoothing, dt);
     context.vehicle_acceleration_mps2 = nfs2015_chase::Damp(
-        context.vehicle_acceleration_mps2, 0.0,
-        kBrakingDecelerationSmoothing, dt);
+        context.vehicle_acceleration_mps2, 0.0, deceleration_smoothing, dt);
     return;
   }
   if (!speed_fresh) {
-    // The sample is held between polls, so there is no new speed delta to
-    // differentiate. Differentiating it at tick rate would read as zero
-    // acceleration on the held ticks and a spike on the sampled one, i.e. a
-    // sawtooth in the braking pitch.
+    // The motion sample is held between host snapshots, so there is no new
+    // speed delta to differentiate. Differentiating it at tick rate would read
+    // as zero acceleration on the held ticks and a spike on the sampled one,
+    // i.e. a sawtooth in the braking pitch.
     context.brake_input = nfs2015_chase::Damp(
         context.brake_input,
         context.elapsed <= context.brake_hold_until
             ? context.brake_last_target
             : 0.0,
-        kBrakingInputSmoothing, dt);
+        input_smoothing, dt);
     return;
   }
-  const double speed_mps = speed_kmh / 3.6;
+  // Braking pitch follows speed magnitude: reversing decelerates too, and the
+  // camera model already receives the signed speed separately.
+  const double speed_mps = std::fabs(speed_kmh) / 3.6;
   if (context.last_vehicle_speed_mps < 0.0) {
     context.last_vehicle_speed_mps = speed_mps;
     context.last_vehicle_speed_time = context.elapsed;
@@ -4955,21 +5265,31 @@ void UpdateBrakeInput(Context &context, const bool vehicle_valid,
   if (elapsed <= 1e-4) {
     return;
   }
+  if (derived && elapsed > kBrakingMaxSampleIntervalSeconds) {
+    // Only the differentiated position is invalid across a hitch; the exact
+    // speed getter is a direct sample and can span a longer poll gap.
+    context.brake_deceleration_mps2 = 0.0;
+    context.brake_input = nfs2015_chase::Damp(
+        context.brake_input, 0.0, input_smoothing, dt);
+    return;
+  }
   const double raw_acceleration = (speed_mps - previous_mps) / elapsed;
   context.vehicle_acceleration_mps2 = nfs2015_chase::Damp(
       context.vehicle_acceleration_mps2,
       nfs2015_chase::Clamp(raw_acceleration, -30.0, 30.0),
-      kBrakingDecelerationSmoothing, elapsed);
+      deceleration_smoothing, elapsed);
   const double deceleration =
       nfs2015_chase::Clamp(-raw_acceleration, 0.0, 30.0);
   context.brake_deceleration_mps2 = nfs2015_chase::Damp(
       context.brake_deceleration_mps2, deceleration,
-      kBrakingDecelerationSmoothing, elapsed);
+      deceleration_smoothing, elapsed);
+  const double deadzone =
+      derived ? kDerivedBrakingPitchDeadzoneMps2
+              : kBrakingPitchDeadzoneMps2;
   const double excess =
-      (std::max)(0.0, context.brake_deceleration_mps2 -
-                          kBrakingPitchDeadzoneMps2);
+      (std::max)(0.0, context.brake_deceleration_mps2 - deadzone);
   const double target = nfs2015_chase::Clamp(
-      excess / (kBrakingPitchFullMps2 - kBrakingPitchDeadzoneMps2), 0.0, 1.0);
+      excess / (kBrakingPitchFullMps2 - deadzone), 0.0, 1.0);
   if (target > 0.05) {
     context.brake_hold_until = context.elapsed + kBrakingHoldSeconds;
   }
@@ -4977,7 +5297,7 @@ void UpdateBrakeInput(Context &context, const bool vehicle_valid,
       context.elapsed <= context.brake_hold_until ? target : 0.0;
   context.brake_last_target = gated;
   context.brake_input = nfs2015_chase::Damp(
-      context.brake_input, gated, kBrakingInputSmoothing, dt);
+      context.brake_input, gated, input_smoothing, dt);
 }
 
 void UpdateMotion(Context &context, const double origin_cm[3],
@@ -5020,6 +5340,15 @@ void UpdateMotion(Context &context, const double origin_cm[3],
         } else {
           NoteViewSnap(context, kSnapReasonTeleport);
           ResetRenderPitch(context);
+          // A teleport is not a brake. Clear the derived-speed history so the
+          // next sample cannot turn the jump to zero into a full pitch input.
+          context.last_vehicle_speed_mps = -1.0;
+          context.last_vehicle_speed_time = context.elapsed;
+          context.brake_deceleration_mps2 = 0.0;
+          context.brake_input = 0.0;
+          context.brake_hold_until = 0.0;
+          context.brake_last_target = 0.0;
+          context.vehicle_acceleration_mps2 = 0.0;
           for (std::size_t axis = 0; axis < 3; ++axis) {
             context.velocity_cmps[axis] = 0.0;
             context.acceleration_cmps2[axis] = 0.0;
@@ -5087,8 +5416,9 @@ struct ObservedPose final {
 }
 
 double SelectCarYaw(Context &context, const double velocity_yaw,
-                    const double velocity_mps,
-                    const bool have_velocity) noexcept {
+                    const double velocity_mps, const bool have_velocity,
+                    const bool exact_speed,
+                    const double signed_speed_kmh) noexcept {
   // Prefer the Game-tick camera yaw: same clock as the car position, so the
   // reference cannot alias against a faster writer. The detour's render-thread
   // observation is only a fallback for profiles without the ESP tail.
@@ -5109,9 +5439,22 @@ double SelectCarYaw(Context &context, const double velocity_yaw,
     context.diag.camera_yaw_esp_misses.fetch_add(1,
                                                 std::memory_order_relaxed);
   }
+  context.speed_sign_known = exact_speed || have_camera_yaw;
+  if (exact_speed) {
+    // GetForwardSpeedKmH is signed, so reverse is stateless again exactly as
+    // it was in 2.6. The derived-speed hysteresis is only the fallback.
+    context.reversing = signed_speed_kmh < -kReverseSpeedKmh;
+  }
   if (!have_camera_yaw) {
     NoteYawSource(context, kYawSourceNoObservation);
-    return have_velocity ? velocity_yaw : 0.0;
+    if (!have_velocity) {
+      return context.have_last_yaw ? context.last_car_yaw : 0.0;
+    }
+    // Without a camera reference the sign is unknown. Reuse the last known
+    // reverse state rather than flipping the camera to the nose in one tick.
+    return context.reversing
+               ? WrappedAngle(velocity_yaw + nfs2015_chase::kPi)
+               : velocity_yaw;
   }
   if (!have_velocity) {
     // Too slow for the travel direction to mean anything: the camera is the
@@ -5120,11 +5463,31 @@ double SelectCarYaw(Context &context, const double velocity_yaw,
     return camera_yaw;
   }
   // Reversing travels along the nose plus 180 degrees, so the camera stays
-  // aligned with the nose instead of ending up in front of the car. The old
-  // vehicle service supplied a signed forward speed; with that service removed
-  // there is no sign yet, so the degraded path treats travel as forward.
-  // Task group 2 derives the sign from the camera yaw and velocity direction.
-  constexpr bool reversing = false;
+  // aligned with the nose instead of ending up in front of the car. When the
+  // exact signed speed is unavailable, infer the sign from the angle between
+  // travel and the game-camera yaw. The two thresholds form a hysteresis band
+  // so a drift or a camera swing cannot chatter the state; below walking speed
+  // the last decision is held.
+  const double alignment =
+      std::cos(WrappedAngle(velocity_yaw - camera_yaw));
+  if (!exact_speed && velocity_mps >= kReverseDecisionMinSpeedMps) {
+    if (context.reversing) {
+      if (alignment > kReverseExitCosine) {
+        context.reversing = false;
+      }
+    } else if (alignment < kReverseEnterCosine) {
+      context.reversing = true;
+    }
+  }
+  const bool reversing = context.reversing;
+  if (!reversing && velocity_mps < kReverseDecisionMinSpeedMps &&
+      alignment < kReverseEnterCosine) {
+    // Below the reverse decision speed the travel direction is too noisy to
+    // commit to a gear. The camera still points along the nose, so keep it
+    // instead of flipping the rig to the noisy velocity vector.
+    NoteYawSource(context, kYawSourceObserved);
+    return camera_yaw;
+  }
   const double travel_yaw =
       reversing ? WrappedAngle(velocity_yaw + nfs2015_chase::kPi)
                 : velocity_yaw;
@@ -5595,6 +5958,360 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
 }
 
 
+struct VehiclePresence {
+  bool known{};
+  bool present{};
+  std::uintptr_t object{};
+  bool speed_known{};
+  bool speed_fresh{};
+  double speed_kmh{};
+};
+
+// The 2.6 Host's anomaly.nte.vehicle snapshot called these three reflected
+// getters; the service is gone in 2.7 but the game functions are unchanged.
+// A successful call that returns null is an authoritative "not driving"; a
+// failed call only means "unknown" and leaves the speed fallback available.
+constexpr double kVehicleQueryIntervalSeconds = 0.05;
+constexpr double kVehicleGetterRetrySeconds = 2.0;
+std::string_view constexpr kVehicleGetterPaths[3] = {
+    "/Script/HTGame.HTPlayerController:BP_GetCurrentDriveVehicle",
+    // The typo is the game's own function name, not ours.
+    "/Script/HTGame.HTPlayerCharacter:BP_GetCurrentDirvingVehicle",
+    "/Script/HTGame.HTPlayerCharacter:GetBoardWaterVehicle"};
+
+// Turn a live UObject pointer into the registry handle ProcessEvent needs. The
+// object's internal index is the same field the host's ObjectHandleLocked
+// reads; snapshot_at returns the registered slot's serial and generation.
+bool ObjectHandleFromPointer(Context &context, const std::uintptr_t object,
+                             AnomalyGenerationHandleV1 &handle) noexcept {
+  handle = {};
+  if (object == 0 || !Ue5ObjectSnapshotReady(context.objects)) {
+    return false;
+  }
+  std::int32_t raw_index = -1;
+  if (!Read(context.core, object + kObjectInternalIndexOffset, raw_index) ||
+      raw_index < 0) {
+    return false;
+  }
+  AnomalyUe5ObjectSnapshotV1 snapshot{sizeof(snapshot)};
+  const auto status = context.objects->snapshot_at(
+      context.objects->user, static_cast<std::uint32_t>(raw_index), &snapshot);
+  if (status.code != ANOMALY_STATUS_V1_OK || snapshot.handle.id == 0) {
+    return false;
+  }
+  // snapshot_at is indexed, not pointer-keyed. Compare the FName id we read
+  // from the raw object with the registry slot's name so a stale vehicle
+  // pointer cannot silently turn into a different object's handle.
+  std::uint32_t name_id = 0;
+  if (snapshot.name_id == 0 ||
+      !Read(context.core, object + kObjectNameOffset, name_id) ||
+      name_id != snapshot.name_id) {
+    return false;
+  }
+  handle = snapshot.handle;
+  return true;
+}
+
+// GetForwardSpeedKmH belongs to HTVehicleMovementComponent, i.e. wheeled
+// vehicles. Water vehicles have a different movement type and getter, so do
+// not call it on them. Walk the class chain with the two offsets the 2.6
+// profile validated and compare registry handles; this needs no extra service.
+bool VehicleIsWheeled(Context &context, const std::uintptr_t vehicle) noexcept {
+  if (vehicle == 0 || !Ue5ObjectSnapshotReady(context.objects)) {
+    return false;
+  }
+  if (context.vehicle_wheeled_class.id == 0 &&
+      context.elapsed >= context.next_vehicle_wheeled_class_retry) {
+    context.next_vehicle_wheeled_class_retry =
+        context.elapsed + kVehicleGetterRetrySeconds;
+    AnomalyGenerationHandleV1 wheeled_class{};
+    if (context.objects
+                ->find_exact(context.objects->user,
+                             StringView("/Script/HTGame.HTWheeledVehicleBase"),
+                             &wheeled_class)
+                .code == ANOMALY_STATUS_V1_OK &&
+        wheeled_class.id != 0) {
+      context.vehicle_wheeled_class = wheeled_class;
+    }
+  }
+  if (context.vehicle_wheeled_class.id == 0) {
+    return false;
+  }
+  std::uintptr_t cls = 0;
+  if (!Read(context.core, vehicle + kObjectClassOffset, cls) || cls == 0) {
+    return false;
+  }
+  for (std::uint32_t depth = 0; depth < 64 && cls != 0; ++depth) {
+    AnomalyGenerationHandleV1 handle{};
+    if (!ObjectHandleFromPointer(context, cls, handle)) {
+      return false;
+    }
+    if (handle.id == context.vehicle_wheeled_class.id &&
+        handle.generation == context.vehicle_wheeled_class.generation) {
+      return true;
+    }
+    std::uintptr_t parent = 0;
+    if (!Read(context.core, cls + kUstructSuperStructOffset, parent) ||
+        parent == 0) {
+      break;
+    }
+    cls = parent;
+  }
+  return false;
+}
+
+// The old vehicle service returned the signed GetForwardSpeedKmH value. Read
+// the same function from the vehicle's movement component so the camera can
+// use exact speed instead of differentiating the player position. Resolution
+// failures retry on a 2 s backoff; this is an object lookup, not a .text scan,
+// and a transient CONFLICT must not disable exact speed for the session.
+void QueryVehicleSpeed(Context &context, const std::uintptr_t vehicle,
+                       VehiclePresence &presence) noexcept {
+  if (vehicle == 0 || !Ue5ObjectSnapshotReady(context.objects) ||
+      !Ue5ProcessEventInvokeReady(context.events)) {
+    return;
+  }
+  if (context.vehicle_speed_object != vehicle) {
+    context.vehicle_speed_object = vehicle;
+    context.vehicle_movement_handle = {};
+    context.next_vehicle_wheeled_class_retry = 0.0;
+  }
+  if (!context.vehicle_speed_wheeled &&
+      context.elapsed >= context.next_vehicle_wheeled_class_retry) {
+    context.vehicle_speed_wheeled = VehicleIsWheeled(context, vehicle);
+    // A water vehicle stays false, but class/snapshot lookups can fail
+    // transiently. Retry on the same backoff instead of disabling exact speed
+    // for the whole session.
+    context.next_vehicle_wheeled_class_retry =
+        context.elapsed + kVehicleGetterRetrySeconds;
+  }
+  if (!context.vehicle_speed_wheeled) {
+    return;
+  }
+  if (context.vehicle_speed_function.id == 0 &&
+      context.elapsed >= context.next_vehicle_speed_function_retry) {
+    context.next_vehicle_speed_function_retry =
+        context.elapsed + kVehicleGetterRetrySeconds;
+    for (const std::string_view path : kVehicleSpeedFunctionPaths) {
+      AnomalyGenerationHandleV1 function{};
+      if (context.objects
+                  ->find_exact(context.objects->user, StringView(path),
+                               &function)
+                  .code == ANOMALY_STATUS_V1_OK &&
+          function.id != 0) {
+        context.vehicle_speed_function = function;
+        break;
+      }
+    }
+  }
+  if (context.vehicle_speed_function.id == 0) {
+    if (!context.vehicle_speed_diag_logged) {
+      context.vehicle_speed_diag_logged = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+          "nfs2015 chase cam: GetForwardSpeedKmH unavailable; speed stays "
+          "position-derived");
+    }
+    return;
+  }
+  std::uintptr_t movement = 0;
+  if (!Read(context.core, vehicle + kVehicleMovementComponentOffset,
+            movement) ||
+      movement == 0) {
+    return;
+  }
+  if (context.vehicle_movement_handle.id == 0 &&
+      !ObjectHandleFromPointer(context, movement,
+                               context.vehicle_movement_handle)) {
+    return;
+  }
+  alignas(8) std::array<std::uint8_t, 32> output{};
+  const auto status = context.events->invoke(
+      context.events->user, context.vehicle_movement_handle,
+      context.vehicle_speed_function, output.data(), output.size());
+  if (status.code != ANOMALY_STATUS_V1_OK) {
+    // Re-resolve after a backoff; a transient CONFLICT or a stale receiver
+    // handle should not disable exact speed for the rest of the session.
+    context.vehicle_movement_handle = {};
+    context.vehicle_speed_function = {};
+    context.next_vehicle_speed_function_retry =
+        context.elapsed + kVehicleGetterRetrySeconds;
+    return;
+  }
+  float speed = 0.0F;
+  std::memcpy(&speed, output.data(), sizeof(speed));
+  if (!std::isfinite(speed)) {
+    return;
+  }
+  presence.speed_known = true;
+  presence.speed_fresh = true;
+  presence.speed_kmh = static_cast<double>(speed);
+  if (!context.vehicle_speed_active_logged) {
+    context.vehicle_speed_active_logged = true;
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+        "nfs2015 chase cam: exact GetForwardSpeedKmH active");
+  }
+}
+
+std::uint64_t ObjectRegistryGeneration(Context &context) noexcept {
+  if (context.objects == nullptr || context.objects->generation == nullptr) {
+    return 0;
+  }
+  return context.objects->generation(context.objects->user);
+}
+
+// ue5.objects bumps its generation when the registry is rebuilt (world change,
+// streaming, or a slot replacement). Every cached handle belongs to the old
+// registry and must not be handed to invoke() afterwards.
+void ResetVehicleObjectCaches(Context &context) noexcept {
+  context.vehicle_getter_handles = {};
+  context.next_vehicle_getter_retry = {};
+  context.vehicle_query_known = false;
+  context.vehicle_query_present = false;
+  context.vehicle_query_object = 0;
+  context.vehicle_query_speed_known = false;
+  context.vehicle_query_speed_fresh = false;
+  context.vehicle_query_speed_kmh = 0.0;
+  // Keep the 20 Hz poll deadline and the camera's presence identity: a
+  // ue5.objects generation change invalidates handles, not the vehicle or the
+  // camera history. Resetting them here made route B/identity churn while
+  // streaming.
+  context.vehicle_speed_object = 0;
+  context.vehicle_speed_function = {};
+  context.vehicle_movement_handle = {};
+  context.vehicle_wheeled_class = {};
+  context.vehicle_speed_wheeled = false;
+  context.next_vehicle_wheeled_class_retry = 0.0;
+  context.next_vehicle_speed_function_retry = 0.0;
+  context.vehicle_speed_diag_logged = false;
+  context.vehicle_speed_active_logged = false;
+}
+
+bool RefreshVehicleObjectGeneration(Context &context) noexcept {
+  const std::uint64_t generation = ObjectRegistryGeneration(context);
+  if (generation == 0) {
+    // Service temporarily unpublished: do not reset the 20 Hz poll deadline,
+    // or presence would start calling get_object_handles every tick.
+    return false;
+  }
+  if (generation == context.vehicle_objects_generation) {
+    return true;
+  }
+  ResetVehicleObjectCaches(context);
+  context.vehicle_objects_generation = generation;
+  return true;
+}
+
+VehiclePresence QueryVehiclePresence(Context &context) noexcept {
+  VehiclePresence result{};
+  if (!PlayerHandlesReady(context.player) ||
+      !Ue5ObjectsReady(context.objects) ||
+      !Ue5ProcessEventInvokeReady(context.events)) {
+    return result;
+  }
+  if (context.elapsed < context.next_vehicle_query_time) {
+    return {context.vehicle_query_known, context.vehicle_query_present,
+            context.vehicle_query_object, context.vehicle_query_speed_known,
+            false, context.vehicle_query_speed_kmh};
+  }
+  context.next_vehicle_query_time =
+      context.elapsed + kVehicleQueryIntervalSeconds;
+  context.vehicle_query_speed_fresh = false;
+
+  AnomalyGenerationHandleV1 pawn{};
+  AnomalyGenerationHandleV1 controller{};
+  if (context.player->get_object_handles(context.player->user, &pawn,
+                                         &controller).code !=
+          ANOMALY_STATUS_V1_OK ||
+      (pawn.id == 0 && controller.id == 0)) {
+    context.vehicle_query_known = false;
+    context.vehicle_query_present = false;
+    context.vehicle_query_object = 0;
+    context.vehicle_query_speed_known = false;
+    context.vehicle_query_speed_fresh = false;
+    context.vehicle_query_speed_kmh = 0.0;
+    return result;
+  }
+
+  if (!RefreshVehicleObjectGeneration(context)) {
+    return result;
+  }
+
+  const std::array<AnomalyGenerationHandleV1, 3> receivers{
+      {controller, pawn, pawn}};
+  bool executed = false;
+  bool result_uncertain = false;
+  for (std::size_t index = 0; index < receivers.size(); ++index) {
+    if (receivers[index].id == 0) {
+      continue;
+    }
+    if (context.vehicle_getter_handles[index].id == 0) {
+      if (context.elapsed < context.next_vehicle_getter_retry[index]) {
+        continue;
+      }
+      AnomalyGenerationHandleV1 function{};
+      if (context.objects
+                  ->find_exact(context.objects->user,
+                               StringView(kVehicleGetterPaths[index]),
+                               &function)
+                  .code != ANOMALY_STATUS_V1_OK ||
+          function.id == 0) {
+        context.next_vehicle_getter_retry[index] =
+            context.elapsed + kVehicleGetterRetrySeconds;
+        continue;
+      }
+      context.vehicle_getter_handles[index] = function;
+    }
+
+    alignas(8) std::array<std::uint8_t, 8> output{};
+    const auto status = context.events->invoke(
+        context.events->user, receivers[index],
+        context.vehicle_getter_handles[index], output.data(), output.size());
+    if (status.code != ANOMALY_STATUS_V1_OK) {
+      if (status.code == ANOMALY_STATUS_V1_NOT_FOUND) {
+        context.vehicle_getter_handles[index] = {};
+        context.next_vehicle_getter_retry[index] =
+            context.elapsed + kVehicleGetterRetrySeconds;
+      }
+      continue;
+    }
+    executed = true;
+    std::uintptr_t object = 0;
+    std::memcpy(&object, output.data(), sizeof(object));
+    if (object == 0) {
+      continue;
+    }
+    std::uintptr_t readable = 0;
+    if (!Read(context.core, object, readable)) {
+      // The call dispatched but its result is not a live UObject. Do not turn
+      // that into a confident "not driving".
+      result_uncertain = true;
+      continue;
+    }
+    result.known = true;
+    result.present = true;
+    result.object = object;
+    break;
+  }
+  if (!result.present) {
+    result.known = executed && !result_uncertain;
+  }
+  if (result.present) {
+    QueryVehicleSpeed(context, result.object, result);
+  }
+  if (!result.present || !result.known) {
+    result.speed_known = false;
+    result.speed_fresh = false;
+    result.speed_kmh = 0.0;
+  }
+  context.vehicle_query_known = result.known;
+  context.vehicle_query_present = result.present;
+  context.vehicle_query_object = result.object;
+  context.vehicle_query_speed_known = result.speed_known;
+  context.vehicle_query_speed_fresh = result.speed_fresh;
+  context.vehicle_query_speed_kmh = result.speed_kmh;
+  return result;
+}
+
 void UpdateCamera(Context &context, const double dt) noexcept {
   const bool enabled = context.enabled.load(std::memory_order_acquire);
   const std::uint32_t preset = context.preset.load(std::memory_order_acquire);
@@ -5686,13 +6403,43 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   // tick: the host walks the class's whole reflected property list by name on
   // every call, decoding an FName twice per property and reading it through
   // ReadProcessMemory. Nothing about the camera needs that.
-  // Anomaly 2.7.0 removed `anomaly.nte.vehicle`. Until task group 2 restores
-  // signed speed and vehicle presence, the camera uses the existing
-  // position-derivative fallback and never reports an exact speed.
-  constexpr bool vehicle_valid = false;
-  constexpr bool vehicle_speed_valid = false;
-  constexpr bool vehicle_speed_fresh = false;
-  constexpr double vehicle_speed_kmh = 0.0;
+  // Anomaly 2.7.0 removed `anomaly.nte.vehicle`, not the game's vehicle
+  // getters. Poll the same reflected functions the old Host snapshot used:
+  // BP_GetCurrentDriveVehicle / BP_GetCurrentDirvingVehicle /
+  // GetBoardWaterVehicle. Their answer is authoritative even when parked; the
+  // AttachParent sample remains the anchor source and the fallback when the
+  // generic UE5 services are unavailable.
+  RenderXProbe &render_x = context.render_x;
+  const VehiclePresence vehicle_query =
+      enabled && player_valid ? QueryVehiclePresence(context)
+                              : VehiclePresence{};
+  const std::int64_t now_ns = NowNanoseconds();
+  const std::int64_t vehicle_sample_ns =
+      render_x.vehicle_sample_ns.load(std::memory_order_relaxed);
+  const bool attach_sample_fresh =
+      vehicle_sample_ns > 0 && now_ns >= vehicle_sample_ns &&
+      now_ns - vehicle_sample_ns <= kVehiclePresenceFreshNs;
+  const bool attach_present_fresh =
+      attach_sample_fresh &&
+      render_x.vehicle_present.load(std::memory_order_acquire);
+  const bool presence_known = vehicle_query.known || attach_sample_fresh;
+  const bool presence_now =
+      vehicle_query.known ? vehicle_query.present : attach_present_fresh;
+  const std::uintptr_t vehicle_parent =
+      render_x.vehicle_parent.load(std::memory_order_relaxed);
+  if (presence_now) {
+    context.last_vehicle_present_time = context.elapsed;
+  }
+  const bool vehicle_recent =
+      context.last_vehicle_present_time > 0.0 &&
+      context.elapsed >= context.last_vehicle_present_time &&
+      context.elapsed - context.last_vehicle_present_time <=
+          kVehiclePresenceGraceSeconds;
+  const bool vehicle_now = presence_now || vehicle_recent;
+  const std::uintptr_t presence_identity =
+      vehicle_query.known
+          ? vehicle_query.object
+          : (attach_present_fresh ? vehicle_parent : 0);
 
   bool identity_changed = false;
   if (player_valid && player_handle.id != 0 &&
@@ -5701,10 +6448,25 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.player_handle = player_handle;
     identity_changed = true;
   }
-  if (identity_changed) {
-    ResetMotion(context);
-    RequestPresenterReset(context);
+  if (presence_identity != 0 && context.last_vehicle_parent != 0 &&
+      context.last_vehicle_parent != presence_identity) {
+    identity_changed = true;
   }
+  // Entering at a standstill must discard walking velocity, but a presence
+  // sample that appears after the speed fallback has already taken over must
+  // not reset the model mid-drive.
+  const bool vehicle_entered = presence_now &&
+                               !context.vehicle_present_last &&
+                               !context.last_view_active;
+  if (identity_changed || vehicle_entered) {
+    ResetMotion(context);
+  }
+  if (presence_identity != 0) {
+    context.last_vehicle_parent = presence_identity;
+  } else if (!vehicle_now) {
+    context.last_vehicle_parent = 0;
+  }
+  context.vehicle_present_last = vehicle_now;
 
   if (!enabled || !player_valid) {
     PublishInactive(context);
@@ -5712,39 +6474,80 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     std::scoped_lock lock(context.display_mutex);
     context.display.enabled = enabled;
     context.display.driving = false;
+    context.display.reversing = false;
     context.display.player_valid = player_valid;
+    context.display.speed_source = kSpeedSourceUnavailable;
+    context.display.speed_sign_known = false;
     return;
   }
 
+  // Keep the motion history alive while the camera is inactive: the fallback
+  // speed gate is built from consecutive positions, and resetting every idle
+  // tick would make it impossible for that speed to ever rise above zero.
+  const bool had_motion = context.have_last_position;
+  const std::uint64_t previous_sequence = context.last_player_sequence;
   UpdateMotion(context, origin_cm, player_sequence);
+  const bool player_sample_fresh =
+      !had_motion || player_sequence != previous_sequence;
 
-  const double velocity_length =
+  double velocity_length =
       std::hypot(context.velocity_cmps[0], context.velocity_cmps[1]);
   const double velocity_mps = velocity_length / 100.0;
   const bool speed_plausible =
       velocity_mps >= kMinimumVehicleSpeedMps && velocity_mps <
           kMaximumPlausibleSpeedCmps / 100.0;
-  // Without the vehicle service the speed gate is the only presence signal.
-  // Task group 2 replaces it with AttachParent-based vehicle presence so the
-  // camera can take over while the car is stationary.
-  const bool driving = speed_plausible;
+  // Speed is a last resort for hosts where the getter and the AttachParent
+  // sample are both unavailable. It must never turn sprinting on foot into a
+  // car when a presence answer exists.
+  const bool driving = vehicle_now || (speed_plausible && !presence_known);
   if (!driving) {
+    const bool was_active = context.last_view_active;
     PublishInactive(context);
-    ResetMotion(context);
+    if (was_active) {
+      ResetMotion(context);
+    }
+    context.vehicle_present_last = false;
+    context.last_vehicle_present_time = 0.0;
+    context.last_vehicle_parent = 0;
     std::scoped_lock lock(context.display_mutex);
     context.display.enabled = enabled;
     context.display.driving = false;
+    context.display.reversing = false;
     context.display.player_valid = true;
+    context.display.speed_source = kSpeedSourceUnavailable;
+    context.display.speed_sign_known = false;
     context.display.speed_kmh = 0.0;
     return;
   }
 
+  // The exact forward speed is the 2.6 signal: use it for magnitude and
+  // reverse, and keep the position direction only for the lateral component
+  // (slip/roll). That is what the old service did when HAS_SPEED was set.
+  const bool exact_speed = vehicle_query.present && vehicle_query.speed_known;
+  const bool exact_speed_fresh = exact_speed && vehicle_query.speed_fresh;
+  if (exact_speed) {
+    context.speed_sign_known = true;
+    const double target_cmps =
+        std::fabs(vehicle_query.speed_kmh) * (100000.0 / 3600.0);
+    if (velocity_length > 50.0) {
+      const double scale = target_cmps / velocity_length;
+      if (scale > 0.5 && scale < 2.0) {
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          context.velocity_cmps[axis] *= scale;
+        }
+        velocity_length =
+            std::hypot(context.velocity_cmps[0], context.velocity_cmps[1]);
+      }
+    }
+  }
   const double velocity_yaw =
       velocity_length > 1.0
           ? std::atan2(context.velocity_cmps[1], context.velocity_cmps[0])
           : (context.have_last_yaw ? context.last_car_yaw : 0.0);
-  double car_yaw = SelectCarYaw(context, velocity_yaw, velocity_length / 100.0,
-                                velocity_length > 50.0);
+  double car_yaw =
+      SelectCarYaw(context, velocity_yaw, velocity_length / 100.0,
+                   velocity_length > 50.0, exact_speed,
+                   vehicle_query.speed_kmh);
   if (context.have_last_yaw && dt > 1e-5) {
     const double maximum_step = kMaximumBodyYawRate * dt;
     car_yaw =
@@ -5776,8 +6579,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
         nfs2015_chase::kPi * 0.5);
   }
   // Experiment (T3.4): the slip angle from the position derivative. The
-  // exact-speed variant went away with `anomaly.nte.vehicle`; task group 2
-  // will bring back a derived signed speed for the reverse gate.
+  // signed speed above comes from the same derivative, so the reverse gate and
+  // the model see one consistent sign.
   const double slip_position_degrees =
       slip_angle * kRadiansToDegrees;
   context.diag.slip_from_position_degrees.store(
@@ -5818,8 +6621,22 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     }
   }
 
-  UpdateBrakeInput(context, vehicle_valid, vehicle_speed_valid,
-                   vehicle_speed_fresh, vehicle_speed_kmh, dt);
+  if (exact_speed != context.last_speed_exact) {
+    // Do not differentiate an exact-speed sample against a position-derived
+    // one (or the reverse); that step would read as a phantom brake.
+    context.last_vehicle_speed_mps = -1.0;
+    context.last_vehicle_speed_time = context.elapsed;
+    context.brake_deceleration_mps2 = 0.0;
+    context.last_speed_exact = exact_speed;
+  }
+  // Exact speed is fresh when the 20 Hz vehicle poll dispatched. If it is not
+  // available (water vehicle or a failed getter), keep the position-derived
+  // fallback, which is fresh when the player sequence advanced.
+  UpdateBrakeInput(context, true,
+                   exact_speed ? exact_speed_fresh : player_sample_fresh,
+                   !exact_speed,
+                   exact_speed ? vehicle_query.speed_kmh : speed_mps * 3.6,
+                   dt);
 
   nfs2015_chase::CarState car;
   car.position = {origin_cm[0] / 100.0, origin_cm[1] / 100.0,
@@ -5831,10 +6648,23 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   car.pitch = UpdateRenderPitch(context);
   car.velocity = world_velocity;
   car.yaw_rate = context.yaw_rate;
-  const nfs2015_chase::Vec3 acceleration{
+  nfs2015_chase::Vec3 acceleration{
       context.acceleration_cmps2[0] / 100.0,
       context.acceleration_cmps2[1] / 100.0,
       context.acceleration_cmps2[2] / 100.0};
+  if (exact_speed) {
+    // Restore the 2.6 split: exact longitudinal acceleration, position-derived
+    // lateral acceleration. The longitudinal derivative of position is the
+    // noisy part that pumped the dolly/pitch filters.
+    const nfs2015_chase::Vec3 forward =
+        nfs2015_chase::ForwardFromYaw(car_yaw);
+    const nfs2015_chase::Vec3 right =
+        nfs2015_chase::RightFromYaw(car_yaw);
+    const double lateral = nfs2015_chase::Dot(acceleration, right);
+    acceleration = nfs2015_chase::Add(
+        nfs2015_chase::Mul(forward, context.vehicle_acceleration_mps2),
+        nfs2015_chase::Mul(right, lateral));
+  }
   car.acceleration = acceleration;
   car.speed = forward_speed;
   car.slip_angle = slip_angle;
@@ -5886,16 +6716,17 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.last_fov_enabled = fov_enabled;
     context.view_active.store(true, std::memory_order_release);
   }
-  // The tick no longer advances the model, so `delta_seconds` is unused here;
-  // keep taking it because the ABI defines the signature.
-  (void)dt;
-
   {
     std::scoped_lock lock(context.display_mutex);
     context.display.enabled = enabled;
     context.display.driving = true;
+    context.display.reversing = context.reversing;
     context.display.player_valid = true;
-    context.display.speed_kmh = speed_mps * 3.6;
+    context.display.speed_source =
+        exact_speed ? kSpeedSourceExact : kSpeedSourceDerived;
+    context.display.speed_sign_known = context.speed_sign_known;
+    context.display.speed_kmh =
+        exact_speed ? std::fabs(vehicle_query.speed_kmh) : speed_mps * 3.6;
     context.display.slip_degrees = slip_angle * kRadiansToDegrees;
     context.display.drift =
         context.presenter_drift.load(std::memory_order_relaxed);
@@ -6606,6 +7437,13 @@ void UpdateDisplay(Context &context) noexcept {
         render_x.anchor_read_failures.load(std::memory_order_relaxed);
     context.display.vehicle_anchor_valid =
         render_x.vehicle_anchor_valid.load(std::memory_order_relaxed);
+    context.display.vehicle_present =
+        context.vehicle_query_known
+            ? context.vehicle_query_present
+            : render_x.vehicle_present.load(std::memory_order_acquire);
+    context.display.vehicle_presence_known =
+        context.vehicle_query_known ||
+        render_x.vehicle_present.load(std::memory_order_acquire);
     context.display.vehicle_proxy_used =
         render_x.vehicle_proxy_used.load(std::memory_order_relaxed);
     context.display.vehicle_render_used =
@@ -6641,6 +7479,8 @@ void UpdateDisplay(Context &context) noexcept {
         render_x.route_b_applied.load(std::memory_order_relaxed);
     context.display.route_b_fallbacks =
         render_x.route_b_fallbacks.load(std::memory_order_relaxed);
+    context.display.route_b_witness_failures =
+        render_x.route_b_witness_failures.load(std::memory_order_relaxed);
     context.display.route_b_early_applied =
         render_x.route_b_early_applied.load(std::memory_order_relaxed);
     context.display.route_b_early_fallbacks =
@@ -6756,11 +7596,20 @@ void UpdateDisplay(Context &context) noexcept {
 }
 
 void RetryHookIfNeeded(Context &context) noexcept {
-  if (context.hook_ready.load(std::memory_order_acquire) &&
-      context.view_hook_id.load(std::memory_order_acquire) != 0 &&
-      context.transform_hook_id.load(std::memory_order_acquire) != 0 &&
-      context.prepare_view_state_hook_id.load(std::memory_order_acquire) !=
-          0) {
+  const bool view_point_ready =
+      context.view_hook_id.load(std::memory_order_acquire) != 0 ||
+      context.view_point_pattern_unavailable;
+  const bool transform_ready =
+      context.transform_hook_id.load(std::memory_order_acquire) != 0 ||
+      context.transform_pattern_unavailable;
+  const bool view_uniform_ready =
+      context.view_uniform_hook_id.load(std::memory_order_acquire) != 0 ||
+      context.view_uniform_pattern_unavailable;
+  const bool early_route_b_ready =
+      context.prepare_view_state_hook_id.load(std::memory_order_acquire) != 0 ||
+      context.early_route_b_unavailable;
+  if (view_point_ready && transform_ready && view_uniform_ready &&
+      early_route_b_ready) {
     return;
   }
   if (context.hook_retry_requested.exchange(false, std::memory_order_acq_rel)) {
@@ -6844,16 +7693,20 @@ void LogRouteBDiagnostics(Context &context) noexcept {
   if (applied + early_applied < 10) {
     return;
   }
-  char message[200]{};
+  char message[256]{};
   std::snprintf(message, sizeof(message),
                 "nfs2015 chase cam: route B early=%llu late=%llu "
-                "fallbacks=%llu early_age=%.2f ms late_age=%.2f ms",
+                "fallbacks=%llu witness=%llu early_age=%.2f ms "
+                "late_age=%.2f ms",
                 static_cast<unsigned long long>(early_applied),
                 static_cast<unsigned long long>(applied),
                 static_cast<unsigned long long>(
                     probe.route_b_early_fallbacks.load(
                         std::memory_order_relaxed) +
                     probe.route_b_fallbacks.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    probe.route_b_witness_failures.load(
                         std::memory_order_relaxed)),
                 static_cast<double>(probe.route_b_early_last_age_us.load(
                     std::memory_order_relaxed)) /
@@ -6905,6 +7758,15 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
   context->player = Query<AnomalyNtePlayerServiceV1>(
       host, ANOMALY_NTE_PLAYER_SERVICE_V1_ID,
       ANOMALY_NTE_PLAYER_SERVICE_V1_VERSION);
+  // 2.6's anomaly.nte.vehicle service is gone. The getters it called are still
+  // ordinary reflected UFunctions, so resolve them through the generic UE5
+  // services instead of guessing from motion.
+  context->objects = Query<AnomalyUe5ObjectsServiceV1>(
+      host, ANOMALY_UE5_OBJECTS_SERVICE_V1_ID,
+      ANOMALY_UE5_OBJECTS_SERVICE_V1_VERSION);
+  context->events = Query<AnomalyUe5ProcessEventServiceV1>(
+      host, ANOMALY_UE5_PROCESS_EVENT_SERVICE_V1_ID,
+      ANOMALY_UE5_PROCESS_EVENT_SERVICE_V1_VERSION);
   // Optional engine access for the probe. Declared optional in the manifest, so
   // a host without `ue5.ahud` simply leaves this null and the probe reports
   // "off" instead of failing the load.
@@ -7003,6 +7865,27 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
     context->hook_target.store(view_point_target, std::memory_order_release);
   }
   ResetMotion(*context);
+  context->vehicle_present_last = false;
+  context->last_vehicle_present_time = 0.0;
+  context->vehicle_getter_handles = {};
+  context->next_vehicle_getter_retry = {};
+  context->next_vehicle_query_time = 0.0;
+  context->vehicle_query_known = false;
+  context->vehicle_query_present = false;
+  context->vehicle_query_object = 0;
+  context->vehicle_query_speed_known = false;
+  context->vehicle_query_speed_fresh = false;
+  context->vehicle_query_speed_kmh = 0.0;
+  context->vehicle_objects_generation = 0;
+  context->vehicle_speed_object = 0;
+  context->vehicle_speed_function = {};
+  context->vehicle_movement_handle = {};
+  context->vehicle_wheeled_class = {};
+  context->vehicle_speed_wheeled = false;
+  context->next_vehicle_wheeled_class_retry = 0.0;
+  context->next_vehicle_speed_function_retry = 0.0;
+  context->vehicle_speed_diag_logged = false;
+  context->vehicle_speed_active_logged = false;
   context->observed_valid.store(false, std::memory_order_release);
   PublishInactive(*context);
   // T0: a new session starts from a clean counter baseline so the recorded
@@ -7091,6 +7974,26 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   context->display.hook_ready = false;
   context->display.active = false;
   context->display.driving = false;
+  context->display.reversing = false;
+  context->display.speed_source = kSpeedSourceUnavailable;
+  context->display.speed_sign_known = false;
+  context->vehicle_query_known = false;
+  context->vehicle_query_present = false;
+  context->vehicle_query_object = 0;
+  context->vehicle_query_speed_known = false;
+  context->vehicle_query_speed_fresh = false;
+  context->vehicle_query_speed_kmh = 0.0;
+  context->vehicle_objects_generation = 0;
+  context->vehicle_speed_object = 0;
+  context->vehicle_speed_function = {};
+  context->vehicle_movement_handle = {};
+  context->vehicle_wheeled_class = {};
+  context->vehicle_speed_wheeled = false;
+  context->next_vehicle_wheeled_class_retry = 0.0;
+  context->next_vehicle_speed_function_retry = 0.0;
+  context->vehicle_speed_diag_logged = false;
+  context->vehicle_speed_active_logged = false;
+  context->next_vehicle_query_time = 0.0;
   return anomaly::sdk::Ok();
 }
 
@@ -7326,6 +8229,28 @@ enum class JudderChannel {
   return worst;
 }
 
+const char *SpeedSourceKey(const std::uint8_t source) noexcept {
+  switch (source) {
+    case kSpeedSourceDerived:
+      return "speed.source.derived";
+    case kSpeedSourceExact:
+      return "speed.source.exact";
+    default:
+      return "speed.source.unavailable";
+  }
+}
+
+const char *SpeedSourceFallback(const std::uint8_t source) noexcept {
+  switch (source) {
+    case kSpeedSourceDerived:
+      return "derived";
+    case kSpeedSourceExact:
+      return "exact";
+    default:
+      return "unavailable";
+  }
+}
+
 // T0: the counters behind PLAN-camera-timing.md. Collapsed by default so they
 // do not compete with the settings, but they are the only way to tell a silent
 // degradation (source flip, torn read, dropped tick) from a tuning issue.
@@ -7346,6 +8271,19 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     DrawStatusLine(ui, localizer, key,
                    fallbacks[static_cast<int>(channel)],
                    channel == JudderChannel::kNone ? "-" : "<= twitching");
+  }
+  DrawStatusLine(
+      ui, localizer, "diag.speed_source", "Speed source",
+      localizer.Text(SpeedSourceKey(display.speed_source),
+                     SpeedSourceFallback(display.speed_source)));
+  if (display.driving) {
+    DrawStatusLine(ui, localizer, "diag.reverse", "Reverse",
+                   display.reversing ? localizer.Text("status.yes", "yes")
+                                     : localizer.Text("status.no", "no"));
+    DrawStatusLine(ui, localizer, "diag.speed_sign", "Speed sign",
+                   display.speed_sign_known
+                       ? localizer.Text("status.known", "known")
+                       : localizer.Text("status.unknown", "unknown"));
   }
   // Judder instrument and the two defect amplitudes, then the probe. Read-only
   // reconnaissance, so it comes before everything else: the diagnostics body
@@ -7488,6 +8426,13 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     }
     DrawStatusLine(ui, localizer, "diag.vehicle_anchor", "Car anchor",
                    vehicle_anchor_value);
+    DrawStatusLine(
+        ui, localizer, "diag.vehicle_present", "Vehicle present",
+        display.vehicle_present
+            ? localizer.Text("status.yes", "yes")
+            : (display.vehicle_presence_known
+                   ? localizer.Text("status.no", "no")
+                   : localizer.Text("status.unknown", "unknown")));
     std::snprintf(line, sizeof(line), "%llu / %llu",
                   static_cast<unsigned long long>(
                       display.vehicle_fallbacks),
@@ -7520,8 +8465,8 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     DrawStatusLine(ui, localizer, "diag.view_uniform_age",
                    "View->transform age", line);
     std::snprintf(line, sizeof(line),
-                  "%llu(%.2f) / %llu / %llu  prep %llu mm %llu nv %llu "
-                  "pf %llu fs %llu dir %llu tr %llu hist %llu",
+                  "%llu(%.2f) / %llu / %llu w %llu  prep %llu mm %llu nv "
+                  "%llu pf %llu fs %llu dir %llu tr %llu hist %llu",
                   static_cast<unsigned long long>(
                       display.route_b_early_applied),
                   display.route_b_early_last_age_ms,
@@ -7530,6 +8475,8 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                   static_cast<unsigned long long>(
                       display.route_b_fallbacks +
                       display.route_b_early_fallbacks),
+                  static_cast<unsigned long long>(
+                      display.route_b_witness_failures),
                   static_cast<unsigned long long>(display.prepare_calls),
                   static_cast<unsigned long long>(
                       display.prepare_thread_mismatch),
@@ -7543,7 +8490,8 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                       display.route_b_render_applied),
                   static_cast<unsigned long long>(
                       display.route_b_history_updated));
-    DrawStatusLine(ui, localizer, "diag.route_b", "Route B early/late/fallback",
+    DrawStatusLine(ui, localizer, "diag.route_b",
+                   "Route B early/late/fallback/witness",
                    line);
   }
 
@@ -8079,6 +9027,16 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                       "%.2f", display.speed_distance_scale);
         DrawStatusLine(ui, context->localizer, "status.speed_distance",
                        "Speed distance scale", speed_distance_line);
+        DrawStatusLine(
+            ui, context->localizer, "status.speed_source", "Speed source",
+            context->localizer.Text(
+                SpeedSourceKey(display.speed_source),
+                SpeedSourceFallback(display.speed_source)));
+        if (display.reversing) {
+          DrawStatusLine(ui, context->localizer, "status.reversing",
+                         "Direction",
+                         context->localizer.Text("status.reverse", "reverse"));
+        }
         ui->text(ui->user, StringView(line));
       }
       if (!display.player_valid) {

@@ -28,16 +28,47 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 ## Anomaly 2.7.0 兼容性
 
 - **仅支持 Anomaly 2.7.0+**。1.1.1 及更早版本使用旧插件 ID，在 2.7.0 下无法加载。
-- 2.7.0 删除了 `anomaly.nte.vehicle` 服务和 `nte-vehicle` capability；本版本已同步删除，
-  车速暂时由 `anomaly.nte.player` 的玩家位置微分估计。
-- 2.0.0 完成了 manifest、capability 和 SDK 编译适配。profile hash 门禁与基于
-  `AttachParent` 的载具存在性检测属于 `PLAN-anomaly-2.7.md` 任务组 2：在那一组完成前，
-  2.7.0 上的相机可能仍停留在游戏原相机，或只在车速超过门限后接管。
-- 旧 ID 的启用状态、设置目录和窗口位置不会自动迁移；升级步骤见下面的
-  [从 1.1.1 升级](#从-111-升级)。完整变更列表见
+- 2.7.0 删除了 `anomaly.nte.vehicle` 服务和 `nte-vehicle` capability；本版本已同步删除。
+  旧版服务里的带符号车速通过 `HTVehicleMovementComponent:GetForwardSpeedKmH` 反射调用恢复：
+  轮式载具的 `GetForwardSpeedKmH` 可用时，倒车、刹车俯仰和纵向加速度都使用这个精确值；
+  不可用时才退回 `anomaly.nte.player` 的位置微分，并使用更大的死区和更强的平滑抑制噪声。
+  函数/movement component 缓存按 `ue5.objects.generation` 失效；先用
+  `HTWheeledVehicleBase` 类链排除水上载具，解析失败按 2 秒退避重试。
+- 载具存在性恢复为旧版 `anomaly.nte.vehicle` 内部使用的同一组反射 getter：
+  `BP_GetCurrentDriveVehicle` / `BP_GetCurrentDirvingVehicle` /
+  `GetBoardWaterVehicle`。2.7.0 只是删掉了服务，游戏函数仍在；插件通过
+  `anomaly.ue5.objects.find_exact` + `anomaly.ue5.process-event.invoke` 以 20 Hz
+  轮询它们。getter 成功返回空表示确实不在载具上，此时不会再被冲刺速度误触发。
+  玩家胶囊 `AttachParent` 仍用于车辆锚点，并在 getter 服务不可用时作为存在性后备。
+  诊断面板会显示“载具存在”“速度来源”“速度符号”和“倒车”。
+- profile 门禁接受两个已验证的 2.7.0 hash：安装包 CRLF 版本
+  `c6d97f...1f52` 和仓库 LF 版本 `c37a7b...db2a`。未知 hash 仍然 fail-closed；
+  如果面板显示 `hash mismatch`，请把日志里的 `got ...` 发到 issue。
+- route B 的运行时检查是 **advisory witness**：全屏 view 才会应用；location、
+  rotation、投影矩阵或 FOV 异常只累计到 route B 行的 `w N`，不会跳过当前帧。
+  route B 必须在每个符合条件的渲染帧确定性应用，否则会重新引入车辆抖动。
+- 旧 ID 的启用状态、设置目录和窗口位置不会自动迁移；可以用仓库里的
+  `migrate-2.7.ps1` 预览/复制，或按下面的手动步骤操作。完整变更列表见
   [RELEASE-NOTES-2.0.0.md](RELEASE-NOTES-2.0.0.md)。
 
 ### 从 1.1.1 升级
+
+推荐使用迁移脚本（默认只预览，不写文件；如果 Runtime 在 `Program Files` 下，`-Apply`
+需要以管理员身份运行 PowerShell）：
+
+```powershell
+# 先预览
+powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
+  -AnomalyRoot "C:\Program Files\Neverness To Everness\Anomaly\Anomaly-2.7.0-runtime\Anomaly"
+
+# 确认后写入；-Force 才会覆盖新目录里已存在的同名文件
+powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
+  -AnomalyRoot "C:\Program Files\Neverness To Everness\Anomaly\Anomaly-2.7.0-runtime\Anomaly" `
+  -Apply
+```
+
+脚本会复制设置、合并 `plugin-enablement.json`，并迁移 `ui-window-state.json` 里的
+窗口记录和收藏；不会删除旧设置或旧安装目录。也可以手动迁移：
 
 1. 在 **Plugins > 已安装** 中停用旧版，退出游戏。
 2. 删除或改名旧安装目录（在线安装为 `Anomaly/plugins/io.github.robineatcorn.nfs2015-chase-cam`，
@@ -55,7 +86,10 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 也不包含宿主内部头文件或对 Runtime 的修改。插件通过公开的纯 C ABI v1 服务工作：
 
 - `anomaly.interop.signature` + `anomaly.interop.hook` 解析并 hook 相机/渲染函数；
-- `anomaly.nte.player` 读取玩家/车辆的位置、朝向和相机快照；
+- `anomaly.nte.player` 读取玩家位置/朝向、游戏相机快照和 Pawn/Controller 对象句柄；
+  车速优先由 `GetForwardSpeedKmH` 精确读取，失败时才由位置微分推导；
+- `anomaly.ue5.objects` + `anomaly.ue5.process-event`（可选）调用旧版载具 getter，
+  判断当前是否在载具上，并调用 `GetForwardSpeedKmH` 读取带符号车速；
 - `anomaly.core` 的 `read_memory` 读取 `ue5.GWorld` 链和车辆/相机对象；
 - `anomaly.ue5.build`（可选）用 `profile_hash` 给 route B / FOV 的硬编码偏移做版本门禁；
 - `anomaly.config` + `anomaly.json` 持久化并解析设置（不依赖第三方 JSON 库）；
@@ -84,7 +118,9 @@ rotation  = NFS 模型的 pitch / yaw / roll
 模型 pose 暂时不可用时回退到固定的 route B 机架；再不可用时保留游戏原相机。这样相机和车体
 共用渲染帧，不再依赖 game-tick 位置去追渲染帧中的车。
 
-不扫描 GObjects，不调用 `ProcessEvent`；`ue5.GWorld` 只在 profile pattern 命中后解析一次全局槽位。
+不扫描 GObjects；`ue5.GWorld` 只在 profile pattern 命中后解析一次全局槽位。载具 getter 是
+通过 Host 的 `ue5.objects.find_exact` 和 `ue5.process-event.invoke` 调用的，不自行定位
+`ProcessEvent` 入口，也不每帧调用（20 Hz 轮询并缓存）。
 
 ## 目录
 
@@ -94,6 +130,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
+├── migrate-2.7.ps1       旧 ID 设置/启用状态/窗口位置迁移
 ├── RELEASE-NOTES-2.0.0.md 2.7.0 适配与迁移说明
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
 ├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
@@ -271,10 +308,11 @@ hook lease。
 主窗口常用状态：
 
 - `Camera` / `View-point hook`：相机是否启用、基础视点 hook 是否成功；
-- `Anchor` + `版本门禁`：当前锚点来源、`ok / hash / pattern / service / offset / off / read`
-  门禁结果，以及回退次数；
+- `Anchor` + `版本门禁`：当前锚点来源、
+  `ok / hash / pattern / service / offset / off / read` 门禁结果，以及回退次数；
 - `水平 FOV`、`镜头-车辆距离（输出 / 原始）`、`速度`、`侧滑角`、`漂移量`；
 - `渲染钩`、`视图钩 R/G/线程`、`路线B 应用/回退`：route B 各阶段的调用和回退计数；
+  route B 行里的 `w N` 是 advisory witness 计数，不表示该帧没有应用；
 - `渲染龄` / `视图←变换龄`：route B 使用的车辆变换和视图之间差多少毫秒。
 
 诊断面板里的 `渲染 vs 代理`、`X 相位差`、`相机相对车速度/转向`、`tick 间隔`、`视野` 和
@@ -293,11 +331,12 @@ hook lease。
 插件的 route B 会直接写 UE 的 `FViewInfo` / `FSceneRenderer` 字段，因此不能对任意游戏版本
 无条件启用。当前策略是 **fail-closed**：
 
-- 启动时读取 `anomaly.ue5.build` 的 `profile_hash`，只有与验证过的 profile 完全一致才打开
-  `version_gate`；
+- 启动时读取 `anomaly.ue5.build` 的 `profile_hash`，只有命中 `kAcceptedProfileHashes`
+  里的已验证 hash 才打开 `version_gate`；
 - 2.6+ 且 build service 存在时，门禁关闭就不创建 route B / `FViewInfo` FOV / 视点 hook，
   也不写任何游戏内存；面板显示 `版本门禁`，相机保持游戏原样；
-- 所有需要的函数入口仍通过运行时 pattern 解析；pattern 不命中则不安装；
+- 所有需要的函数入口仍通过运行时 pattern 解析；pattern 不命中则不安装，并锁存失败，
+  避免每 2 秒重新扫描 `.text` 造成周期性卡顿；
 - 渲染路径再次检查 render thread、全屏 view、view state、generation/新鲜度、有限值和
   proxy 所有权；
 - hook 回调使用宿主 generation lease；热重载时先撤 callback 再释放 hook。
@@ -308,7 +347,8 @@ hook lease。
 
 这不是“任何未知版本都绝不会崩”的数学保证：如果游戏/Anomaly 更新后 profile hash 没有变化、
 但字段实际移动，或者 UE 对象在渲染线程被释放，原始内存访问仍可能触发 Windows access violation；
-C++ `try/catch` 捕获不到这类异常。遇到新版本请先更新 profile hash 与偏移表，再发布新插件。
+C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加入 allowlist、复验偏移表，
+再发布新插件。
 
 ## 冲突与限制
 
@@ -347,7 +387,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先更新 profile h
 
 - 把速度、车头朝向、yaw rate 从 Game-tick 差分迁移到渲染帧差分（当前 X/route B 只解决位置）；
 - 刹车重减速的点头 pitch 进行单独的模型/信号修正；
-- 如果游戏改变 `FViewInfo` / `FSceneRenderer` 布局，更新 `kExpectedProfileHash`、偏移表和
+- 如果游戏改变 `FViewInfo` / `FSceneRenderer` 布局，更新 `kAcceptedProfileHashes`、偏移表和
   pattern，而不是放宽门禁；
 - 如 Anomaly 改变 hook 服务 ABI，升级时重新验证 `anomaly.interop.hook` 与 lease 行为。
 

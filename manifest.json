@@ -78,6 +78,16 @@
       "id": "anomaly.ue5.build",
       "minVersion": 1,
       "optional": true
+    },
+    {
+      "id": "anomaly.ue5.objects",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.ue5.process-event",
+      "minVersion": 1,
+      "optional": true
     }
   ],
   "capabilities": [
@@ -93,6 +103,8 @@
     "nte-session-snapshot",
     "nte-player-snapshot",
     "ue5-ahud",
-    "ue5-build"
+    "ue5-build",
+    "ue5-objects",
+    "game-events"
   ]
 }

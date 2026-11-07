@@ -121,10 +121,24 @@
     "diag.transform_hook": "渲染钩",
     "diag.view_uniform_hook": "视图钩 R/G/线程",
     "diag.view_uniform_age": "视图←变换龄 均/峰",
-    "diag.route_b": "路线B 应用/回退",
+    "diag.route_b": "路线B 应用/回退/校验",
     "diag.render_proxy_phase": "渲染 vs 代理 均/峰",
     "diag.render_proxy_lead": "渲染 沿行进",
     "diag.render_age": "渲染龄 均/峰",
-    "anchor.vehicle.render": "渲染"
+    "anchor.vehicle.render": "渲染",
+    "status.speed_source": "速度来源",
+    "status.reversing": "行驶方向",
+    "status.reverse": "倒车",
+    "status.yes": "是",
+    "status.no": "否",
+    "speed.source.unavailable": "不可用",
+    "speed.source.derived": "位置微分",
+    "speed.source.exact": "精确",
+    "diag.speed_source": "速度来源",
+    "diag.reverse": "倒车",
+    "diag.vehicle_present": "载具存在",
+    "status.known": "已知",
+    "status.unknown": "未知",
+    "diag.speed_sign": "速度符号"
   }
 }

@@ -2,7 +2,7 @@
 
 目标仓库：`Anomaly-nfs19-cam`（NFS 2015 Chase Cam）
 目标宿主：Anomaly `v2.7.0`
-当前插件版本：`1.1.1`
+当前插件版本：`2.0.0`（任务组 1、2、3 代码已完成；实机验证仍待执行）
 编写日期：2026-11-07
 
 ---
@@ -17,7 +17,7 @@ Anomaly 2.7.0 不是一次普通的小版本更新，它同时触发了 **加载
 4. **活动 Profile 的 hash 变了**：插件的 fail-closed 版本门禁会关闭 route B、FOV 和视点 hook，即使前三条都修好，相机也不会接管。
 5. **ID 变更还带来用户数据迁移问题**：旧启用状态、设置目录、窗口位置和旧安装目录都不会自动跟到新 ID。
 
-最小可发布路径是 **任务组 1 + 任务组 2 + 任务组 4**：先让插件在 2.7.0 加载、编译，再用“位置微分 + 载具存在性”恢复相机，最后做回归和发布。精确车速恢复（任务组 3）是可选增强，只有在实机验收认为降级速度不可接受时才投入。
+最小可发布路径是 **任务组 1 + 任务组 2 + 任务组 4**：先让插件在 2.7.0 加载、编译，再用“位置微分 + 载具存在性”恢复相机，最后做回归和发布。任务组 3 的精确车速与 route B advisory witness 已经实现；位置微分保留为缺少 `ue5.objects` / `ue5.process-event` 或水上载具时的回退路径。
 
 ---
 
@@ -256,6 +256,13 @@ ABI snapshot 的差异只有“删除 vehicle 表”和“增加 mods/assets 表
 
 #### 2.3 用 `AttachParent` 做载具存在性检测
 
+> 实施备注（2026-11-08）：2.7.0 删除的是 `anomaly.nte.vehicle` 服务，不是游戏函数。
+> 现已通过 `ue5.objects.find_exact` + `ue5.process-event.invoke` 恢复旧服务内部的
+> `BP_GetCurrentDriveVehicle` / `BP_GetCurrentDirvingVehicle` /
+> `GetBoardWaterVehicle` getter，并以 20 Hz 轮询。getter 给出明确结果时不再使用
+> `speed_plausible`；`AttachParent` 继续提供车辆锚点，并在 getter 不可用时作为后备。
+> 因此下面的 `driving = ... || speed_plausible` 只适用于“存在性未知”的降级路径。
+
 旧 `vehicle_service` 还承担“是否在驾驶”的判断。2.7.0 下可以用已有的挂点检测：
 
 - `ReadVehicleParentAnchor()` 已经读取玩家 `SceneComponent` 的 `AttachParent`；
@@ -263,7 +270,8 @@ ABI snapshot 的差异只有“删除 vehicle 表”和“增加 mods/assets 表
 - 把“parent 存在且通过距离/朝向校验”发布成 `vehicle_present` 原子量；
 - `driving` 判定改为：
   ```text
-  driving = vehicle_present || speed_plausible || recent_vehicle_grace
+  driving = vehicle_present || recent_vehicle_grace
+            || (presence_unknown && speed_plausible)
   ```
 - 用 `vehicle_parent` 指针作为载具身份：
   - 指针变化时触发 `ResetMotion` / `RequestPresenterReset`，替代旧的 `vehicle_handle`；
@@ -345,38 +353,43 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
 
 **触发条件**：任务组 2 的实机验收中，FOV、刹车 pitch、倒车或低速接管仍然不可接受。否则不应投入。
 
+**实现状态（2026-11-08）**：任务组 3 的代码已完成。3.1 使用公开 ABI 的 `ue5.objects` + `ue5.process-event`，3.3 增加 route B advisory witness。实机验收（HUD 速度一致性、倒车、重刹、换车、tick 耗时）仍需在 Windows 游戏内执行；见任务组 4。
+
 #### 3.1 方案 A：用公开 ABI 重做最小载具查询
 
-新增服务/capability：
+实际新增服务/capability：
 
 - `anomaly.ue5.objects` + `ue5-objects`
 - `anomaly.ue5.process-event` + `game-events`
-- `anomaly.ue5.framework` + `game-events`（线程校验）
-- 可选 `anomaly.ue5.names` + `ue5-names`（按类名/函数名验证）
+
+未加 `anomaly.ue5.framework`：所有调用都发生在 Game tick，宿主 `invoke` 本身会拒绝
+非 Game 线程；也未加 `anomaly.ue5.names`，函数和类通过 `find_exact` 路径解析。
 
 数据流：
 
 1. Game tick 调 `anomaly.nte.player::get_object_handles` 拿 pawn / controller 的 `ue5.objects` handle。
 2. 用 `ue5.objects::find_exact` 找 UFunction（路径要用实机 `find_exact` 验证；不同 outer / 水上载具可能需要回退到反射扫描）：
-   - `/Script/HTGame.HTPlayerController.BP_GetCurrentDriveVehicle`
-   - 备用 `/Script/HTGame.HTPlayerCharacter.BP_GetCurrentDirvingVehicle`（游戏里的拼写就是 `Dirving`）
-   - `/Script/HTGame.HTVehicleMovementComponent.GetForwardSpeedKmH`（陆上载具；水上载具是另一套接口，本插件只需要陆上）
+   - `/Script/HTGame.HTPlayerController:BP_GetCurrentDriveVehicle`
+   - 备用 `/Script/HTGame.HTPlayerCharacter:BP_GetCurrentDirvingVehicle`（游戏里的拼写就是 `Dirving`）
+   - `/Script/HTGame.HTVehicleMovementComponent:GetForwardSpeedKmH`（陆上载具；水上载具是另一套接口，本插件只需要陆上）
+   - 速度函数同时尝试 `Class:Function` 和 `Class.Function` 两种写法。
 3. 用 `ue5.process-event::invoke` 调 `BP_GetCurrentDriveVehicle`，参数缓冲区 8 字节，读返回的 UObject 指针。
 4. 把裸对象指针转成 `ue5.objects` handle：
-   - 读 GObjects 注册表（`anomaly.core.read_memory`）；
-   - 读对象 `InternalIndex`；
+   - 读对象 `InternalIndex` 和 `NameId`；
    - `objects.snapshot_at(index)`；
-   - `snapshot_by_handle` 反查并确认指针一致。
-   - 这一步可直接参考 `plugins/NteVehicle/native_access.hpp` 的 `ObjectHandleLocked` / `ResolveObjectHandleLocked`（AGPL 兼容，保留出处）。
-5. 用返回的载具 handle 作为 receiver，调 `GetForwardSpeedKmH`，读 float 返回值。
-6. 校验 `UFunction::ParmsSize` / 返回偏移；如果无法安全读取，直接回退到任务组 2 的估计速度。
+   - 比较 snapshot 的 `name_id` 与裸对象读出的 FName id，避免索引槽位变化后把旧指针映射成另一个对象。
+   - 不扫描 GObjects；handle 的 serial/generation 由宿主 `snapshot_at` 负责。
+5. 用返回的载具 handle 作为 receiver，调 `GetForwardSpeedKmH`，读 float 返回值；调用前用 `HTWheeledVehicleBase` 类链排除水上载具。
+6. 不直接校验 `UFunction::ParmsSize`（公开 ABI 不暴露）；使用 32 字节输出缓冲区，让宿主 `invoke` 的参数容量校验失败时回退估计速度。
+7. `ue5.objects.generation` 变化时清空函数、movement component、类链和载具缓存；函数/类解析失败按 2 秒退避重试，不扫描 `.text`。
 
 缓存和失效：
 
 - 按 `ue5.objects.generation` 缓存函数 handle 和载具 handle；
 - 世界变化、对象 generation 变化、载具指针变化时全部失效；
-- 只在 Game 线程调用；
-- 任何一步失败都不影响相机主路径。
+- 只在 Game 线程调用；`invoke` 失败按 2 秒退避重试；
+- 任何一步失败都不影响相机主路径；
+- 水上载具或 getter 不可用时回退到任务组 2 的位置微分/角度倒车逻辑。
 
 **验收**：
 
@@ -385,6 +398,10 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
 - 刹车 pitch 使用精确速度导数，和 1.1.1 行为接近。
 - 关闭/缺失 `ue5.objects` 或 `ue5.process-event` 时自动回退，不等待、不崩溃。
 - Game tick 没有明显耗时增长（用插件自己的 `相机 tick ms` 观察）。
+
+**代码验收（已完成）**：构建通过、`ctest` 1/1 通过；DLL 内含
+`GetForwardSpeedKmH`、`HTWheeledVehicleBase` 和 `anomaly.ue5.objects` /
+`anomaly.ue5.process-event` 服务名。实机项仍待任务组 4。
 
 #### 3.2 方案 B：上游提供只读接口
 
@@ -399,21 +416,25 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
 
 当前门禁用“整份 Profile 的 SHA-256”，2.7.0 只是新增 pak/assets 就导致相机全关，过于脆弱。
 
-可以考虑：
+**实现状态**：已维护 `kAcceptedProfileHashes[]`（安装版 CRLF + 仓库 LF 两个
+2.7.0 hash）。route B 的运行时检查保留为 **advisory witness**：
 
-- 维护 `kAcceptedProfileHashes[]`，每个支持的 Anomaly 版本一个 hash；
-- 或增加只读 witness：启动时验证 `ue5.GWorld` 链和 `FViewInfo` 字段能读回合理值，再允许写；
-- route B 写入前增加自检：
-  - `AllViews` 数量和指针范围；
-  - `ViewLocation` / `ViewRotation` 与游戏相机姿态的偏差；
-  - `ViewMatrices` 行列式/有限值；
-  - 失败则关闭 route B，保留基础视点 hook 或游戏原相机。
+- 全屏 view / 指针范围仍是应用条件；
+- `ViewLocation` / `ViewRotation` / 投影矩阵 / `ViewFov` 的异常只累计到
+  route B 行的 `w <count>`，**不跳过该帧**；
+- 之前把 witness 作为写入门禁会让晚期 view 偶发回退到游戏相机，重新引入车辆
+  抖动；route B 必须在每个符合条件的渲染帧确定性应用。
+- 版本门禁仍然只由 hash/pattern/offset 决定，未知 hash 继续 fail-closed。
 
 **验收**：
 
-- 只改 Profile 里与本插件无关的字段时，不再误伤相机。
-- 未知 hash 或 witness 失败时仍然 fail-closed。
-- 面板能区分 `hash mismatch`、`witness failed`、`pattern failed`。
+- 未知 hash 或 pattern/offset 失败时仍然 fail-closed。
+- 面板能区分 `hash mismatch`、`pattern failed`；witness 仅作诊断，不改变写入。
+
+**未实现项**：“只改 Profile 里与本插件无关的字段时自动放行”没有实现。公开 SDK 只
+暴露整份 profile 的 SHA-256，无法判断变化是否与 route B/FOV 布局有关；为了实现这一条
+而放宽 hash 会违背 fail-closed 原则。需要上游提供“相关布局字段的单独 hash/witness”
+后再做。当前策略仍是 allowlist；witness 只做诊断。
 
 ---
 
@@ -484,7 +505,7 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
     └── 验收不通过（速度/刹车/倒车不可接受）
             │
             ▼
-        任务组 3（精确车速，可选）
+        任务组 3（精确车速，代码已完成）
             │
             ▼
         任务组 4（回归/发布）
@@ -498,7 +519,7 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
 ## 5. 风险与待拍板事项
 
 1. **版本号**：ID 迁移是破坏性变更，建议 `2.0.0`；如果不想跳大版本，用 `1.2.0` 并强化迁移说明。
-2. **精确车速**：任务组 3 工作量大且需要复制 GObjects/ProcessEvent 适配层；先用任务组 2 的降级方案验收，不要一开始就投入。
+2. **精确车速**：任务组 3 已用公开 ABI 实现（不复制 GObjects 扫描），并保留位置微分回退；剩余风险是实机 HUD 速度一致性、刹车手感、换车后 handle 失效，需在任务组 4 验证。
 3. **Profile hash 策略**：短期更新常量；中期改 allowlist 或 witness，避免每次 Anomaly 加功能都把相机全关。
 4. **旧数据迁移**：是提供脚本，还是只写手动步骤？建议至少提供只读预览脚本，避免用户丢设置。
 5. **route B 偏移**：Anomaly 2.7.0 没有改游戏二进制，但仍必须实机验证；如果 pattern 变化，按 fail-closed 原则更新，不能直接放宽。
@@ -513,6 +534,7 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
 - [ ] manifest ID 为 `robineatcorn.nfs2015-chase-cam`，`pluginmaster.json` 一致。
 - [ ] manifest 不再包含 `anomaly.nte.vehicle` / `nte-vehicle`。
 - [ ] 2.7.0 SDK 下 MSVC / MinGW 均编译通过。
+- [ ] 精确车速 getter 与位置微分回退均可用，面板显示速度来源。
 - [ ] `anomaly-plugin validate` 通过。
 - [ ] `anomaly-test-host --reload 10 --ticks 60` 通过。
 - [ ] 启动日志无 `unknown-capability`、无 capability denied、无必需服务等待死循环。
