@@ -90,38 +90,21 @@ Anomaly 2.7.0 适配版本，完成任务组 1（加载/编译）、任务组 2�
 ## 回滚
 
 - **回退到 1.1.1**：旧 ID 不被 2.7.0 加载，需要同时回退 Anomaly Runtime 到 2.6.0；
-  保留 `v1.1.1` tag/Release，旧设置目录不会被迁移脚本删除。
+  保留 `v1.1.1` tag/Release；旧设置目录不要删除，回退后仍可使用。
 - **2.7.0 下禁用 2.0.0**：退出游戏，删除或改名
   `Anomaly/plugins/robineatcorn.nfs2015-chase-cam`（或在插件列表禁用后重启），
   然后收集 `anomaly-runtime.jsonl` 和 `anomaly-runtime.log`。
-- 如果迁移脚本改过 `plugin-enablement.json` / `ui-window-state.json`，可用脚本生成的
-  `.bak-*` 备份恢复旧 ID 条目。
+- 如果手动改过 `plugin-enablement.json` / `ui-window-state.json`，从操作前的备份恢复
+  旧 ID 条目。
 - 出现 route B 黑屏/崩溃时不要放宽 profile hash 或删除门禁；保持 fail-closed 并附日志。
 
 ## 从 1.1.1 迁移
 
-仓库新增 `migrate-2.7.ps1`。默认只预览，`-Apply` 才写入；不会删除旧设置或旧安装目录。
-如果 Runtime 位于 `Program Files`，请用管理员身份运行 PowerShell：
-
-```powershell
-# 预览
-powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
-  -AnomalyRoot "C:\Program Files\Neverness To Everness\Anomaly\Anomaly-2.7.0-runtime\Anomaly"
-
-# 写入
-powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
-  -AnomalyRoot "C:\Program Files\Neverness To Everness\Anomaly\Anomaly-2.7.0-runtime\Anomaly" `
-  -Apply
-```
-
-脚本处理：
-
-- `config/plugins/<old-id>/` → `config/plugins/<new-id>/`，只复制缺失文件；
-- `config/plugin-enablement.json` 增加新 ID 的启用值；
-- `state/ui-window-state.json` 迁移 `pluginWindows` 和 `favorites`；
-- 写入前为 JSON 文件生成带时间戳的 `.bak-*` 备份。
-
-手动迁移步骤见 `README.md` 的“从 1.1.1 升级”。
+旧 ID 的设置、启用状态和窗口位置不会自动迁移。完整手动步骤见
+[README.md](README.md) 的“从 1.1.1 升级”；核心是复制
+`config/plugins/io.github.robineatcorn.nfs2015-chase-cam/` 到新 ID 目录，并把
+`config/plugin-enablement.json` / `state/ui-window-state.json` 里的旧 ID 条目替换或
+补上新 ID。操作前备份 `config` 和 `state`，旧目录和旧安装目录不会被自动删除。
 
 ## 已知限制
 
@@ -143,7 +126,6 @@ powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
 - manifest 通过 2.7.0 JSON Schema 校验；
 - ID/版本/pluginmaster、包内容、ZIP 根目录和字节一致性通过 `verify-release.sh`；
 - 安装版 2.7.0 profile hash 已采集并加入 allowlist（`c6d97f...`）；
-- `migrate-2.7.ps1` 在临时 Anomaly 目录上完成预览和 `-Apply` 测试。
 
 发布产物：
 

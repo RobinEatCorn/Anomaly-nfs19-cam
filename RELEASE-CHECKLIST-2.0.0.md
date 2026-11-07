@@ -8,7 +8,7 @@
 
 **发布候选已准备；离线检查通过；Windows 宿主工具与完整实机矩阵仍待补跑。**
 
-- 代码、manifest、迁移脚本和发布 ZIP 已完成。
+- 代码、manifest 和发布 ZIP 已完成。
 - MinGW 构建、`ctest`、manifest ID/版本一致性、包内容、ZIP 根目录、DLL
   导入/导出均已通过。
 - 用户已实机确认：route B 抖动修复后车辆不再抖动。
@@ -47,7 +47,6 @@ locales/zh-CN.json
 | 包根目录与 locale | **PASS** | `verify-release.sh` |
 | ZIP 根目录与字节一致性 | **PASS** | `verify-release.sh`，3 个文件 |
 | DLL 导入/导出 | **PASS** | `verify-release.sh` / `objdump` |
-| 迁移脚本预览 + `-Apply` | **PASS** | Windows PowerShell + 临时 Anomaly 目录；设置/启用状态/窗口状态/收藏均验证 |
 | `anomaly-plugin validate` | **BLOCKED** | 当前环境没有该 Windows 工具 |
 | `anomaly-test-host --reload 10 --ticks 60` | **BLOCKED** | 当前环境没有该 Windows 工具 |
 | 删除可选服务后的降级加载 | **BLOCKED** | 需要 TestHost/实机；代码按可选服务处理，但没有运行时证据 |
@@ -136,7 +135,7 @@ C:\Program Files\Neverness To Everness\Client\WindowsNoEditor\HT\Binaries\Win64\
 5. Release 说明必须包含：
    - 仅支持 Anomaly 2.7.0+；
    - 旧 ID `io.github.robineatcorn.nfs2015-chase-cam` 不再加载；
-   - 旧设置的迁移方式（`migrate-2.7.ps1` 或 README 手动步骤）；
+   - 旧设置的手动迁移步骤（README）；
    - 速度来源：优先精确 `GetForwardSpeedKmH`，失败时位置微分；
    - route B advisory witness 不跳过帧。
 6. 保留旧 `v1.1.1` tag/Release，并将旧 Release 标注为“仅兼容 Anomaly 2.6.0，
@@ -154,9 +153,9 @@ Anomaly Runtime：
 2. 保留 `v1.1.1` 的源码 tag 与 Release；按旧 Release 说明安装 1.1.1。
 3. 将 Anomaly 回退到 2.6.0 Runtime（或对应的 1.1.1 兼容版本）。
 4. 恢复旧设置目录（`config/plugins/io.github.robineatcorn.nfs2015-chase-cam/`）；
-   迁移脚本不会删除旧目录，所以旧数据仍在。
-5. 如果迁移脚本已经改过 `plugin-enablement.json` / `ui-window-state.json`，
-   从脚本生成的 `.bak-*` 备份恢复，或手动恢复旧 ID 条目。
+   旧目录没有被自动删除，所以数据仍在。
+5. 如果手动改过 `plugin-enablement.json` / `ui-window-state.json`，从操作前的备份
+   恢复旧 ID 条目。
 
 ### 2.7.0 下禁用 2.0.0
 

@@ -47,28 +47,13 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 - route B 的运行时检查是 **advisory witness**：全屏 view 才会应用；location、
   rotation、投影矩阵或 FOV 异常只累计到 route B 行的 `w N`，不会跳过当前帧。
   route B 必须在每个符合条件的渲染帧确定性应用，否则会重新引入车辆抖动。
-- 旧 ID 的启用状态、设置目录和窗口位置不会自动迁移；可以用仓库里的
-  `migrate-2.7.ps1` 预览/复制，或按下面的手动步骤操作。完整变更列表见
-  [RELEASE-NOTES-2.0.0.md](RELEASE-NOTES-2.0.0.md)。
+- 旧 ID 的启用状态、设置目录和窗口位置不会自动迁移；请按下面的手动步骤复制。
+  完整变更列表见 [RELEASE-NOTES-2.0.0.md](RELEASE-NOTES-2.0.0.md)。
 
 ### 从 1.1.1 升级
 
-推荐使用迁移脚本（默认只预览，不写文件；如果 Runtime 在 `Program Files` 下，`-Apply`
-需要以管理员身份运行 PowerShell）：
-
-```powershell
-# 先预览
-powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
-  -AnomalyRoot "C:\Program Files\Neverness To Everness\Anomaly\Anomaly-2.7.0-runtime\Anomaly"
-
-# 确认后写入；-Force 才会覆盖新目录里已存在的同名文件
-powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
-  -AnomalyRoot "C:\Program Files\Neverness To Everness\Anomaly\Anomaly-2.7.0-runtime\Anomaly" `
-  -Apply
-```
-
-脚本会复制设置、合并 `plugin-enablement.json`，并迁移 `ui-window-state.json` 里的
-窗口记录和收藏；不会删除旧设置或旧安装目录。也可以手动迁移：
+旧 ID 的数据不会自动跟随，需要手动复制。操作前先备份 `Anomaly/config` 和
+`Anomaly/state`：
 
 1. 在 **Plugins > 已安装** 中停用旧版，退出游戏。
 2. 删除或改名旧安装目录（在线安装为 `Anomaly/plugins/io.github.robineatcorn.nfs2015-chase-cam`，
@@ -77,8 +62,10 @@ powershell -ExecutionPolicy Bypass -File .\migrate-2.7.ps1 `
    `Anomaly/config/plugins/io.github.robineatcorn.nfs2015-chase-cam/`
    → `Anomaly/config/plugins/robineatcorn.nfs2015-chase-cam/`；
    文件名保持不变（`config-nfs2015-chase-cam-settings-v1.json`）。
-4. 需要保留窗口位置/收藏时，把旧 ID 对应的条目替换为新 ID；启用状态可在首次启动后
-   在插件列表里重新勾选。
+4. 需要保留窗口位置/收藏时，编辑 `Anomaly/state/ui-window-state.json`，把
+   `pluginWindows` 和 `favorites` 里的旧 ID 替换为新 ID；不要删除整个文件。
+5. 在 `Anomaly/config/plugin-enablement.json` 中把旧 ID 的启用值复制给新 ID，
+   或首次启动后在插件列表里重新勾选。旧设置和旧安装目录不会被自动删除。
 
 ## 实现方式
 
@@ -130,7 +117,6 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
-├── migrate-2.7.ps1       旧 ID 设置/启用状态/窗口位置迁移
 ├── RELEASE-NOTES-2.0.0.md 2.7.0 适配与迁移说明
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
 ├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
