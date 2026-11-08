@@ -44,9 +44,9 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 - profile 门禁接受两个已验证的 2.7.0 hash：安装包 CRLF 版本
   `c6d97f...1f52` 和仓库 LF 版本 `c37a7b...db2a`。未知 hash 仍然 fail-closed；
   如果面板显示 `hash mismatch`，请把日志里的 `got ...` 发到 issue。
-- route B 的运行时检查是 **advisory witness**：全屏 view 才会应用；location、
-  rotation、投影矩阵或 FOV 异常只累计到 route B 行的 `w N`，不会跳过当前帧。
-  route B 必须在每个符合条件的渲染帧确定性应用，否则会重新引入车辆抖动。
+- route B 只在全屏 view 上应用，并且只在 `PrepareViewStateForVisibility` 之前写一次；
+  面板的 `w N` 是历史 advisory witness 计数，早段路径不会因它跳过帧。route B 必须确定性
+  应用，否则会重新引入车辆抖动；读取撕裂时用 `held` 短暂保持上一帧机位，而不是晚段补写。
 - 旧 ID 的启用状态、设置目录和窗口位置不会自动迁移；请按下面的手动步骤复制。
   完整变更列表见 [RELEASE-NOTES-2.0.0.md](RELEASE-NOTES-2.0.0.md)。
 
@@ -87,11 +87,18 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 
 相机模型由 `chase_cam.hpp` 推进；Game tick 只发布车辆样本，最终的追车视图在渲染线程应用：
 
-- `FPrimitiveSceneProxy::OnTransformChanged`：拿到这个渲染帧真正用于画车的车辆变换；
-- `FSceneRenderer::PrepareViewStateForVisibility`：在视锥裁剪和 TAA 历史推进之前写入最终机位；
-- `FViewInfo::SetupUniformBufferParameters`：同一帧的晚段兜底；
-- `FSceneView::UpdateViewMatrix` / `SetupViewFrustum`：重建视图矩阵、`ViewFrustum` 和
-  `CullingFrustum`，避免车体与裁剪/TAA 使用不同机位。
+- `FPrimitiveSceneProxy::OnTransformChanged`：只发布这个渲染帧真正用于画车的车辆变换；
+  2.7 的 pattern 目前无法安全解析，插件会 fail-closed 不安装这个 hook，route B 在
+  pre-visibility 直接读车辆 proxy；
+- `FSceneRenderer::PrepareViewStateForVisibility`：**唯一**的机位写入点，在视锥裁剪和 TAA
+  历史推进之前写入最终机位；
+- `FSceneView::UpdateViewMatrix` / `SetupViewFrustum`：由上面这个写入点调用，重建视图矩阵、
+  `ViewFrustum` 和 `CullingFrustum`。
+
+**不要在 `OnTransformChanged` 或 `SetupUniformBufferParameters` 里再写机位。** 这两个位置
+可能已经晚于 `PrepareViewStateForVisibility`：裁剪、运动矢量和 TAA 历史仍描述旧机位，而最终
+画面使用新机位，表现就是行驶中偶发一帧“摄像头跳到别处/整屏半透明重影”。早段写入失败时，
+route B 最多短暂保持上一帧机位（`held`），不会退回晚段写入。
 
 route B 的最终机位由 NFS 模型和渲染线程车辆变换合成：
 
@@ -102,8 +109,8 @@ eye.z    += originOffsetCm
 rotation  = NFS 模型的 pitch / yaw / roll
 ```
 
-模型 pose 暂时不可用时回退到固定的 route B 机架；再不可用时保留游戏原相机。这样相机和车体
-共用渲染帧，不再依赖 game-tick 位置去追渲染帧中的车。
+模型 pose 暂时不可用时回退到固定的 route B 机架；再不可用时短暂保持上一帧的 route B 机位，
+仍不可用才保留游戏原相机。这样相机和车体共用渲染帧，不再依赖 game-tick 位置去追渲染帧中的车。
 
 不扫描 GObjects；`ue5.GWorld` 只在 profile pattern 命中后解析一次全局槽位。载具 getter 是
 通过 Host 的 `ue5.objects.find_exact` 和 `ue5.process-event.invoke` 调用的，不自行定位
@@ -117,6 +124,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
+├── RELEASE-NOTES-2.0.1.md 闪屏/重影修复说明
 ├── RELEASE-NOTES-2.0.0.md 2.7.0 适配与迁移说明
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
 ├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
@@ -281,8 +289,9 @@ route B 的最终位置并不直接等于这里选中的锚点：锚点用于模
 
 ### NFS 镜头（FOV）
 
-`Apply NFS lens (FOV)` 打开时，route B 会把 NFS 模型算出的水平 FOV 写入当前 `FViewInfo`，并按
-新旧 FOV 比例缩放投影矩阵；面板 `FOV` 显示实际水平 FOV。关闭后保留游戏原 FOV。
+`Apply NFS lens (FOV)` 打开时，route B 会把 NFS 模型算出的水平 FOV 写入当前 `FViewInfo`，并用
+`FViewMatrices` 构造函数重建整组矩阵（包括 `InvProjectionMatrix`、`ProjectionNoAAMatrix` 和
+`ScreenToClipMatrix`）；面板 `FOV` 显示实际水平 FOV。关闭后保留游戏原 FOV。
 
 FOV 写入和 route B 一样受版本门禁保护；模型 lens 不可用或值超出 1–179° 时跳过，不会写入。
 
@@ -300,8 +309,8 @@ hook lease。
 - `Anchor` + `版本门禁`：当前锚点来源、
   `ok / hash / pattern / service / offset / off / read` 门禁结果，以及回退次数；
 - `水平 FOV`、`镜头-车辆距离（输出 / 原始）`、`速度`、`侧滑角`、`漂移量`；
-- `渲染钩`、`视图钩 R/G/线程`、`路线B 应用/回退`：route B 各阶段的调用和回退计数；
-  route B 行里的 `w N` 是 advisory witness 计数，不表示该帧没有应用；
+- `渲染钩`、`视图钩 R/G/线程`、`路线B 预应用/保持/回退/校验`：route B 各阶段的调用和
+  回退计数；`held` 是读取撕裂时短暂保持上一帧机位的次数，`w N` 是 advisory witness 计数；
 - `渲染龄` / `视图←变换龄`：route B 使用的车辆变换和视图之间差多少毫秒。
 
 诊断面板里的 `渲染 vs 代理`、`X 相位差`、`相机相对车速度/转向`、`tick 间隔`、`视野` 和
@@ -324,8 +333,9 @@ hook lease。
   里的已验证 hash 才打开 `version_gate`；
 - 2.6+ 且 build service 存在时，门禁关闭就不创建 route B / `FViewInfo` FOV / 视点 hook，
   也不写任何游戏内存；面板显示 `版本门禁`，相机保持游戏原样；
-- 所有需要的函数入口仍通过运行时 pattern 解析；pattern 不命中则不安装，并锁存失败，
-  避免每 2 秒重新扫描 `.text` 造成周期性卡顿；
+- 所有需要的函数入口仍通过运行时 pattern 解析；早段 pattern 不命中会先按 2 秒窗口重试
+  5 次（避免首帧 signature 服务未就绪造成永久降级），仍失败才锁存并关闭 route B；
+  晚段诊断 pattern 不命中不影响 route B；
 - 渲染路径再次检查 render thread、全屏 view、view state、generation/新鲜度、有限值和
   proxy 所有权；
 - hook 回调使用宿主 generation lease；热重载时先撤 callback 再释放 hook。
@@ -383,7 +393,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 ## 发布
 
 `manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
-`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.0`。ID 一旦发布就不应再变。
+`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.1`。ID 一旦发布就不应再变。
 
 发布门禁、离线/实机测试矩阵、产物哈希和回滚步骤记录在
 [RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。完整发布前至少完成两个不同地图、
@@ -395,7 +405,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 
    ```powershell
    Compress-Archive -Path .\build\package\robineatcorn.nfs2015-chase-cam\* `
-     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.0.zip -Force
+     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.1.zip -Force
    ```
 
    WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`；
@@ -404,8 +414,8 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
 
    ```sh
-   gh release create v2.0.0 dist/Nfs2015ChaseCam-2.0.0.zip \
-     --title "NFS 2015 Chase Cam 2.0.0" \
+   gh release create v2.0.1 dist/Nfs2015ChaseCam-2.0.1.zip \
+     --title "NFS 2015 Chase Cam 2.0.1" \
      --notes "Anomaly 2.7.0 加载/编译适配；新插件 ID 与旧数据迁移说明"
    ```
 

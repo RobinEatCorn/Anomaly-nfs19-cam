@@ -121,7 +121,7 @@
     "diag.transform_hook": "渲染钩",
     "diag.view_uniform_hook": "视图钩 R/G/线程",
     "diag.view_uniform_age": "视图←变换龄 均/峰",
-    "diag.route_b": "路线B 应用/回退/校验",
+    "diag.route_b": "路线B 预应用/保持/回退/校验",
     "diag.render_proxy_phase": "渲染 vs 代理 均/峰",
     "diag.render_proxy_lead": "渲染 沿行进",
     "diag.render_age": "渲染龄 均/峰",

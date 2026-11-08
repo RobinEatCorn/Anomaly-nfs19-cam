@@ -7,6 +7,12 @@
 > 配套背景：`PLAN-camera-timing.md`（§9 验收指标、§10 反模式、§11 设计原则仍然有效）。
 > 基线：`nfs2015-chase-cam` HEAD = `22f7827`（探针 + 差异报告已提交）。
 >
+> **后续修复（2026-11-08，2.0.1）**：route B 的三个写入点收缩为一个。`OnTransformChanged` 只发布
+> 车辆变换，`SetupUniformBufferParameters` 只保留诊断；机位、镜头和 `FViewMatrices` 只在
+> `PrepareViewStateForVisibility` 之前写一次。晚于该点的写入会让裁剪/运动矢量/TAA 历史与最终
+> 机位不一致，表现为一帧重影或镜头跳角，以及箭头/广告牌/墙面单帧消失。`held` 计数器表示
+> 读取撕裂时短暂保持上一帧机位；不要再恢复晚段写入。
+
 > **最终状态（2026-11-06）**：任务组 0–5 完成，用户终审选择结局①（无可见车抖、无画质问题）。
 > 最终实现走 **route B**：NFS 模型 pose + 渲染线程车辆 proxy 变换，在 pre-visibility / transform /
 > view-uniform 三处应用；FOV 由同一模型写入。所有布局相关 hook 由精确 `profile_hash` fail-closed

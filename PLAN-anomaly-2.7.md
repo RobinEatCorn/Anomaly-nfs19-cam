@@ -423,7 +423,8 @@ ID 变更后，旧数据不会自动跟随。需要迁移：
 - `ViewLocation` / `ViewRotation` / 投影矩阵 / `ViewFov` 的异常只累计到
   route B 行的 `w <count>`，**不跳过该帧**；
 - 之前把 witness 作为写入门禁会让晚期 view 偶发回退到游戏相机，重新引入车辆
-  抖动；route B 必须在每个符合条件的渲染帧确定性应用。
+  抖动；route B 必须在每个符合条件的渲染帧确定性应用。**2.0.1 起晚段 view 不再写机位**：
+  机位只在 `PrepareViewStateForVisibility` 之前写；晚段写入会造成 TAA/裁剪不同步的一帧重影。
 - 版本门禁仍然只由 hash/pattern/offset 决定，未知 hash 继续 fail-closed。
 
 **验收**：

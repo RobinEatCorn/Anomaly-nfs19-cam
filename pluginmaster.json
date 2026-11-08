@@ -2,7 +2,7 @@
   {
     "Name": "NFS 2015 Chase Cam",
     "InternalName": "robineatcorn.nfs2015-chase-cam",
-    "Version": "2.0.0",
+    "Version": "2.0.1",
     "Author": "RobinEatCorn",
     "Punchline": "用 NFS 2015 的 Action Camera 替换 NTE 的驾驶追车视角",
     "Description": "把驾驶时的追车相机换成 NFS 2015 Action Camera 模型：漂移偏航弹簧、车身局部 pivot 环绕、上下坡坡度跟随与 NFS GradientAdjustments 构图微调、漂移推近/下压、速度 FOV 与镜头震动。最终机位在渲染线程与车辆变换同帧应用，消除车抖；按 F7 开关，游戏内窗口可调机位、FOV、坡度跟随强度、侧倾、震动与锚点来源。只在驾驶载具时接管视角，未驾驶时保持原相机。需要 Anomaly 2.7.0+ Runtime 与 NTE 的相机 Hook 服务；2.7.0 已移除载具服务，载具存在性沿用旧版 BP_GetCurrentDriveVehicle 等反射 getter，车速优先由 GetForwardSpeedKmH 精确读取，失败时回退位置微分。",
@@ -11,7 +11,7 @@
     "Tags": ["camera", "driving", "nfs", "visual"],
     "AcceptsFeedback": true,
     "RepoUrl": "https://github.com/RobinEatCorn/Anomaly-nfs19-cam",
-    "DownloadLinkInstall": "https://github.com/RobinEatCorn/Anomaly-nfs19-cam/releases/download/v2.0.0/Nfs2015ChaseCam-2.0.0.zip",
-    "DownloadLinkUpdate": "https://github.com/RobinEatCorn/Anomaly-nfs19-cam/releases/download/v2.0.0/Nfs2015ChaseCam-2.0.0.zip"
+    "DownloadLinkInstall": "https://github.com/RobinEatCorn/Anomaly-nfs19-cam/releases/download/v2.0.1/Nfs2015ChaseCam-2.0.1.zip",
+    "DownloadLinkUpdate": "https://github.com/RobinEatCorn/Anomaly-nfs19-cam/releases/download/v2.0.1/Nfs2015ChaseCam-2.0.1.zip"
   }
 ]

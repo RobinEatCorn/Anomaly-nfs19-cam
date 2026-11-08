@@ -216,6 +216,11 @@ constexpr double kViewHistorySnapAngleDegrees = 60.0;
 // safer answer.
 constexpr double kMaximumCameraYawDifference = 1.4;  // ~80 degrees
 constexpr double kHookRetrySeconds = 2.0;
+// The signature service can still be settling on the first Game tick. A
+// pattern miss is therefore retried for a few 2 s hook windows before the
+// early route B path is latched off; a single transient miss must not leave the
+// camera on the late hook forever.
+constexpr std::uint32_t kPrepareHookMaxPatternFailures = 5;
 // The detour runs one engine tick after the model published. Shift the
 // published eye by the game camera's movement since that publish so the car
 // and the camera are rendered in the same frame. A larger step is a
@@ -311,7 +316,7 @@ constexpr std::string_view kPrepareViewStatePattern =
 // FSceneView::UpdateViewMatrix (2.6.0). Rebuilds ViewMatrices from the fields
 // written by route B, including ViewFrustum, but not CullingFrustum.
 constexpr std::string_view kSceneViewUpdateMatrixPattern =
-    "40 53 48 83 EC 60 0F 10 81 F0 0F 00 00 48 8B D9 48 8B 05 79 01 D1 0B "
+    "40 53 48 83 EC 60 0F 10 81 F0 0F 00 00 48 8B D9 48 8B 05 ?? ?? ?? ?? "
     "F2 0F 10 89 00 10 00 00 0F 11 44 24 48 0F 10 81 08 10 00 00 F2 0F 11 "
     "4C 24";
 // FSceneView::SetupViewFrustum (2.6.0). Recomputes ViewFrustum and, for the
@@ -336,6 +341,10 @@ constexpr std::uintptr_t kSceneRendererAllViewsOffset = 0x3C8;
 constexpr std::uintptr_t kSceneRendererAllViewCountOffset = 0x3D0;
 constexpr std::int32_t kRouteBMaxEarlyViews = 64;
 constexpr std::int64_t kVehicleRenderTransformMaxAgeNs = 50'000'000;
+// If a proxy/build pose read tears for one frame, repeat the last pose this
+// briefly rather than handing one frame to the game camera. Three frames at
+// 60 fps; a persistent failure still fails closed.
+constexpr std::int64_t kRouteBHeldPoseNs = 50'000'000;
 // While the car is moving, the camera can bridge a missed render transform for
 // this long. Beyond it the proxy is treated as gone (pause, stream, on foot)
 // and the rig returns to the flat body frame instead of keeping a stale slope.
@@ -1010,6 +1019,11 @@ struct RenderXProbe final {
   std::atomic<std::int64_t> vehicle_sample_ns{};
   std::atomic<std::uint64_t> vehicle_read_failures{};
   std::atomic<std::uint64_t> vehicle_fallbacks{};
+  // A torn AttachParent/proxy read must not clear the render-thread proxy on
+  // the first miss: the prepare path would then hand one frame to the game
+  // camera. Keep the last valid proxy for a couple of 20 Hz polls, then fail
+  // closed if the vehicle really disappeared. Game-tick only.
+  std::atomic<std::uint32_t> vehicle_anchor_miss_streak{};
   // True when the anchor came from the scene proxy rather than the component
   // transform; the count is the number of valid parent frames that had to use
   // the component transform because the proxy was null or did not validate.
@@ -1042,14 +1056,45 @@ struct RenderXProbe final {
   std::atomic<std::uint64_t> route_b_fallbacks{};
   std::atomic<std::uint64_t> route_b_witness_failures{};
   std::atomic<std::uint64_t> route_b_last_age_us{};
-  // Pre-visibility applications. These are the authoritative route B writes:
-  // the late SetupUniformBufferParameters path is skipped while this timestamp
-  // is fresh so the culling/TAA pose and the final matrices cannot disagree.
+  // Pre-visibility applications. This is the only camera writer: the late
+  // SetupUniformBufferParameters hook no longer moves the view, because a
+  // post-Prepare pose would leave culling, motion vectors and TAA history on a
+  // different camera (the one-frame ghost).
   std::atomic<std::uint64_t> route_b_early_applied{};
   std::atomic<std::uint64_t> route_b_early_fallbacks{};
   std::atomic<std::uint64_t> route_b_early_last_age_us{};
   std::atomic<std::int64_t> route_b_early_ns{};
   std::atomic<std::uint64_t> route_b_early_direct{};
+  std::atomic<std::uint64_t> route_b_early_presenter{};
+  std::atomic<std::uint64_t> route_b_early_held{};
+  // TEMP read-only timing diagnostics. These fields never write the camera.
+  std::atomic<std::uint64_t> timing_frame{};
+  std::atomic<std::uint64_t> timing_early_count{};
+  std::atomic<std::uint64_t> timing_late_count{};
+  std::atomic<std::uint64_t> timing_transform_before{};
+  std::atomic<std::uint64_t> timing_transform_between{};
+  std::atomic<std::uint64_t> timing_transform_after{};
+  std::atomic<std::int64_t> timing_early_ns{};
+  std::atomic<std::int64_t> timing_late_ns{};
+  std::atomic_bool timing_late_seen{};
+  std::atomic<double> timing_early_car[3]{};
+  std::atomic<double> timing_late_car[3]{};
+  std::atomic<double> timing_early_view[3]{};
+  std::atomic<double> timing_late_view[3]{};
+  std::atomic<double> timing_presenter_car[3]{};
+  std::atomic<std::uint64_t> timing_car_delta_peak_dmm{};
+  std::atomic<std::uint64_t> timing_car_delta_sum_dmm{};
+  std::atomic<std::uint64_t> timing_car_delta_count{};
+  std::atomic<std::uint64_t> timing_view_delta_peak_dmm{};
+  std::atomic<std::uint64_t> timing_view_delta_sum_dmm{};
+  std::atomic<std::uint64_t> timing_view_delta_count{};
+  // Render-thread-only last pose. If a proxy read is torn for one frame, repeat
+  // this pose briefly instead of dropping the frame to the game camera. Reset
+  // only when the session starts, before any callback can be in flight.
+  bool route_b_held_pose_valid{};
+  double route_b_held_eye_cm[3]{};
+  double route_b_held_rotation[3]{};
+  std::int64_t route_b_held_ns{};
   std::atomic<std::uint64_t> route_b_render_applied{};
   std::atomic<std::uint64_t> route_b_history_updated{};
   // Latest NFS chase-model pose, published by the presenter on the Game
@@ -1071,9 +1116,9 @@ struct RenderXProbe final {
   std::atomic<std::uint64_t> prepare_no_views{};
   std::atomic<std::uint64_t> prepare_pose_fail{};
   std::atomic<std::uint64_t> prepare_fullscreen_views{};
-  // The exact views written before visibility. The late hook must not rewrite
-  // a different renderer's view just because another renderer applied route B
-  // recently.
+  // The exact views written before visibility. Kept for diagnostics only:
+  // route B no longer writes the camera from the late view hook, so a stale
+  // list cannot move a view after culling/TAA history were captured.
   std::atomic<std::uint32_t> route_b_early_view_count{};
   std::atomic<bool> route_b_early_views_valid{};
   std::atomic<std::uint64_t> route_b_prepare_generation{};
@@ -1158,6 +1203,7 @@ struct RenderXProbe final {
     vehicle_sample_ns.store(0, std::memory_order_relaxed);
     vehicle_read_failures.store(0, std::memory_order_relaxed);
     vehicle_fallbacks.store(0, std::memory_order_relaxed);
+    vehicle_anchor_miss_streak.store(0, std::memory_order_relaxed);
     vehicle_proxy_used.store(false, std::memory_order_relaxed);
     vehicle_proxy_fallbacks.store(0, std::memory_order_relaxed);
     watched_proxy.store(0, std::memory_order_relaxed);
@@ -1187,6 +1233,14 @@ struct RenderXProbe final {
     route_b_early_last_age_us.store(0, std::memory_order_relaxed);
     route_b_early_ns.store(0, std::memory_order_relaxed);
     route_b_early_direct.store(0, std::memory_order_relaxed);
+    route_b_early_presenter.store(0, std::memory_order_relaxed);
+    route_b_early_held.store(0, std::memory_order_relaxed);
+    route_b_held_pose_valid = false;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      route_b_held_eye_cm[axis] = 0.0;
+      route_b_held_rotation[axis] = 0.0;
+    }
+    route_b_held_ns = 0;
     route_b_render_applied.store(0, std::memory_order_relaxed);
     route_b_history_updated.store(0, std::memory_order_relaxed);
     route_b_model_sequence.store(0, std::memory_order_relaxed);
@@ -1382,8 +1436,7 @@ struct DisplayState final {
   std::uint64_t prepare_pose_fail{};
   std::uint64_t prepare_fullscreen_views{};
   std::uint64_t route_b_early_direct{};
-  std::uint64_t route_b_render_applied{};
-  std::uint64_t route_b_history_updated{};
+  std::uint64_t route_b_early_held{};
   bool render_proxy_valid{};
   double render_proxy_avg_cm{};
   double render_proxy_peak_cm{};
@@ -1572,6 +1625,9 @@ struct Context final {
   bool view_uniform_hook_failure_logged{};
   bool view_uniform_diag_logged{};
   bool route_b_diag_logged{};
+  bool route_b_early_failure_logged{};
+  std::uint64_t route_b_timing_last_log_ms{};
+  std::uint32_t route_b_timing_windows{};
   bool route_b_pattern_failure_logged{};
   bool prepare_view_state_hook_failure_logged{};
   bool prepare_view_state_pattern_failure_logged{};
@@ -1579,6 +1635,7 @@ struct Context final {
   // Latch it so the 2 s hook retry does not re-scan .text forever; the camera
   // stays on whatever path remains available.
   bool early_route_b_unavailable{};
+  std::uint32_t prepare_hook_pattern_failures{};
   bool transform_pattern_unavailable{};
   bool view_uniform_pattern_unavailable{};
   bool view_point_pattern_unavailable{};
@@ -1627,6 +1684,12 @@ struct Context final {
   std::atomic<std::uint64_t> presenter_pose_sequence{};
   std::atomic<double> presenter_pose_location[3]{};
   std::atomic<double> presenter_pose_rotation[3]{};
+  std::atomic<double> presenter_car_cm[3]{};
+  // The origin offset that was baked into the published presenter pose.
+  // The early render hook shifts the pose from the presenter's car anchor to
+  // this frame's VehicleMesh; adding the difference between the current and
+  // baked-in offset keeps the user trim effective without applying it twice.
+  std::atomic<double> presenter_origin_offset_cm{kDefaultOriginOffsetCm};
   std::atomic<float> presenter_pose_lens{};
   std::atomic<bool> presenter_pose_fov{};
   std::atomic<bool> presenter_pose_valid{};
@@ -2378,6 +2441,7 @@ void SampleRenderXPhase(Context &context) noexcept {
     if (ReadVehicleParentAnchor(context.core, root, render_cm, parent_cm,
                                 parent, has_parent, attach_read_ok, proxy_used,
                                 proxy)) {
+      probe.vehicle_anchor_miss_streak.store(0, std::memory_order_relaxed);
       for (std::size_t axis = 0; axis < 3; ++axis) {
         probe.vehicle_anchor_cm[axis].store(parent_cm[axis],
                                             std::memory_order_relaxed);
@@ -2521,17 +2585,28 @@ void SampleRenderXPhase(Context &context) noexcept {
       probe.vehicle_render_used.store(render_used,
                                       std::memory_order_relaxed);
     } else {
-      probe.watched_proxy.store(0, std::memory_order_relaxed);
-      probe.vehicle_anchor_valid.store(false, std::memory_order_release);
-      probe.vehicle_proxy_used.store(false, std::memory_order_relaxed);
-      probe.vehicle_render_used.store(false, std::memory_order_relaxed);
-      probe.vehicle_present.store(false, std::memory_order_release);
-      probe.vehicle_present_ns.store(0, std::memory_order_relaxed);
-      probe.vehicle_sample_ns.store(
-          attach_read_ok && !has_parent ? NowNanoseconds() : 0,
-          std::memory_order_relaxed);
-      probe.vehicle_parent.store(0, std::memory_order_relaxed);
-      if (has_parent) {
+      const bool definitely_on_foot = attach_read_ok && !has_parent;
+      const std::uint32_t misses =
+          probe.vehicle_anchor_miss_streak.fetch_add(
+              1, std::memory_order_relaxed) +
+          1;
+      // A single torn read is not a vehicle change. Keep the last valid
+      // proxy/anchor for at most three 20 Hz polls (about 24 ms), which covers
+      // the render-thread writer without ever pinning a freed proxy for long.
+      if (definitely_on_foot || misses >= 3) {
+        probe.watched_proxy.store(0, std::memory_order_relaxed);
+        probe.vehicle_anchor_valid.store(false, std::memory_order_release);
+        probe.vehicle_proxy_used.store(false, std::memory_order_relaxed);
+        probe.vehicle_render_used.store(false, std::memory_order_relaxed);
+        probe.vehicle_present.store(false, std::memory_order_release);
+        probe.vehicle_present_ns.store(0, std::memory_order_relaxed);
+        probe.vehicle_sample_ns.store(
+            definitely_on_foot ? NowNanoseconds() : 0,
+            std::memory_order_relaxed);
+        probe.vehicle_parent.store(0, std::memory_order_relaxed);
+        probe.vehicle_anchor_miss_streak.store(0, std::memory_order_relaxed);
+      } else {
+        probe.vehicle_render_used.store(false, std::memory_order_relaxed);
         probe.vehicle_read_failures.fetch_add(1, std::memory_order_relaxed);
       }
     }
@@ -2605,8 +2680,11 @@ void SampleRenderXPhase(Context &context) noexcept {
 void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
                                         double *rotation) noexcept;
 
-// Defined with the route B helpers below. Called from the vehicle transform
-// detour after the proxy has been updated for this render frame.
+// Experimental: apply the fresh render proxy transform after the car's
+// OnTransformChanged has updated LocalToWorld. This is deliberately a
+// separate writer from ApplyRouteBEarly; it is used to test whether the
+// transform notification is still before the visibility task data consumes
+// the view.
 void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
                                   const double forward[3]) noexcept;
 
@@ -2708,11 +2786,27 @@ void ANOMALY_CALL RenderTransformDetour(void *self,
     probe.transform_updates.fetch_add(1, std::memory_order_relaxed);
     probe.transform_valid.store(true, std::memory_order_release);
     probe.transform_sequence.fetch_add(1, std::memory_order_release);
-    // The render thread has just advanced the car's LocalToWorld. Refresh
-    // the prepared views here: this is still before the frame's visibility
-    // tasks consume their frusta, and it removes the one-frame lag of the
-    // earlier game-thread preparation pass.
-    ApplyRouteBAtRenderTransform(*context, translation, forward);
+    // TEMP read-only timing diagnostics: classify this transform update
+    // against the last early camera write. It never changes the camera.
+    if (probe.timing_frame.load(std::memory_order_relaxed) != 0) {
+      const std::int64_t early_ns =
+          probe.timing_early_ns.load(std::memory_order_relaxed);
+      const std::int64_t event_ns = NowNanoseconds();
+      if (probe.timing_late_seen.load(std::memory_order_acquire)) {
+        probe.timing_transform_after.fetch_add(1,
+                                               std::memory_order_relaxed);
+      } else if (early_ns != 0 && event_ns >= early_ns) {
+        probe.timing_transform_between.fetch_add(1,
+                                                 std::memory_order_relaxed);
+      } else {
+        probe.timing_transform_before.fetch_add(1,
+                                                std::memory_order_relaxed);
+      }
+    }
+    // The VehicleMesh ComponentToWorld is already available at the Game
+    // camera point and matches the final proxy. Do not write the view here:
+    // this point is after PrepareViewStateForVisibility, so a late camera
+    // change would desynchronise the history and visibility state.
   }
 
   // Release the callback lease even if the host is already tearing the hook
@@ -3130,30 +3224,125 @@ bool BuildRouteBPose(const RenderXProbe &probe, const bool follow_pitch,
 // directly (not as a prediction): if the matrix has already advanced, this
 // keeps route B on the exact same car frame as the draw; if it has not, the
 // snapshot fallback is used.
-bool BuildRouteBPoseDirect(const RenderXProbe &probe, const bool follow_pitch,
-                           double eye[3],
-                           double rotation[3]) noexcept {
+bool ReadPresenterPose(const Context &context, double location[3],
+                       double rotation[3], float *lens,
+                       bool *fov_enabled,
+                       double car_cm[3] = nullptr) noexcept;
+bool ReadRouteBDirectCar(const RenderXProbe &probe, double car_cm[3],
+                         double forward[3]) noexcept;
+
+// The Game thread already published the exact NFS camera pose it is using
+// (`CameraViewPointDetour`). Applying that pose before visibility avoids
+// rebuilding a camera from a car transform that the render thread has not
+// received yet: at this point the transform snapshot is often one frame old,
+// while the presenter pose is the camera the game itself would draw with.
+//
+// The presenter pose is translated by the difference between the car it was
+// built from and the car the renderer is about to draw. That is a same-frame
+// anchor, not a speed/prediction compensation: no extrapolation, no latency
+// estimate, only the transform read from the watched proxy on this frame.
+bool BuildRouteBPoseFromPresenter(Context &context, const RenderXProbe &probe,
+                                  double eye[3],
+                                  double rotation[3]) noexcept {
+  double presenter_car[3]{};
+  float lens = 0.0F;
+  bool fov_enabled = false;
+  if (!ReadPresenterPose(context, eye, rotation, &lens, &fov_enabled,
+                         presenter_car)) {
+    return false;
+  }
+  double fresh_car[3]{};
+  double forward[3]{};
+  if (ReadRouteBDirectCar(probe, fresh_car, forward)) {
+    // Move the whole presenter pose onto this frame's VehicleMesh transform.
+    // Aligning only X/Y left the camera on the Game tick's Z, so on a slope
+    // the drawn car moved vertically under a camera that did not: visible
+    // up/down bobbing. Z must come from the same ComponentToWorld as X/Y.
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      eye[axis] += fresh_car[axis] - presenter_car[axis];
+    }
+    // `presenter_car` contains the origin offset baked into the presenter
+    // pose. Moving to the raw VehicleMesh therefore cancels that offset;
+    // add back only the user's current trim relative to the baked-in value.
+    const double current_offset =
+        context.origin_offset_cm.load(std::memory_order_acquire);
+    const double presenter_offset =
+        context.presenter_origin_offset_cm.load(std::memory_order_acquire);
+    eye[2] += current_offset - presenter_offset;
+  }
+  return std::isfinite(eye[0]) && std::isfinite(eye[1]) &&
+         std::isfinite(eye[2]) && std::isfinite(rotation[0]) &&
+         std::isfinite(rotation[1]) && std::isfinite(rotation[2]);
+}
+
+// Read the car transform the renderer is using. The VehicleMesh component
+// transform is the authoritative value at the Game camera point: the probe
+// showed parent-final = 0.00 cm while the watched proxy was still one frame
+// behind. Prefer that component; the proxy remains the fallback for frames
+// where the parent pointer is not available. Returns the raw translation
+// (without the anchor centre height).
+bool ReadRouteBDirectCar(const RenderXProbe &probe, double car_cm[3],
+                         double forward[3]) noexcept {
+  const std::uintptr_t parent =
+      probe.vehicle_parent.load(std::memory_order_relaxed);
+  if (parent != 0) {
+    const auto *translation = reinterpret_cast<const double *>(
+        parent + kSceneComponentTransformTranslationOffset);
+    const auto *orientation = reinterpret_cast<const double *>(
+        parent + kSceneComponentTransformOffset);
+    const double qx = orientation[0];
+    const double qy = orientation[1];
+    const double qz = orientation[2];
+    const double qw = orientation[3];
+    const double norm2 = qx * qx + qy * qy + qz * qz + qw * qw;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      car_cm[axis] = translation[axis];
+    }
+    if (std::isfinite(car_cm[0]) && std::isfinite(car_cm[1]) &&
+        std::isfinite(car_cm[2]) && norm2 > 0.81 && norm2 < 1.21) {
+      const double inverse_norm = 1.0 / std::sqrt(norm2);
+      const double x = qx * inverse_norm;
+      const double y = qy * inverse_norm;
+      const double z = qz * inverse_norm;
+      const double w = qw * inverse_norm;
+      // Rotate the local +X (nose) axis by the ComponentToWorld quaternion.
+      const double tx = 0.0;
+      const double ty = 2.0 * z;
+      const double tz = -2.0 * y;
+      forward[0] = 1.0 + w * tx + (y * tz - z * ty);
+      forward[1] = w * ty + (z * tx - x * tz);
+      forward[2] = w * tz + (x * ty - y * tx);
+      const double length_squared = forward[0] * forward[0] +
+                                    forward[1] * forward[1] +
+                                    forward[2] * forward[2];
+      if (std::isfinite(forward[0]) && std::isfinite(forward[1]) &&
+          std::isfinite(forward[2]) && length_squared > 1e-8) {
+        const double inverse_length = 1.0 / std::sqrt(length_squared);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          forward[axis] *= inverse_length;
+        }
+        return true;
+      }
+    }
+  }
+
   double snapshot_car[3]{};
   double snapshot_forward[3]{};
   std::uintptr_t snapshot_proxy{};
   std::int64_t snapshot_ns{};
-  if (!ReadRouteBSnapshot(probe, snapshot_car, snapshot_forward,
-                          snapshot_proxy, snapshot_ns)) {
-    return false;
-  }
-  const std::uintptr_t proxy =
-      probe.transform_proxy.load(std::memory_order_relaxed);
+  const bool have_snapshot =
+      ReadRouteBSnapshot(probe, snapshot_car, snapshot_forward,
+                         snapshot_proxy, snapshot_ns);
   const std::uintptr_t watched =
       probe.watched_proxy.load(std::memory_order_relaxed);
-  if (proxy == 0 || watched == 0 || proxy != watched) {
+  if (watched == 0) {
     return false;
   }
+  const bool snapshot_matches = have_snapshot && snapshot_proxy == watched;
 
-  const auto *matrix = reinterpret_cast<const double *>(proxy + 0xE0);
+  const auto *matrix = reinterpret_cast<const double *>(watched + 0xE0);
   const auto *translation = reinterpret_cast<const double *>(
-      proxy + kVehicleProxyTranslationOffset);
-  double car_cm[3]{};
-  double forward[3]{};
+      watched + kVehicleProxyTranslationOffset);
   for (std::size_t axis = 0; axis < 3; ++axis) {
     car_cm[axis] = translation[axis];
     forward[axis] = matrix[axis];
@@ -3163,8 +3352,6 @@ bool BuildRouteBPoseDirect(const RenderXProbe &probe, const bool follow_pitch,
       !std::isfinite(forward[1]) || !std::isfinite(forward[2])) {
     return false;
   }
-  // Same full normalization as the detour: forward.z must be sin(pitch), not
-  // tan(pitch), for the fallback's body frame.
   const double length_squared = forward[0] * forward[0] +
                                 forward[1] * forward[1] +
                                 forward[2] * forward[2];
@@ -3172,20 +3359,55 @@ bool BuildRouteBPoseDirect(const RenderXProbe &probe, const bool follow_pitch,
     return false;
   }
   const double inverse_length = 1.0 / std::sqrt(length_squared);
-  forward[0] *= inverse_length;
-  forward[1] *= inverse_length;
-  forward[2] *= inverse_length;
-
-  double delta_cm[3]{};
-  double distance_squared = 0.0;
   for (std::size_t axis = 0; axis < 3; ++axis) {
-    delta_cm[axis] = car_cm[axis] - snapshot_car[axis];
-    distance_squared += delta_cm[axis] * delta_cm[axis];
+    forward[axis] *= inverse_length;
   }
-  // A pointer reused by a different primitive or a torn read must not move the
-  // camera kilometres away. One render frame of travel is far below this.
-  if (!std::isfinite(distance_squared) ||
-      distance_squared > kVehicleProxyMaxOffsetCm * kVehicleProxyMaxOffsetCm) {
+
+  double reference_cm[3]{};
+  bool have_reference = false;
+  double limit_cm = 0.0;
+  if (snapshot_matches) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      reference_cm[axis] = snapshot_car[axis];
+    }
+    have_reference = true;
+    limit_cm = kVehicleProxyMaxOffsetCm;
+  } else if (probe.vehicle_anchor_valid.load(std::memory_order_acquire)) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      reference_cm[axis] =
+          probe.vehicle_anchor_cm[axis].load(std::memory_order_relaxed);
+    }
+    reference_cm[2] -= kVehicleAnchorCenterHeightCm;
+    have_reference = true;
+    limit_cm = kViewHistorySnapDistanceCm;
+  } else if (probe.anchor_valid.load(std::memory_order_acquire)) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      reference_cm[axis] =
+          probe.anchor_cm[axis].load(std::memory_order_relaxed);
+    }
+    have_reference = true;
+    limit_cm = kViewHistorySnapDistanceCm;
+  }
+  if (have_reference) {
+    double distance_squared = 0.0;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const double delta = car_cm[axis] - reference_cm[axis];
+      distance_squared += delta * delta;
+    }
+    if (!std::isfinite(distance_squared) ||
+        distance_squared > limit_cm * limit_cm) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool BuildRouteBPoseDirect(const RenderXProbe &probe, const bool follow_pitch,
+                           double eye[3],
+                           double rotation[3]) noexcept {
+  double car_cm[3]{};
+  double forward[3]{};
+  if (!ReadRouteBDirectCar(probe, car_cm, forward)) {
     return false;
   }
   return BuildRouteBPoseFromModel(probe, car_cm, forward, eye, rotation) ||
@@ -3285,172 +3507,108 @@ bool IsRouteBViewWritable(void *view) noexcept {
   return true;
 }
 
-bool ApplyRouteBFov(void *view, const RenderXProbe &probe) noexcept {
-  if (view == nullptr ||
+// Write the final route B pose into one view, before visibility and before
+// PrepareViewStateForVisibility snapshots the temporal history. This is the
+// only place the camera may be moved: a post-Prepare write would leave the
+// culling frustum, motion vectors and TAA history describing a different
+// camera, which is visible as a one-frame ghost/flash.
+//
+// The FViewMatrices constructor is used instead of scaling the stored
+// projection in place. In-place scaling leaves InvProjectionMatrix,
+// ProjectionNoAAMatrix and ScreenToClipMatrix describing the game's lens; TAA,
+// SSR and the depth reconstruction read those on the same frame. The
+// constructor refreshes every derived matrix from the projection and rotation
+// the renderer actually uses.
+bool ApplyRouteBPoseToView(void *view, const double eye[3],
+                           const double rotation[3],
+                           const RenderXProbe &probe) noexcept {
+  if (view == nullptr || !IsRouteBFullScreenView(view) ||
       !probe.version_gate.load(std::memory_order_acquire)) {
     return false;
   }
-  const float desired =
-      probe.route_b_model_lens.load(std::memory_order_relaxed);
-  if (!(desired > 1.0F) || !(desired < 179.0F)) {
+  ViewMatricesCtorFn ctor =
+      g_view_matrices_ctor.load(std::memory_order_acquire);
+  if (ctor == nullptr) {
     return false;
   }
   const auto address = reinterpret_cast<std::uintptr_t>(view);
+
+  RouteBViewInit init{};
+  std::memcpy(init.projection,
+              reinterpret_cast<const void *>(address + kViewMatricesOffset),
+              sizeof(init.projection));
+
+  // The model lens replaces the game's lens for the same frame. Keep the
+  // depth range and TAA jitter terms untouched; only the X/Y scale changes.
+  const float desired =
+      probe.route_b_model_lens.load(std::memory_order_relaxed);
   float current = 0.0F;
   std::memcpy(&current,
               reinterpret_cast<const void *>(address + kViewFovOffset),
               sizeof(current));
-  if (!std::isfinite(current) || current <= 1.0F || current >= 179.0F ||
-      std::fabs(current - desired) < 0.01F) {
-    return false;
+  bool lens_changed = false;
+  if (std::isfinite(current) && current > 1.0F && current < 179.0F &&
+      desired > 1.0F && desired < 179.0F &&
+      std::fabs(current - desired) >= 0.01F) {
+    const double current_radians =
+        static_cast<double>(current) * kDegreesToRadians;
+    const double desired_radians =
+        static_cast<double>(desired) * kDegreesToRadians;
+    const double denominator = std::tan(desired_radians * 0.5);
+    if (std::fabs(denominator) > 1e-6) {
+      const double factor = std::tan(current_radians * 0.5) / denominator;
+      if (std::isfinite(factor) && factor > 0.0) {
+        init.projection[0][0] *= factor;
+        init.projection[1][1] *= factor;
+        lens_changed = true;
+      }
+    }
   }
-  const double current_radians =
-      static_cast<double>(current) * kDegreesToRadians;
-  const double desired_radians =
-      static_cast<double>(desired) * kDegreesToRadians;
-  const double denominator = std::tan(desired_radians * 0.5);
-  if (!(std::fabs(denominator) > 1e-6)) {
-    return false;
-  }
-  const double factor = std::tan(current_radians * 0.5) / denominator;
-  if (!std::isfinite(factor) || factor <= 0.0) {
-    return false;
-  }
-  // FViewMatrices starts with ProjectionMatrix; UE stores it row-major, so
-  // [0][0] and [1][1] are the horizontal / vertical scale terms. Scaling both
-  // changes the lens without touching the TAA jitter terms or the depth range.
-  auto *projection = reinterpret_cast<double *>(address + kViewMatricesOffset);
-  projection[0] *= factor;
-  projection[5] *= factor;
-  std::memcpy(reinterpret_cast<void *>(address + kViewFovOffset), &desired,
-              sizeof(desired));
-  std::memcpy(reinterpret_cast<void *>(address + kViewDesiredFovOffset),
-              &desired, sizeof(desired));
-  return true;
-}
 
-bool UpdateRouteBPrevViewHistory(void *view) noexcept {
-  if (!IsRouteBFullScreenView(view)) {
-    return false;
-  }
-  std::uintptr_t state = 0;
-  const auto view_address = reinterpret_cast<std::uintptr_t>(view);
-  std::memcpy(&state,
-              reinterpret_cast<const void *>(view_address + kViewStateOffset),
-              sizeof(state));
-  if (state < 0x10000 || (state & 0x7) != 0) {
-    return false;
-  }
-  // FViewInfo::PrevViewInfo is read at the start of the next frame. Prepare
-  // has already populated it from the previous state, so replacing the state
-  // entry here supplies the next frame with this frame's final route B
-  // matrices rather than the earlier game-thread pose.
-  std::memcpy(reinterpret_cast<void *>(state + kViewStatePrevFrameOffset),
-              reinterpret_cast<const void *>(view_address + kViewInfoRectOffset),
-              0x10);
-  std::memcpy(
-      reinterpret_cast<void *>(state + kViewStatePrevFrameMatricesOffset),
-      reinterpret_cast<const void *>(view_address + kViewMatricesOffset),
-      kViewMatricesSize);
-  return true;
-}
+  MakeViewRotationMatrix(rotation[0], rotation[1], rotation[2],
+                         init.view_rotation);
+  init.view_origin[0] = eye[0];
+  init.view_origin[1] = eye[1];
+  init.view_origin[2] = eye[2];
+  std::int32_t rect[4]{};
+  std::memcpy(rect,
+              reinterpret_cast<const void *>(address + kViewInfoRectOffset),
+              sizeof(rect));
+  std::memcpy(init.constrained_rect, rect, sizeof(init.constrained_rect));
+  init.stereo_pass = 0;
+  init.use_faux_ortho = false;
 
-void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
-                                  const double forward[3]) noexcept {
-  RenderXProbe &probe = context.render_x;
-  if (!context.started.load(std::memory_order_acquire) ||
-      !probe.version_gate.load(std::memory_order_acquire)) {
-    return;
+  try {
+    ctor(reinterpret_cast<void *>(address + kViewMatricesOffset), &init);
+  } catch (...) {
+    return false;
   }
-  const std::uint32_t render_thread =
-      probe.render_thread_id.load(std::memory_order_acquire);
-  if (render_thread != 0 &&
-      static_cast<std::uint32_t>(GetCurrentThreadId()) != render_thread) {
-    return;
+
+  if (lens_changed) {
+    std::memcpy(reinterpret_cast<void *>(address + kViewFovOffset), &desired,
+                sizeof(desired));
+    std::memcpy(reinterpret_cast<void *>(address + kViewDesiredFovOffset),
+                &desired, sizeof(desired));
   }
-  if (!probe.route_b_early_views_valid.load(std::memory_order_acquire)) {
-    return;
-  }
-  const std::uintptr_t prepared_renderer =
-      probe.route_b_prepare_renderer.load(std::memory_order_relaxed);
-  const std::uintptr_t active_renderer =
-      probe.route_b_active_renderer.load(std::memory_order_acquire);
-  if (prepared_renderer == 0 ||
-      (active_renderer != 0 && active_renderer == prepared_renderer)) {
-    return;
-  }
-  const std::uint64_t generation =
-      probe.route_b_prepare_generation.load(std::memory_order_acquire);
-  const std::uint64_t last_generation =
-      probe.route_b_transform_generation.load(std::memory_order_acquire);
-  if (generation == 0 || generation == last_generation) {
-    return;
-  }
-  const std::int64_t prepared_ns =
-      probe.route_b_prepare_ns.load(std::memory_order_relaxed);
-  const std::int64_t now_ns = NowNanoseconds();
-  if (prepared_ns == 0 || now_ns < prepared_ns ||
-      now_ns - prepared_ns > 100'000'000) {
-    return;
-  }
-  const std::uint32_t count =
-      probe.route_b_early_view_count.load(std::memory_order_acquire);
-  if (count == 0 ||
-      count > sizeof(probe.route_b_early_views) /
-                  sizeof(probe.route_b_early_views[0])) {
-    return;
-  }
+  std::memcpy(reinterpret_cast<void *>(address + kViewLocationOffset), eye,
+              sizeof(eye[0]) * 3);
+  std::memcpy(reinterpret_cast<void *>(address + kViewRotationOffset),
+              rotation, sizeof(rotation[0]) * 3);
+
+  // Keep ShadowViewMatrices and ViewFrustum in sync; the constructor only
+  // rebuilt the view matrices. SetupViewFrustum then refreshes both the culling
+  // frustum and its origin for the non-stereo visibility path.
   SceneViewUpdateMatrixFn update =
       g_scene_view_update_matrix.load(std::memory_order_acquire);
-  if (update == nullptr) {
-    return;
-  }
-  double eye[3]{};
-  double rotation[3]{};
-  const bool follow_pitch = RouteBFollowPitch(context);
-  if (!BuildRouteBPoseFromModel(probe, car_cm, forward, eye, rotation) &&
-      !BuildRouteBPoseFromCar(car_cm, forward, follow_pitch, eye, rotation)) {
-    return;
+  if (update != nullptr) {
+    update(view);
   }
   SceneViewSetupFrustumFn setup_frustum =
       g_scene_view_setup_frustum.load(std::memory_order_acquire);
-  std::uint64_t applied = 0;
-  for (std::uint32_t index = 0; index < count; ++index) {
-    void *view = reinterpret_cast<void *>(
-        probe.route_b_early_views[index].load(std::memory_order_relaxed));
-    if (!IsRouteBFullScreenView(view)) {
-      continue;
-    }
-    const auto view_address = reinterpret_cast<std::uintptr_t>(view);
-    std::uintptr_t state = 0;
-    std::memcpy(&state,
-                reinterpret_cast<const void *>(view_address +
-                                               kViewStateOffset),
-                sizeof(state));
-    if (state == 0 ||
-        state != probe.route_b_early_view_states[index].load(
-                     std::memory_order_relaxed)) {
-      continue;
-    }
-    std::memcpy(reinterpret_cast<void *>(view_address + kViewLocationOffset),
-                eye, sizeof(eye));
-    std::memcpy(reinterpret_cast<void *>(view_address + kViewRotationOffset),
-                rotation, sizeof(rotation));
-    ApplyRouteBFov(view, probe);
-    update(view);
-    if (setup_frustum != nullptr) {
-      setup_frustum(view);
-    }
-    ++applied;
+  if (setup_frustum != nullptr) {
+    setup_frustum(view);
   }
-  if (applied == 0) {
-    return;
-  }
-  probe.route_b_render_applied.fetch_add(applied, std::memory_order_relaxed);
-  probe.route_b_transform_generation.store(generation,
-                                            std::memory_order_release);
-  probe.route_b_early_last_age_us.store(0, std::memory_order_relaxed);
-  probe.route_b_early_ns.store(NowNanoseconds(), std::memory_order_relaxed);
+  return true;
 }
 
 // Apply route B before FSceneRenderer::PrepareViewStateForVisibility. At this
@@ -3465,7 +3623,7 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
     return false;
   }
   // A failed attempt this frame must not leave an older frame's view list
-  // looking fresh to the transform/late hooks.
+  // looking fresh to the diagnostics.
   probe.route_b_early_views_valid.store(false, std::memory_order_release);
   probe.route_b_early_view_count.store(0, std::memory_order_relaxed);
   probe.route_b_prepare_renderer.store(0, std::memory_order_relaxed);
@@ -3512,17 +3670,54 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
   double eye[3]{};
   double rotation[3]{};
   std::int64_t age_ns = 0;
+  const std::int64_t now_ns = NowNanoseconds();
   const bool follow_pitch = RouteBFollowPitch(context);
-  if (BuildRouteBPoseDirect(probe, follow_pitch, eye, rotation)) {
+  // The pre-visibility call can run one render frame before the transform
+  // notification is published; the 2.7 log showed a 23 ms snapshot age here.
+  // Using that snapshot makes the camera ride the previous car transform and
+  // the car visibly shakes. The proxy itself is already the object the
+  // renderer draws this frame, so read it directly first. The notification
+  // snapshot is only a fallback when the proxy pointer is not available.
+  // The presenter pose is the artifact-free path: it is the NFS camera the
+  // Game thread already produced, and it is aligned horizontally here with
+  // the fresh VehicleMesh transform. Its Z carries the model height and the
+  // origin-offset slider. The model-pose path remains a fallback.
+  bool have_pose =
+      BuildRouteBPoseFromPresenter(context, probe, eye, rotation);
+  if (have_pose) {
+    probe.route_b_early_presenter.fetch_add(1, std::memory_order_relaxed);
+  } else if (BuildRouteBPoseDirect(probe, follow_pitch, eye, rotation)) {
     probe.route_b_early_direct.fetch_add(1, std::memory_order_relaxed);
-  } else if (!BuildRouteBPose(probe, follow_pitch, eye, rotation, age_ns)) {
+    have_pose = true;
+  } else if (BuildRouteBPose(probe, follow_pitch, eye, rotation, age_ns)) {
+    have_pose = true;
+  }
+  if (!have_pose) {
+    const std::int64_t held_age = now_ns - probe.route_b_held_ns;
+    if (probe.route_b_held_pose_valid && held_age >= 0 &&
+        held_age <= kRouteBHeldPoseNs) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        eye[axis] = probe.route_b_held_eye_cm[axis];
+        rotation[axis] = probe.route_b_held_rotation[axis];
+      }
+      probe.route_b_early_held.fetch_add(1, std::memory_order_relaxed);
+      have_pose = true;
+    }
+  }
+  if (!have_pose) {
     probe.prepare_pose_fail.fetch_add(1, std::memory_order_relaxed);
     probe.route_b_early_fallbacks.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+  // Keep the last applied pose for the one-frame hold above. The pose is in
+  // world centimetres, like the view fields it is copied into.
+  probe.route_b_held_pose_valid = true;
+  probe.route_b_held_ns = now_ns;
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    probe.route_b_held_eye_cm[axis] = eye[axis];
+    probe.route_b_held_rotation[axis] = rotation[axis];
+  }
 
-  SceneViewSetupFrustumFn setup_frustum =
-      g_scene_view_setup_frustum.load(std::memory_order_acquire);
   auto *view_array = static_cast<void *const *>(views);
   std::uint64_t applied = 0;
   for (std::int32_t index = 0; index < count; ++index) {
@@ -3530,19 +3725,12 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
     if (!IsRouteBFullScreenView(view)) {
       continue;
     }
-    const auto view_address = reinterpret_cast<std::uintptr_t>(view);
-    std::memcpy(reinterpret_cast<void *>(view_address + kViewLocationOffset),
-                eye, sizeof(eye));
-    std::memcpy(reinterpret_cast<void *>(view_address + kViewRotationOffset),
-                rotation, sizeof(rotation));
-    ApplyRouteBFov(view, probe);
-    update(view);
-    // UpdateViewMatrix rebuilds ViewFrustum only. SetupViewFrustum also
-    // refreshes CullingFrustum/CullingOrigin, which is what the non-stereo
-    // visibility path expects to match the view.
-    if (setup_frustum != nullptr) {
-      setup_frustum(view);
+    // One authoritative write, before visibility: pose, lens and every derived
+    // matrix (including InvProjection) are rebuilt together.
+    if (!ApplyRouteBPoseToView(view, eye, rotation, probe)) {
+      continue;
     }
+    const auto view_address = reinterpret_cast<std::uintptr_t>(view);
     if (applied <
         sizeof(probe.route_b_early_views) /
             sizeof(probe.route_b_early_views[0])) {
@@ -3576,85 +3764,172 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
       reinterpret_cast<std::uintptr_t>(renderer), std::memory_order_release);
   probe.route_b_prepare_generation.fetch_add(1, std::memory_order_acq_rel);
   probe.route_b_early_views_valid.store(true, std::memory_order_release);
+
+  // TEMP read-only timing diagnostics: snapshot the car/camera sources at the
+  // exact point where the early camera is written. No writes to game state.
+  {
+    probe.timing_frame.fetch_add(1, std::memory_order_relaxed);
+    probe.timing_early_count.fetch_add(1, std::memory_order_relaxed);
+    probe.timing_early_ns.store(NowNanoseconds(), std::memory_order_relaxed);
+    probe.timing_late_seen.store(false, std::memory_order_release);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      probe.timing_early_view[axis].store(eye[axis],
+                                          std::memory_order_relaxed);
+    }
+    double car_cm[3]{};
+    double forward[3]{};
+    if (ReadRouteBDirectCar(probe, car_cm, forward)) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        probe.timing_early_car[axis].store(car_cm[axis],
+                                           std::memory_order_relaxed);
+      }
+    }
+    double presenter_car[3]{};
+    double presenter_eye[3]{};
+    double presenter_rotation[3]{};
+    float presenter_lens = 0.0F;
+    bool presenter_fov = false;
+    if (ReadPresenterPose(context, presenter_eye, presenter_rotation,
+                          &presenter_lens, &presenter_fov,
+                          presenter_car)) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        probe.timing_presenter_car[axis].store(
+            presenter_car[axis], std::memory_order_relaxed);
+      }
+    }
+  }
   return true;
 }
 
-bool ApplyRouteBView(Context &context, void *self,
-                     void *view_matrices) noexcept {
-  if (!context.render_x.version_gate.load(std::memory_order_acquire) ||
-      context.render_x.render_thread_id.load(std::memory_order_acquire) == 0 ||
-      !context.render_x.anchor_enabled.load(std::memory_order_acquire)) {
-    return false;
+// Experimental transform-hook writer. It is intentionally guarded by the
+// view list captured by ApplyRouteBEarly and by the prepare generation, so it
+// writes at most once per prepared frame. This is not a late uniform fallback.
+void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
+                                  const double forward[3]) noexcept {
+  RenderXProbe &probe = context.render_x;
+  if (!context.started.load(std::memory_order_acquire) ||
+      !probe.version_gate.load(std::memory_order_acquire)) {
+    return;
   }
-  if (self == nullptr || view_matrices == nullptr) {
-    return false;
+  const std::uint32_t render_thread =
+      probe.render_thread_id.load(std::memory_order_acquire);
+  if (render_thread != 0 &&
+      static_cast<std::uint32_t>(GetCurrentThreadId()) != render_thread) {
+    return;
   }
-  const auto self_address = reinterpret_cast<std::uintptr_t>(self);
-  if (reinterpret_cast<std::uintptr_t>(view_matrices) !=
-      self_address + kViewMatricesOffset) {
-    return false;
+  if (!probe.route_b_early_views_valid.load(std::memory_order_acquire)) {
+    return;
   }
-  // A full-screen game view is the only one this rigid chase pose should
-  // replace. Reflection/scene-capture views often use small rectangles; they
-  // must keep their own camera. Shadow views do not call this function.
-  if (!IsRouteBFullScreenView(self)) {
-    return false;
+  const std::uintptr_t prepared_renderer =
+      probe.route_b_prepare_renderer.load(std::memory_order_relaxed);
+  const std::uintptr_t active_renderer =
+      probe.route_b_active_renderer.load(std::memory_order_acquire);
+  if (prepared_renderer == 0 ||
+      (active_renderer != 0 && active_renderer == prepared_renderer)) {
+    return;
   }
-  // Advisory witness: count suspicious view data but do not skip the pose.
-  // Route B must be applied on every eligible render frame; skipping an
-  // occasional frame here makes the vehicle visibly shake.
-  if (!IsRouteBViewWritable(self)) {
-    context.render_x.route_b_witness_failures.fetch_add(1,
-                                                        std::memory_order_relaxed);
+  const std::uint64_t generation =
+      probe.route_b_prepare_generation.load(std::memory_order_acquire);
+  const std::uint64_t last_generation =
+      probe.route_b_transform_generation.load(std::memory_order_acquire);
+  if (generation == 0 || generation == last_generation) {
+    return;
   }
-  std::int32_t rect[4]{};
-  std::memcpy(rect,
-              reinterpret_cast<const void *>(self_address + kViewInfoRectOffset),
-              sizeof(rect));
-  ViewMatricesCtorFn ctor = g_view_matrices_ctor.load(std::memory_order_acquire);
-  if (ctor == nullptr) {
-    return false;
+  const std::int64_t prepared_ns =
+      probe.route_b_prepare_ns.load(std::memory_order_relaxed);
+  const std::int64_t now_ns = NowNanoseconds();
+  if (prepared_ns == 0 || now_ns < prepared_ns ||
+      now_ns - prepared_ns > 100'000'000) {
+    return;
+  }
+  const std::uint32_t count =
+      probe.route_b_early_view_count.load(std::memory_order_acquire);
+  if (count == 0 ||
+      count > sizeof(probe.route_b_early_views) /
+                  sizeof(probe.route_b_early_views[0])) {
+    return;
   }
   double eye[3]{};
   double rotation[3]{};
-  std::int64_t age_ns = 0;
-  if (!BuildRouteBPose(context.render_x, RouteBFollowPitch(context), eye,
-                       rotation, age_ns)) {
-    return false;
+  const bool follow_pitch = RouteBFollowPitch(context);
+  if (!BuildRouteBPoseFromModel(probe, car_cm, forward, eye, rotation) &&
+      !BuildRouteBPoseFromCar(car_cm, forward, follow_pitch, eye, rotation)) {
+    return;
   }
-
-  ApplyRouteBFov(self, context.render_x);
-  RouteBViewInit init{};
-  std::memcpy(init.projection, view_matrices, sizeof(init.projection));
-  MakeViewRotationMatrix(rotation[0], rotation[1], rotation[2],
-                         init.view_rotation);
-  init.view_origin[0] = eye[0];
-  init.view_origin[1] = eye[1];
-  init.view_origin[2] = eye[2];
-  std::memcpy(init.constrained_rect, rect, sizeof(init.constrained_rect));
-  init.stereo_pass = 0;
-  init.use_faux_ortho = false;
-
-  try {
-    ctor(view_matrices, &init);
-  } catch (...) {
-    return false;
+  std::uint64_t applied = 0;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    void *view = reinterpret_cast<void *>(
+        probe.route_b_early_views[index].load(std::memory_order_relaxed));
+    if (!IsRouteBFullScreenView(view)) {
+      continue;
+    }
+    const auto view_address = reinterpret_cast<std::uintptr_t>(view);
+    std::uintptr_t state = 0;
+    std::memcpy(&state,
+                reinterpret_cast<const void *>(view_address +
+                                               kViewStateOffset),
+                sizeof(state));
+    if (state == 0 ||
+        state != probe.route_b_early_view_states[index].load(
+                     std::memory_order_relaxed)) {
+      continue;
+    }
+    if (!ApplyRouteBPoseToView(view, eye, rotation, probe)) {
+      continue;
+    }
+    ++applied;
   }
-  std::memcpy(reinterpret_cast<void *>(self_address + kViewLocationOffset), eye,
-              sizeof(eye));
-  std::memcpy(reinterpret_cast<void *>(self_address + kViewRotationOffset),
-              rotation, sizeof(rotation));
-  context.render_x.route_b_applied.fetch_add(1, std::memory_order_relaxed);
-  context.render_x.route_b_last_age_us.store(
-      static_cast<std::uint64_t>(age_ns / 1000), std::memory_order_relaxed);
-  return true;
+  if (applied == 0) {
+    return;
+  }
+  probe.route_b_render_applied.fetch_add(applied, std::memory_order_relaxed);
+  probe.route_b_transform_generation.store(generation,
+                                            std::memory_order_release);
+  probe.route_b_early_last_age_us.store(0, std::memory_order_relaxed);
+  probe.route_b_early_ns.store(NowNanoseconds(), std::memory_order_relaxed);
 }
 
-// Diagnostic-only view hook. It changes nothing; it records whether the
-// renderer's late view setup runs on the same thread as the render transform
-// hook, and how old the transform snapshot is at that point. Route B will use
-// the same target, so this answers the thread/timing question without moving
-// the camera first.
+// Diagnostic-only view hook. It records whether the renderer's late view setup
+// runs on the same thread as the render transform hook, and how old the
+// transform snapshot is. It deliberately never touches the camera: changing
+// the pose after PrepareViewStateForVisibility would leave this frame's
+// culling, motion vectors and TAA history describing a different camera, which
+// is exactly the one-frame ghost this hook used to cause.
+//
+// The hook is kept installed because the transform/variable diagnostics are
+// useful and because removing an established hook target would change the
+// plugin's failure surface. Route B itself is applied only in
+// ApplyRouteBEarly, before visibility.
+bool IsRouteBEarlyView(const RenderXProbe &probe, void *view) noexcept {
+  if (view == nullptr ||
+      !probe.route_b_early_views_valid.load(std::memory_order_acquire)) {
+    return false;
+  }
+  const std::uint32_t count =
+      probe.route_b_early_view_count.load(std::memory_order_relaxed);
+  const std::uint32_t limit =
+      count < sizeof(probe.route_b_early_views) /
+                  sizeof(probe.route_b_early_views[0])
+          ? count
+          : static_cast<std::uint32_t>(
+                sizeof(probe.route_b_early_views) /
+                sizeof(probe.route_b_early_views[0]));
+  const auto address = reinterpret_cast<std::uintptr_t>(view);
+  std::uintptr_t state = 0;
+  std::memcpy(&state,
+              reinterpret_cast<const void *>(address + kViewStateOffset),
+              sizeof(state));
+  for (std::uint32_t index = 0; index < limit; ++index) {
+    if (probe.route_b_early_views[index].load(
+            std::memory_order_relaxed) == address &&
+        probe.route_b_early_view_states[index].load(
+            std::memory_order_relaxed) == state) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void ANOMALY_CALL ViewUniformDetour(void *self, void *view_matrices,
                                     void *prev_view_matrices,
                                     void *out_parameters,
@@ -3693,58 +3968,6 @@ void ANOMALY_CALL ViewUniformDetour(void *self, void *view_matrices,
     if (render_thread != 0 && thread == render_thread) {
       probe.view_uniform_render_calls.fetch_add(1,
                                                 std::memory_order_relaxed);
-      const std::int64_t now_ns = NowNanoseconds();
-      const std::int64_t early_ns =
-          probe.route_b_early_ns.load(std::memory_order_relaxed);
-      bool early_this_view = false;
-      if (probe.route_b_early_views_valid.load(std::memory_order_acquire) &&
-          early_ns != 0 && now_ns >= early_ns &&
-          now_ns - early_ns <= kVehicleRenderTransformMaxAgeNs) {
-        const std::uint32_t early_count =
-            probe.route_b_early_view_count.load(std::memory_order_relaxed);
-        const std::uint32_t limit =
-            early_count <
-                    sizeof(probe.route_b_early_views) /
-                        sizeof(probe.route_b_early_views[0])
-                ? early_count
-                : static_cast<std::uint32_t>(
-                      sizeof(probe.route_b_early_views) /
-                      sizeof(probe.route_b_early_views[0]));
-        const auto self_address = reinterpret_cast<std::uintptr_t>(self);
-        std::uintptr_t self_state = 0;
-        std::memcpy(&self_state,
-                    reinterpret_cast<const void *>(self_address +
-                                                   kViewStateOffset),
-                    sizeof(self_state));
-        for (std::uint32_t index = 0; index < limit; ++index) {
-          if (self_state != 0 &&
-              probe.route_b_early_views[index].load(
-                  std::memory_order_relaxed) == self_address &&
-              probe.route_b_early_view_states[index].load(
-                  std::memory_order_relaxed) == self_state) {
-            early_this_view = true;
-            break;
-          }
-        }
-      }
-      bool route_b_this_view = false;
-      if (context->enabled.load(std::memory_order_acquire) &&
-          probe.version_gate.load(std::memory_order_acquire)) {
-        route_b_this_view = early_this_view;
-        if (!early_this_view) {
-          if (ApplyRouteBView(*context, self, view_matrices)) {
-            route_b_this_view = true;
-          } else {
-            probe.route_b_fallbacks.fetch_add(1, std::memory_order_relaxed);
-          }
-        }
-        if (route_b_this_view &&
-            context->started.load(std::memory_order_acquire) &&
-            UpdateRouteBPrevViewHistory(self)) {
-          probe.route_b_history_updated.fetch_add(1,
-                                                  std::memory_order_relaxed);
-        }
-      }
       if (probe.transform_valid.load(std::memory_order_acquire)) {
         const std::int64_t transform_ns =
             probe.transform_ns.load(std::memory_order_relaxed);
@@ -3776,6 +3999,68 @@ void ANOMALY_CALL ViewUniformDetour(void *self, void *view_matrices,
   } catch (...) {
   }
 
+  // TEMP read-only timing diagnostics: compare the car/view at the late
+  // uniform setup with the values captured by the early camera write.
+  if (context != nullptr && IsRouteBEarlyView(context->render_x, self) &&
+      context->render_x.timing_frame.load(std::memory_order_relaxed) != 0 &&
+      !context->render_x.timing_late_seen.exchange(
+          true, std::memory_order_acq_rel)) {
+    RenderXProbe &probe = context->render_x;
+    const auto address = reinterpret_cast<std::uintptr_t>(self);
+    double late_view[3]{};
+    std::memcpy(late_view,
+                reinterpret_cast<const void *>(address +
+                                               kViewLocationOffset),
+                sizeof(late_view));
+    double late_car[3]{};
+    double late_forward[3]{};
+    const bool have_car =
+        ReadRouteBDirectCar(probe, late_car, late_forward);
+    probe.timing_late_count.fetch_add(1, std::memory_order_relaxed);
+    probe.timing_late_ns.store(NowNanoseconds(), std::memory_order_relaxed);
+    double car_distance = 0.0;
+    double view_distance = 0.0;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      probe.timing_late_view[axis].store(late_view[axis],
+                                         std::memory_order_relaxed);
+      if (have_car) {
+        probe.timing_late_car[axis].store(late_car[axis],
+                                          std::memory_order_relaxed);
+        const double car_delta =
+            late_car[axis] -
+            probe.timing_early_car[axis].load(std::memory_order_relaxed);
+        car_distance += car_delta * car_delta;
+      }
+      const double view_delta =
+          late_view[axis] -
+          probe.timing_early_view[axis].load(std::memory_order_relaxed);
+      view_distance += view_delta * view_delta;
+    }
+    const auto store_distance = [](std::atomic<std::uint64_t> &peak,
+                                   std::atomic<std::uint64_t> &sum,
+                                   std::atomic<std::uint64_t> &count,
+                                   const double distance_cm) {
+      if (!std::isfinite(distance_cm)) {
+        return;
+      }
+      const auto value = static_cast<std::uint64_t>(
+          distance_cm * 10.0 + 0.5);
+      RaisePeak(peak, value);
+      sum.fetch_add(value, std::memory_order_relaxed);
+      count.fetch_add(1, std::memory_order_relaxed);
+    };
+    if (have_car) {
+      store_distance(probe.timing_car_delta_peak_dmm,
+                     probe.timing_car_delta_sum_dmm,
+                     probe.timing_car_delta_count,
+                     std::sqrt(car_distance));
+    }
+    store_distance(probe.timing_view_delta_peak_dmm,
+                   probe.timing_view_delta_sum_dmm,
+                   probe.timing_view_delta_count,
+                   std::sqrt(view_distance));
+  }
+
   if (leased && context != nullptr && context->hook != nullptr &&
       context->hook->end_callback != nullptr) {
     static_cast<void>(
@@ -3785,8 +4070,8 @@ void ANOMALY_CALL ViewUniformDetour(void *self, void *view_matrices,
 
 // Pre-visibility route B. This runs immediately before culling tasks are
 // launched and before PrepareViewStateForVisibility snapshots the matrices
-// into the temporal history. The late view-uniform hook remains as a fallback
-// for the first frames before the render transform hook has published a pose.
+// into the temporal history. It is the only camera writer; the late
+// view-uniform hook is diagnostic and must never move a view.
 void ANOMALY_CALL PrepareViewStateDetour(void *self,
                                          const void *scene_textures_config) noexcept {
   Context *context = g_active.load(std::memory_order_acquire);
@@ -3851,6 +4136,16 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
   if (context.early_route_b_unavailable) {
     return false;
   }
+  const auto note_pattern_miss = [&context]() {
+    ++context.prepare_hook_pattern_failures;
+    if (context.prepare_hook_pattern_failures >=
+        kPrepareHookMaxPatternFailures) {
+      context.early_route_b_unavailable = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: early route B pattern still unresolved after "
+          "the retry window; route B disabled for this session");
+    }
+  };
   if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
     return false;
   }
@@ -3867,13 +4162,12 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
       context.prepare_view_state_hook_target.load(std::memory_order_acquire);
   if (target == 0) {
     if (!ResolveSignature(context, kPrepareViewStatePattern, target)) {
-      context.early_route_b_unavailable = true;
+      note_pattern_miss();
       if (!context.prepare_view_state_pattern_failure_logged) {
         context.prepare_view_state_pattern_failure_logged = true;
         Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
             "nfs2015 chase cam: PrepareViewStateForVisibility pattern not "
-            "found; early route B disabled for this session, late view hook "
-            "stays active");
+            "found; early route B is retrying, no late camera write");
       }
       return false;
     }
@@ -3885,13 +4179,12 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
     std::uintptr_t update_matrix = 0;
     if (!ResolveSignature(context, kSceneViewUpdateMatrixPattern,
                           update_matrix)) {
-      context.early_route_b_unavailable = true;
+      note_pattern_miss();
       if (!context.route_b_pattern_failure_logged) {
         context.route_b_pattern_failure_logged = true;
         Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
             "nfs2015 chase cam: FSceneView::UpdateViewMatrix pattern not "
-            "found; early route B disabled for this session, late view hook "
-            "stays active");
+            "found; early route B is retrying, no late camera write");
       }
       return false;
     }
@@ -3915,6 +4208,29 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
           reinterpret_cast<SceneViewSetupFrustumFn>(setup_frustum),
           std::memory_order_release);
     }
+  }
+
+  // Route B rebuilds FViewMatrices through the engine constructor so every
+  // derived matrix (InvProjection, ProjectionNoAA, ScreenToClip) matches the
+  // lens it writes. Resolve the constructor here as well: the prepare hook can
+  // be installed before the diagnostic view-uniform hook.
+  if (g_view_matrices_ctor.load(std::memory_order_acquire) == nullptr) {
+    std::uintptr_t matrices_ctor = 0;
+    if (ResolveSignature(context, kViewMatricesCtorPattern, matrices_ctor)) {
+      g_view_matrices_ctor.store(
+          reinterpret_cast<ViewMatricesCtorFn>(matrices_ctor),
+          std::memory_order_release);
+    }
+  }
+  if (g_view_matrices_ctor.load(std::memory_order_acquire) == nullptr) {
+    note_pattern_miss();
+    if (!context.route_b_pattern_failure_logged) {
+      context.route_b_pattern_failure_logged = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: FViewMatrices ctor pattern not found; early "
+          "route B is retrying, no late camera write");
+    }
+    return false;
   }
 
   AnomalyHookRequestV1 request{sizeof(request)};
@@ -3955,6 +4271,7 @@ bool EnsurePrepareViewStateHook(Context &context) noexcept {
   context.prepare_view_state_hook_id.store(handle.id,
                                             std::memory_order_release);
   context.prepare_view_state_hook_failure_logged = false;
+  context.prepare_hook_pattern_failures = 0;
   Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
       "nfs2015 chase cam: pre-visibility route B hook installed");
   return true;
@@ -3981,7 +4298,7 @@ bool EnsureViewUniformHook(Context &context) noexcept {
       context.view_uniform_pattern_unavailable = true;
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
           "nfs2015 chase cam: SetupUniformBufferParameters pattern not found; "
-          "late route B/FOV hook disabled for this session");
+          "view-uniform diagnostics disabled (route B is unaffected)");
       return false;
     }
     context.view_uniform_hook_target.store(target, std::memory_order_release);
@@ -5581,8 +5898,8 @@ void RequestPresenterReset(Context &context) noexcept {
 
 // The model owns its state; other render threads must read a consistent pose.
 void PublishPresenterPose(Context &context, const double location[3],
-                          const double rotation[3], const float lens,
-                          const bool fov_enabled) noexcept {
+                          const double rotation[3], const double car_cm[3],
+                          const float lens, const bool fov_enabled) noexcept {
   const std::uint64_t sequence =
       context.presenter_pose_sequence.load(std::memory_order_relaxed);
   context.presenter_pose_sequence.store(sequence + 1U,
@@ -5592,7 +5909,12 @@ void PublishPresenterPose(Context &context, const double location[3],
                                                 std::memory_order_relaxed);
     context.presenter_pose_rotation[axis].store(rotation[axis],
                                                std::memory_order_relaxed);
+    context.presenter_car_cm[axis].store(car_cm[axis],
+                                        std::memory_order_relaxed);
   }
+  context.presenter_origin_offset_cm.store(
+      context.origin_offset_cm.load(std::memory_order_acquire),
+      std::memory_order_relaxed);
   context.presenter_pose_lens.store(lens, std::memory_order_relaxed);
   context.presenter_pose_fov.store(fov_enabled, std::memory_order_relaxed);
   context.presenter_pose_valid.store(true, std::memory_order_relaxed);
@@ -5602,7 +5924,8 @@ void PublishPresenterPose(Context &context, const double location[3],
 
 [[nodiscard]] bool ReadPresenterPose(const Context &context, double location[3],
                                      double rotation[3], float *lens,
-                                     bool *fov_enabled) noexcept {
+                                     bool *fov_enabled,
+                                     double car_cm[3]) noexcept {
   for (int attempt = 0; attempt < 8; ++attempt) {
     const std::uint64_t before =
         context.presenter_pose_sequence.load(std::memory_order_acquire);
@@ -5617,6 +5940,10 @@ void PublishPresenterPose(Context &context, const double location[3],
           std::memory_order_relaxed);
       rotation[axis] = context.presenter_pose_rotation[axis].load(
           std::memory_order_relaxed);
+      if (car_cm != nullptr) {
+        car_cm[axis] = context.presenter_car_cm[axis].load(
+            std::memory_order_relaxed);
+      }
     }
     *lens = context.presenter_pose_lens.load(std::memory_order_relaxed);
     *fov_enabled =
@@ -5696,7 +6023,8 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   if (context.presenter_pose_valid.load(std::memory_order_relaxed)) {
     const std::int64_t since = now_ns - context.presenter_pose_ns;
     if (since >= -kPresenterSameFrameNs && since < kPresenterSameFrameNs) {
-      return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
+      return ReadPresenterPose(context, location, rotation, lens, fov_enabled,
+                              nullptr);
     }
   }
 
@@ -5940,7 +6268,13 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     context.presenter_anchor[axis].store(sample.anchor_cm[axis],
                                          std::memory_order_relaxed);
   }
-  PublishPresenterPose(context, location, rotation, *lens, *fov_enabled);
+  const double car_cm[3] = {
+      sample.car.position.x * 100.0,
+      sample.car.position.y * 100.0,
+      sample.car.position.z * 100.0,
+  };
+  PublishPresenterPose(context, location, rotation, car_cm, *lens,
+                       *fov_enabled);
   context.presenter_pose_ns = now_ns;
   context.presenter_drift.store(context.chase.drift(),
                                 std::memory_order_relaxed);
@@ -7507,10 +7841,8 @@ void UpdateDisplay(Context &context) noexcept {
         render_x.prepare_fullscreen_views.load(std::memory_order_relaxed);
     context.display.route_b_early_direct =
         render_x.route_b_early_direct.load(std::memory_order_relaxed);
-    context.display.route_b_render_applied =
-        render_x.route_b_render_applied.load(std::memory_order_relaxed);
-    context.display.route_b_history_updated =
-        render_x.route_b_history_updated.load(std::memory_order_relaxed);
+    context.display.route_b_early_held =
+        render_x.route_b_early_held.load(std::memory_order_relaxed);
     context.display.vehicle_fallbacks =
         render_x.vehicle_fallbacks.load(std::memory_order_relaxed);
     context.display.vehicle_read_failures =
@@ -7682,14 +8014,41 @@ void LogViewUniformHookDiagnostics(Context &context) noexcept {
 }
 
 void LogRouteBDiagnostics(Context &context) noexcept {
-  if (context.route_b_diag_logged) {
-    return;
-  }
   const RenderXProbe &probe = context.render_x;
   const std::uint64_t applied =
       probe.route_b_applied.load(std::memory_order_relaxed);
   const std::uint64_t early_applied =
       probe.route_b_early_applied.load(std::memory_order_relaxed);
+  const std::uint64_t prepare_calls =
+      probe.prepare_calls.load(std::memory_order_relaxed);
+  if (!context.route_b_early_failure_logged && early_applied == 0 &&
+      applied == 0 && prepare_calls >= 120) {
+    context.route_b_early_failure_logged = true;
+    char warning[320]{};
+    std::snprintf(
+        warning, sizeof(warning),
+        "nfs2015 chase cam: route B early path has not applied yet: "
+        "prep=%llu off=%llu nv=%llu pf=%llu fs=%llu dir=%llu mm=%llu fb=%llu",
+        static_cast<unsigned long long>(prepare_calls),
+        static_cast<unsigned long long>(
+            probe.prepare_anchor_off.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            probe.prepare_no_views.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            probe.prepare_pose_fail.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            probe.prepare_fullscreen_views.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            probe.route_b_early_direct.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            probe.prepare_thread_mismatch.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            probe.route_b_early_fallbacks.load(std::memory_order_relaxed)));
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, warning);
+  }
+  if (context.route_b_diag_logged) {
+    return;
+  }
   if (applied + early_applied < 10) {
     return;
   }
@@ -7697,7 +8056,7 @@ void LogRouteBDiagnostics(Context &context) noexcept {
   std::snprintf(message, sizeof(message),
                 "nfs2015 chase cam: route B early=%llu late=%llu "
                 "fallbacks=%llu witness=%llu early_age=%.2f ms "
-                "late_age=%.2f ms",
+                "late_age=%.2f ms presenter=%llu direct=%llu held=%llu",
                 static_cast<unsigned long long>(early_applied),
                 static_cast<unsigned long long>(applied),
                 static_cast<unsigned long long>(
@@ -7713,9 +8072,99 @@ void LogRouteBDiagnostics(Context &context) noexcept {
                     1000.0,
                 static_cast<double>(
                     probe.route_b_last_age_us.load(std::memory_order_relaxed)) /
-                    1000.0);
+                    1000.0,
+                static_cast<unsigned long long>(
+                    probe.route_b_early_presenter.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    probe.route_b_early_direct.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    probe.route_b_early_held.load(
+                        std::memory_order_relaxed)));
   Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
   context.route_b_diag_logged = true;
+}
+
+// TEMP read-only timing report. It only logs values already captured by the
+// early/transform/late callbacks; it does not change any camera state.
+void LogRouteBTiming(Context &context) noexcept {
+  const RenderXProbe &probe = context.render_x;
+  const auto early = probe.timing_early_count.load(std::memory_order_relaxed);
+  if (early == 0 || context.route_b_timing_windows >= 15) {
+    return;
+  }
+  const auto now = GetTickCount64();
+  if (context.route_b_timing_last_log_ms != 0 &&
+      now - context.route_b_timing_last_log_ms < 2000) {
+    return;
+  }
+  context.route_b_timing_last_log_ms = now;
+  ++context.route_b_timing_windows;
+
+  const auto late = probe.timing_late_count.load(std::memory_order_relaxed);
+  const auto car_count =
+      probe.timing_car_delta_count.load(std::memory_order_relaxed);
+  const auto view_count =
+      probe.timing_view_delta_count.load(std::memory_order_relaxed);
+  const double car_avg =
+      car_count == 0
+          ? 0.0
+          : static_cast<double>(probe.timing_car_delta_sum_dmm.load(
+                std::memory_order_relaxed)) /
+                static_cast<double>(car_count) / 10.0;
+  const double car_peak =
+      static_cast<double>(probe.timing_car_delta_peak_dmm.load(
+          std::memory_order_relaxed)) / 10.0;
+  const double view_avg =
+      view_count == 0
+          ? 0.0
+          : static_cast<double>(probe.timing_view_delta_sum_dmm.load(
+                std::memory_order_relaxed)) /
+                static_cast<double>(view_count) / 10.0;
+  const double view_peak =
+      static_cast<double>(probe.timing_view_delta_peak_dmm.load(
+          std::memory_order_relaxed)) / 10.0;
+
+  char line[384]{};
+  std::snprintf(
+      line, sizeof(line),
+      "nfs2015 chase cam: timing early=%llu late=%llu "
+      "transform before/between/after=%llu/%llu/%llu "
+      "car_delta avg/peak=%.2f/%.2f cm view_delta avg/peak=%.2f/%.2f cm",
+      static_cast<unsigned long long>(early),
+      static_cast<unsigned long long>(late),
+      static_cast<unsigned long long>(
+          probe.timing_transform_before.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(
+          probe.timing_transform_between.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(
+          probe.timing_transform_after.load(std::memory_order_relaxed)),
+      car_avg, car_peak, view_avg, view_peak);
+  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, line);
+
+  char sample[384]{};
+  std::snprintf(
+      sample, sizeof(sample),
+      "nfs2015 chase cam: timing sample early_car=(%.2f,%.2f,%.2f) "
+      "late_car=(%.2f,%.2f,%.2f) presenter_car=(%.2f,%.2f,%.2f) "
+      "early_view=(%.2f,%.2f,%.2f) late_view=(%.2f,%.2f,%.2f)",
+      probe.timing_early_car[0].load(std::memory_order_relaxed),
+      probe.timing_early_car[1].load(std::memory_order_relaxed),
+      probe.timing_early_car[2].load(std::memory_order_relaxed),
+      probe.timing_late_car[0].load(std::memory_order_relaxed),
+      probe.timing_late_car[1].load(std::memory_order_relaxed),
+      probe.timing_late_car[2].load(std::memory_order_relaxed),
+      probe.timing_presenter_car[0].load(std::memory_order_relaxed),
+      probe.timing_presenter_car[1].load(std::memory_order_relaxed),
+      probe.timing_presenter_car[2].load(std::memory_order_relaxed),
+      probe.timing_early_view[0].load(std::memory_order_relaxed),
+      probe.timing_early_view[1].load(std::memory_order_relaxed),
+      probe.timing_early_view[2].load(std::memory_order_relaxed),
+      probe.timing_late_view[0].load(std::memory_order_relaxed),
+      probe.timing_late_view[1].load(std::memory_order_relaxed),
+      probe.timing_late_view[2].load(std::memory_order_relaxed));
+  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, sample);
 }
 
 // ---------------------------------------------------------------------------
@@ -8098,6 +8547,7 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
     RetryHookIfNeeded(*context);
     LogViewUniformHookDiagnostics(*context);
     LogRouteBDiagnostics(*context);
+    LogRouteBTiming(*context);
     static_cast<void>(ResolveCameraPov(*context));
     // T0: time the Game-tick work that the camera itself owns. The host
     // callback as a whole also persists settings and resolves the POV, so only
@@ -8466,7 +8916,7 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                    "View->transform age", line);
     std::snprintf(line, sizeof(line),
                   "%llu(%.2f) / %llu / %llu w %llu  prep %llu mm %llu nv "
-                  "%llu pf %llu fs %llu dir %llu tr %llu hist %llu",
+                  "%llu pf %llu fs %llu dir %llu held %llu",
                   static_cast<unsigned long long>(
                       display.route_b_early_applied),
                   display.route_b_early_last_age_ms,
@@ -8487,11 +8937,9 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                   static_cast<unsigned long long>(
                       display.route_b_early_direct),
                   static_cast<unsigned long long>(
-                      display.route_b_render_applied),
-                  static_cast<unsigned long long>(
-                      display.route_b_history_updated));
+                      display.route_b_early_held));
     DrawStatusLine(ui, localizer, "diag.route_b",
-                   "Route B early/late/fallback/witness",
+                   "Route B early/held/fallback/witness",
                    line);
   }
 
@@ -8794,7 +9242,9 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                                  kMinimumOriginOffsetCm,
                                  kMaximumOriginOffsetCm),
             std::memory_order_release);
-        context->reset_requested.store(true, std::memory_order_release);
+        // This is a continuous vertical trim, not a pose discontinuity. The
+        // old per-frame reset restarted the presenter while the slider was
+        // dragged, which made the view flash on a slope.
         MarkSettingsDirty(*context);
       }
 
@@ -9106,7 +9556,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
       StringView(kPluginId),
       StringView("NFS 2015 Chase Cam"),
       StringView("RobinEatCorn"),
-      StringView("2.0.0"),
+      StringView("2.0.1"),
       Load,
       Start,
       Stop,

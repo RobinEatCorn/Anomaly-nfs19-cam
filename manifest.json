@@ -5,7 +5,7 @@
   "description": "Replaces the driving camera with the NFS 2015 action camera model: a loose drift yaw spring, a car-local pivot orbit, drift push-in/drop, body-pitch slope follow, speed-based FOV and shake.",
   "author": "RobinEatCorn",
   "license": "AGPL-3.0-only",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "entry": "plugin.dll",
   "api": {
     "major": 1,
