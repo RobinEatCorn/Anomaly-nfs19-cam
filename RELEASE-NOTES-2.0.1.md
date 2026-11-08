@@ -1,39 +1,44 @@
 # NFS 2015 Chase Cam 2.0.1
 
-## 根因
+适用：Anomaly 2.7.0+ Runtime，NTE。
 
-2.0.0 的 route B 有三个相机写入点：pre-visibility、`OnTransformChanged` 之后和
-`SetupUniformBufferParameters`。后两个可能晚于 `PrepareViewStateForVisibility`，使裁剪、
-运动矢量和 TAA 历史描述旧机位，而最终画面使用新机位；较大偏差表现为一帧整屏重影/闪屏，
-较小偏差表现为箭头、广告牌、墙面单帧消失。
+## 主要修复
 
-2.7 实机还暴露了两个版本/时序问题：
+- 将 route B 的车辆锚点改为 **VehicleMesh ComponentToWorld**。同帧探针确认它与最终
+  render proxy 的误差为 `0.00 cm`；旧的包围盒中心/渲染快照会落后约一帧，造成车抖。
+- 相机仍然只在 `PrepareViewStateForVisibility` 之前写入一次。删除 transform 之后和
+  `SetupUniformBufferParameters` 的相机写入，避免裁剪、运动矢量和 TAA 历史使用旧机位。
+- 早段相机使用 NFS presenter pose，并把 X/Y/Z **全部**对齐到当前帧 VehicleMesh：
+  - 不再只对齐水平轴，修复上下坡时车辆相对镜头上下抖动；
+  - 保留 NFS 2015 的弹簧、阻尼、FOV 和车身姿态；
+  - 车辆变换与画车使用同一帧数据，不做速度/位移预测或补偿。
+- 修复“车身原点偏移”滑块：完整锚定到 VehicleMesh 会抵消 presenter 中已有的偏移，
+  现在按默认值施加显式垂直 trim，滑块重新生效。
+- 仅在驾驶相机活跃时接管视角；下车后立即停止 route B，原版人物相机恢复，不再固定在
+  最后一帧车内机位。
+- `FSceneView::UpdateViewMatrix` 的 pattern 对 2.7 的 RIP 位移使用通配；失败时仍保持
+  fail-closed，不会写入未知 view。
 
-- `FSceneView::UpdateViewMatrix` pattern 把 RIP 相对位移写死，2.7 位移变化后早段 hook
-  无法安装，route B 被 fail-closed 关闭；
-- 早段若使用 transform 通知快照，实测快照年龄可达 23.56 ms（约一帧半），相机会骑在
-  上一帧车辆变换上，重新出现车抖。
+## 验证
 
-## 修复
+用户实机确认：
 
-- 只保留 `PrepareViewStateForVisibility` 之前一个相机写入点；删除 transform 后和晚段相机
-  写入，删除手写 `PrevFrameViewInfo`。
-- 用引擎 `FViewMatrices` 构造函数整体重建矩阵，刷新 `InvProjection`、`ProjectionNoAA`、
-  `ScreenToClip` 等派生矩阵。
-- `UpdateViewMatrix` pattern 对 RIP 位移使用通配，2.7 可正常安装早段 hook。
-- 早段优先直接读 Game-tick 验证过的车辆 proxy；transform 快照只做兜底/距离 sanity，
-  不再用落后一帧的 snapshot 决定相机位置。
-- 读取撕裂时短暂保持上一帧 route B 机位（`held`），不把单帧交还游戏相机。
-- 没有任何速度预测或补偿。
+- 平路和坡道无闪屏、无沙沙/透明墙；
+- 车辆无抖动，上下坡无上下抖动；
+- “车身原点偏移”滑块生效；
+- 下车后镜头恢复跟随人物，再上车可正常切回追车相机。
 
-## 验收
+构建和发布包校验：
 
-日志应出现：
-
-```text
-pre-visibility route B hook installed
-route B early=N late=0
+```sh
+./build-mingw.sh --sdk <Anomaly-2.7.0-sdk> --zip
+./verify-release.sh --allow-missing-host-tools
 ```
 
-且 `early_age` 应为 0（direct 路径）。面板 `路线B` 的 `early` 应持续增长，`fallback` 不增长；
-目标是无闪屏、无车抖。
+发布包根目录：
+
+```text
+manifest.json
+plugin.dll
+locales/zh-CN.json
+```
