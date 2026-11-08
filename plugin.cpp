@@ -3637,6 +3637,14 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
     probe.prepare_anchor_off.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+  // Only route B while the driving camera owns the view. After the player
+  // exits the vehicle `PublishInactive` clears this flag, but the presenter
+  // pose remains cached; without this gate the early hook kept writing that
+  // last vehicle pose, freezing the on-foot camera at the parked car.
+  if (!context.view_active.load(std::memory_order_acquire)) {
+    probe.prepare_anchor_off.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   SceneViewUpdateMatrixFn update =
       g_scene_view_update_matrix.load(std::memory_order_acquire);
   if (update == nullptr) {
