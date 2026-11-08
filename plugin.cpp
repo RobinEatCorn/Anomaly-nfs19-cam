@@ -1685,11 +1685,6 @@ struct Context final {
   std::atomic<double> presenter_pose_location[3]{};
   std::atomic<double> presenter_pose_rotation[3]{};
   std::atomic<double> presenter_car_cm[3]{};
-  // The origin offset that was baked into the published presenter pose.
-  // The early render hook shifts the pose from the presenter's car anchor to
-  // this frame's VehicleMesh; adding the difference between the current and
-  // baked-in offset keeps the user trim effective without applying it twice.
-  std::atomic<double> presenter_origin_offset_cm{kDefaultOriginOffsetCm};
   std::atomic<float> presenter_pose_lens{};
   std::atomic<bool> presenter_pose_fov{};
   std::atomic<bool> presenter_pose_valid{};
@@ -3261,14 +3256,13 @@ bool BuildRouteBPoseFromPresenter(Context &context, const RenderXProbe &probe,
     for (std::size_t axis = 0; axis < 3; ++axis) {
       eye[axis] += fresh_car[axis] - presenter_car[axis];
     }
-    // `presenter_car` contains the origin offset baked into the presenter
-    // pose. Moving to the raw VehicleMesh therefore cancels that offset;
-    // add back only the user's current trim relative to the baked-in value.
+    // `presenter_car` already contains the configured origin offset, and
+    // moving to the raw VehicleMesh cancels it. Re-apply the slider as a trim
+    // relative to the default; comparing against the presenter's own offset
+    // is always zero in steady state, which is why that version was inert.
     const double current_offset =
         context.origin_offset_cm.load(std::memory_order_acquire);
-    const double presenter_offset =
-        context.presenter_origin_offset_cm.load(std::memory_order_acquire);
-    eye[2] += current_offset - presenter_offset;
+    eye[2] += current_offset - kDefaultOriginOffsetCm;
   }
   return std::isfinite(eye[0]) && std::isfinite(eye[1]) &&
          std::isfinite(eye[2]) && std::isfinite(rotation[0]) &&
@@ -5912,9 +5906,6 @@ void PublishPresenterPose(Context &context, const double location[3],
     context.presenter_car_cm[axis].store(car_cm[axis],
                                         std::memory_order_relaxed);
   }
-  context.presenter_origin_offset_cm.store(
-      context.origin_offset_cm.load(std::memory_order_acquire),
-      std::memory_order_relaxed);
   context.presenter_pose_lens.store(lens, std::memory_order_relaxed);
   context.presenter_pose_fov.store(fov_enabled, std::memory_order_relaxed);
   context.presenter_pose_valid.store(true, std::memory_order_relaxed);
