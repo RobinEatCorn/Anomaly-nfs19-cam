@@ -49,9 +49,16 @@ struct BurnoutShotConfig final {
   double exit_delay{0.2};
   double exit_time{2.5};
 
-  // Safety exit: a car that starts moving must not drag the close-up for the
-  // full cinematic 2.5 s.
+  // Safety exit: an airborne or reversing car must not drag the close-up for
+  // the full cinematic 2.5 s.
   double fast_exit_time{0.5};
+
+  // Launch hand-off. NFS 2015's WheelSpin OutTransition is 0.2 s delay +
+  // 2.5 s CINEBOT_BLEND_EULER_ORBIT (CinebotTransitionData Instance140).
+  // NFS starts that timer when WheelSpin mode exits; our speed gate fires
+  // after the car is already rolling, so the full 2.5 s reads as too slow.
+  // Keep the NFS delay/orbit but use the measured-good 1.8 s pull-out.
+  double launch_exit_time{1.8};
 
   // Horizontal FOV is authoritative; the vertical value is derived from the
   // current viewport aspect ratio. NFS stores 45 degrees horizontally.
@@ -252,9 +259,10 @@ class BurnoutShot final {
     const double absolute_speed = std::fabs(speed);
     const bool on_ground = car.on_ground;
     const bool direction_ok = speed > -0.5;
-    const bool force_exit =
-        !on_ground || !direction_ok ||
+    const bool speed_exit =
         absolute_speed >= (std::max)(0.0, config_.hold_speed_mps);
+    const bool unsafe_exit = !on_ground || !direction_ok;
+    const bool force_exit = unsafe_exit || speed_exit;
 
     const bool can_hold =
         sample.active && on_ground && direction_ok &&
@@ -283,10 +291,16 @@ class BurnoutShot final {
         state_.force_exit = force_exit;
         state_.inactive_time += dt;
         const double exit_delay =
-            force_exit ? 0.0 : (std::max)(0.0, config_.exit_delay);
+            unsafe_exit ? 0.0 : (std::max)(0.0, config_.exit_delay);
         if (state_.inactive_time + 1e-12 >= exit_delay) {
-          SetPhaseToward(
-              0.0, dt, force_exit ? config_.fast_exit_time : config_.exit_time);
+          // A launch keeps the NFS OutTransition delay and Euler orbit, but
+          // uses the 1.8 s pull-out that matches the later speed-gate trigger.
+          // Airborne/reverse still use the short safety exit.
+          const double duration =
+              unsafe_exit ? config_.fast_exit_time
+                          : (speed_exit ? config_.launch_exit_time
+                                        : config_.exit_time);
+          SetPhaseToward(0.0, dt, duration);
         }
       } else {
         state_.phase = 0.0;

@@ -636,7 +636,7 @@ roll     = lerp(chase.roll, shot.roll, t)
 
 ### Phase 4：设置/UI/本地化/收尾（1 天）
 
-> **结果（2026-11-10）：PASS（未发布）。** 10 个 burnout 设置字段已加入 schema/持久化/加载/默认值；设置面板提供开关、FOV、震动、进入/退出时间、速度和侧别；诊断显示 shot blend/side/fallback。旧 31 字段配置可加载，`burnoutEnabled=false` 实机验证保持 chase；全量构建、CTest 通过。详见 [`REPORT-burnout-phase4.md`](REPORT-burnout-phase4.md)。
+> **结果（2026-11-10）：PASS（未发布）。** 11 个 burnout 设置字段已加入 schema/持久化/加载/默认值；设置面板提供开关、FOV、震动、进入/退出/起步回正时间、速度和侧别；诊断显示 shot blend/side/fallback。旧 31 字段配置可加载，`burnoutEnabled=false` 实机验证保持 chase；全量构建、CTest 通过。详见 [`REPORT-burnout-phase4.md`](REPORT-burnout-phase4.md)；起步回正的 NFS 证据见 [`REPORT-burnout-launch-handoff.md`](REPORT-burnout-launch-handoff.md)。
 
 - 设置字段、持久化、UI 开关/滑杆、zh-CN 文案。
 - 诊断计数、日志、README/RELEASE-NOTES。
@@ -654,7 +654,7 @@ roll     = lerp(chase.roll, shot.roll, t)
 | 20 Hz 检测延迟 | 特写晚 50 ms | 0.5 s 进入延迟掩盖；sample hold 0.25 s |
 | 贴墙/贴地穿模 | 镜头进入几何体 | 第一版 Z 下限 + 距离下限；wall raycast 后续 |
 | `cameraScale` 很小时镜头进车内 | 构图破坏 | 第一版安全下限；必要时加独立 shot scale |
-| 特写退出太慢影响驾驶 | 起步时视野被占 | 速度超限走 fast exit 0.4–0.6 s |
+| 特写退出太慢影响驾驶 | 起步时视野被占 | 速度超限走 1.8 s 起步回正；异常状态 0.5 s |
 | 左右侧别抖动 | 镜头左右跳 | 进入后 latch，退出归零才允许换边 |
 | FOV 45 在超宽屏过窄 | 车占满画面 | 用水平 FOV 权威值；必要时按 aspect 限制最小垂直 FOV |
 

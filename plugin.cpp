@@ -147,6 +147,9 @@ constexpr double kMaximumBurnoutExitDelay = 2.0;
 constexpr double kDefaultBurnoutExitTime = 2.5;
 constexpr double kMinimumBurnoutExitTime = 0.1;
 constexpr double kMaximumBurnoutExitTime = 5.0;
+constexpr double kDefaultBurnoutLaunchExitTime = 1.8;
+constexpr double kMinimumBurnoutLaunchExitTime = 0.1;
+constexpr double kMaximumBurnoutLaunchExitTime = 5.0;
 constexpr double kDefaultBurnoutFov = 45.0;
 constexpr double kMinimumBurnoutFov = 20.0;
 constexpr double kMaximumBurnoutFov = 90.0;
@@ -530,6 +533,7 @@ constexpr std::string_view kSettingsSchema = R"json(
     "burnoutEntryTime":{"type":"number","minimum":0.1,"maximum":4.0},
     "burnoutExitDelay":{"type":"number","minimum":0.0,"maximum":2.0},
     "burnoutExitTime":{"type":"number","minimum":0.1,"maximum":5.0},
+    "burnoutLaunchExitTime":{"type":"number","minimum":0.1,"maximum":5.0},
     "burnoutFov":{"type":"number","minimum":20.0,"maximum":90.0},
     "burnoutShake":{"type":"number","minimum":0.0,"maximum":2.0},
     "burnoutSideMode":{"type":"integer","minimum":0,"maximum":3},
@@ -1638,6 +1642,7 @@ struct DisplayState final {
   double burnout_entry_time{kDefaultBurnoutEntryTime};
   double burnout_exit_delay{kDefaultBurnoutExitDelay};
   double burnout_exit_time{kDefaultBurnoutExitTime};
+  double burnout_launch_exit_time{kDefaultBurnoutLaunchExitTime};
   double burnout_fov{kDefaultBurnoutFov};
   double burnout_shake{kDefaultBurnoutShake};
   std::uint32_t burnout_side_mode{kDefaultBurnoutSideMode};
@@ -1913,6 +1918,8 @@ struct Context final {
   std::atomic<double> burnout_entry_time{kDefaultBurnoutEntryTime};
   std::atomic<double> burnout_exit_delay{kDefaultBurnoutExitDelay};
   std::atomic<double> burnout_exit_time{kDefaultBurnoutExitTime};
+  std::atomic<double> burnout_launch_exit_time{
+      kDefaultBurnoutLaunchExitTime};
   std::atomic<double> burnout_fov{kDefaultBurnoutFov};
   std::atomic<double> burnout_shake{kDefaultBurnoutShake};
   std::atomic<std::uint32_t> burnout_side_mode{kDefaultBurnoutSideMode};
@@ -5045,8 +5052,9 @@ bool SettingsValid(const std::uint32_t preset, const double camera_scale,
 
 bool BurnoutSettingsValid(const double entry_delay, const double entry_time,
                           const double exit_delay, const double exit_time,
-                          const double fov, const double shake,
-                          const double side_mode, const double entry_speed,
+                          const double launch_exit_time, const double fov,
+                          const double shake, const double side_mode,
+                          const double entry_speed,
                           const double hold_speed) noexcept {
   return std::isfinite(entry_delay) &&
          entry_delay >= kMinimumBurnoutEntryDelay &&
@@ -5059,7 +5067,11 @@ bool BurnoutSettingsValid(const double entry_delay, const double entry_time,
          exit_delay <= kMaximumBurnoutExitDelay &&
          std::isfinite(exit_time) &&
          exit_time >= kMinimumBurnoutExitTime &&
-         exit_time <= kMaximumBurnoutExitTime && std::isfinite(fov) &&
+         exit_time <= kMaximumBurnoutExitTime &&
+         std::isfinite(launch_exit_time) &&
+         launch_exit_time >= kMinimumBurnoutLaunchExitTime &&
+         launch_exit_time <= kMaximumBurnoutLaunchExitTime &&
+         std::isfinite(fov) &&
          fov >= kMinimumBurnoutFov && fov <= kMaximumBurnoutFov &&
          std::isfinite(shake) && shake >= kMinimumBurnoutShake &&
          shake <= kMaximumBurnoutShake && std::isfinite(side_mode) &&
@@ -5152,6 +5164,8 @@ bool PersistSettings(Context &context) noexcept {
       context.burnout_exit_delay.load(std::memory_order_acquire);
   const double burnout_exit_time =
       context.burnout_exit_time.load(std::memory_order_acquire);
+  const double burnout_launch_exit_time =
+      context.burnout_launch_exit_time.load(std::memory_order_acquire);
   const double burnout_fov =
       context.burnout_fov.load(std::memory_order_acquire);
   const double burnout_shake =
@@ -5202,7 +5216,8 @@ bool PersistSettings(Context &context) noexcept {
                      slope_up_rest, slope_down_look_at,
                      slope_down_rest) ||
       !BurnoutSettingsValid(burnout_entry_delay, burnout_entry_time,
-                            burnout_exit_delay, burnout_exit_time, burnout_fov,
+                            burnout_exit_delay, burnout_exit_time,
+                            burnout_launch_exit_time, burnout_fov,
                             burnout_shake, burnout_side_mode,
                             burnout_entry_speed, burnout_hold_speed) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
@@ -5275,6 +5290,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, burnout_exit_delay) &&
       AppendText(cursor, end, ",\"burnoutExitTime\":") &&
       AppendNumber(cursor, end, burnout_exit_time) &&
+      AppendText(cursor, end, ",\"burnoutLaunchExitTime\":") &&
+      AppendNumber(cursor, end, burnout_launch_exit_time) &&
       AppendText(cursor, end, ",\"burnoutFov\":") &&
       AppendNumber(cursor, end, burnout_fov) &&
       AppendText(cursor, end, ",\"burnoutShake\":") &&
@@ -5349,6 +5366,8 @@ void SetDefaults(Context &context) noexcept {
                                    std::memory_order_release);
   context.burnout_exit_time.store(kDefaultBurnoutExitTime,
                                   std::memory_order_release);
+  context.burnout_launch_exit_time.store(kDefaultBurnoutLaunchExitTime,
+                                         std::memory_order_release);
   context.burnout_fov.store(kDefaultBurnoutFov, std::memory_order_release);
   context.burnout_shake.store(kDefaultBurnoutShake,
                               std::memory_order_release);
@@ -5489,7 +5508,7 @@ bool LoadSettings(Context &context) noexcept {
   const AnomalyJsonServiceV1 &json = *context.json;
   std::uint32_t kind{};
   std::size_t field_count{};
-  // The schema has 41 properties today. Keep headroom so a future optional
+  // The schema has 42 properties today. Keep headroom so a future optional
   // field does not make existing documents unreadable.
   if (json.kind(json.user, root, &kind).code != ANOMALY_STATUS_V1_OK ||
       kind != ANOMALY_JSON_V1_OBJECT ||
@@ -5533,6 +5552,7 @@ bool LoadSettings(Context &context) noexcept {
   double burnout_entry_time = kDefaultBurnoutEntryTime;
   double burnout_exit_delay = kDefaultBurnoutExitDelay;
   double burnout_exit_time = kDefaultBurnoutExitTime;
+  double burnout_launch_exit_time = kDefaultBurnoutLaunchExitTime;
   double burnout_fov = kDefaultBurnoutFov;
   double burnout_shake = kDefaultBurnoutShake;
   double burnout_side_mode_number =
@@ -5582,6 +5602,8 @@ bool LoadSettings(Context &context) noexcept {
                                      burnout_exit_delay));
   static_cast<void>(JsonObjectNumber(json, root, "burnoutExitTime",
                                      burnout_exit_time));
+  static_cast<void>(JsonObjectNumber(json, root, "burnoutLaunchExitTime",
+                                     burnout_launch_exit_time));
   static_cast<void>(
       JsonObjectNumber(json, root, "burnoutFov", burnout_fov));
   static_cast<void>(
@@ -5629,7 +5651,8 @@ bool LoadSettings(Context &context) noexcept {
                      slope_up_rest, slope_down_look_at,
                      slope_down_rest) ||
       !BurnoutSettingsValid(burnout_entry_delay, burnout_entry_time,
-                            burnout_exit_delay, burnout_exit_time, burnout_fov,
+                            burnout_exit_delay, burnout_exit_time,
+                            burnout_launch_exit_time, burnout_fov,
                             burnout_shake, burnout_side_mode_number,
                             burnout_entry_speed, burnout_hold_speed)) {
     return false;
@@ -5663,6 +5686,8 @@ bool LoadSettings(Context &context) noexcept {
                                    std::memory_order_release);
   context.burnout_exit_time.store(burnout_exit_time,
                                   std::memory_order_release);
+  context.burnout_launch_exit_time.store(burnout_launch_exit_time,
+                                         std::memory_order_release);
   context.burnout_fov.store(burnout_fov, std::memory_order_release);
   context.burnout_shake.store(burnout_shake, std::memory_order_release);
   context.burnout_side_mode.store(
@@ -6898,6 +6923,8 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         context.burnout_exit_delay.load(std::memory_order_acquire);
     shot_config.exit_time =
         context.burnout_exit_time.load(std::memory_order_acquire);
+    shot_config.launch_exit_time =
+        context.burnout_launch_exit_time.load(std::memory_order_acquire);
     shot_config.horizontal_fov_degrees =
         context.burnout_fov.load(std::memory_order_acquire);
     shot_config.shake_scale =
@@ -9450,6 +9477,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.burnout_exit_delay.load(std::memory_order_acquire);
   context.display.burnout_exit_time =
       context.burnout_exit_time.load(std::memory_order_acquire);
+  context.display.burnout_launch_exit_time =
+      context.burnout_launch_exit_time.load(std::memory_order_acquire);
   context.display.burnout_fov =
       context.burnout_fov.load(std::memory_order_acquire);
   context.display.burnout_shake =
@@ -11088,6 +11117,12 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                      "chase-burnout-exit-time", display.burnout_exit_time,
                      kMinimumBurnoutExitTime, kMaximumBurnoutExitTime,
                      context->burnout_exit_time);
+      burnout_slider("setting.burnout_launch_exit_time",
+                     "Launch exit time (s)", "chase-burnout-launch-exit-time",
+                     display.burnout_launch_exit_time,
+                     kMinimumBurnoutLaunchExitTime,
+                     kMaximumBurnoutLaunchExitTime,
+                     context->burnout_launch_exit_time);
       burnout_slider("setting.burnout_entry_speed", "Entry speed (m/s)",
                      "chase-burnout-entry-speed",
                      display.burnout_entry_speed, kMinimumBurnoutEntrySpeed,

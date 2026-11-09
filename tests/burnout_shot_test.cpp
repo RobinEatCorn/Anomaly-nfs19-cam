@@ -257,7 +257,7 @@ void TestSideLatchAndReselection() {
   Expect("per-wheel left wins over right steering", result.side == -1);
 }
 
-void TestFastExitOnSpeed() {
+void TestLaunchExitOnSpeed() {
   BurnoutShot shot;
   const CarState car = MakeCar();
   BurnoutSample sample = MakeSample();
@@ -268,12 +268,30 @@ void TestFastExitOnSpeed() {
   for (int frame = 0; frame < 24; ++frame) {  // 0.4 s
     result = shot.Update(kDt, car, sample);
   }
-  Expect("speed limit forces an early exit", result.phase < 0.3);
-  Expect("speed limit reports force_exit", result.force_exit);
-  for (int frame = 0; frame < 20; ++frame) {  // past the 0.5 s fast exit
+  // Launch keeps the NFS 0.2 s delay/orbit but uses the 1.8 s pull-out that
+  // matches the speed-gate trigger. Most of the close-up remains after 0.4 s.
+  Expect("launch keeps most of the close-up at 0.4 s", result.phase > 0.8);
+  Expect("launch reports force_exit", result.force_exit);
+  for (int frame = 0; frame < 120; ++frame) {  // past the 1.8 s launch exit
     result = shot.Update(kDt, car, sample);
   }
-  ExpectNear("speed limit reaches chase in 0.5 s", result.phase, 0.0, 1e-12);
+  ExpectNear("launch reaches chase after the pull-out", result.phase, 0.0,
+             1e-12);
+}
+
+void TestFastExitOnUnsafeState() {
+  BurnoutShot shot;
+  const CarState car = MakeCar();
+  BurnoutSample sample = MakeSample();
+  static_cast<void>(AdvanceUntilFull(shot, car, sample));
+
+  sample.speed_mps = -2.0;  // reversing: direction gate fails
+  BurnoutShotResult result;
+  for (int frame = 0; frame < 40; ++frame) {  // 0.667 s, past 0.5 s
+    result = shot.Update(kDt, car, sample);
+  }
+  Expect("reverse still uses the short safety exit", result.phase == 0.0);
+  Expect("reverse reports force_exit", result.force_exit);
 }
 
 void TestBlendEndpointsAndOrbit() {
@@ -435,7 +453,8 @@ int main() {
   TestExitDelayAndMonotonicFall();
   TestRetriggerDuringExit();
   TestSideLatchAndReselection();
-  TestFastExitOnSpeed();
+  TestLaunchExitOnSpeed();
+  TestFastExitOnUnsafeState();
   TestBlendEndpointsAndOrbit();
   TestHorizontalFov();
   TestSafetyAndFiniteOutputs();

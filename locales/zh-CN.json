@@ -37,6 +37,7 @@
     "setting.burnout_entry_time": "进入时间（秒）",
     "setting.burnout_exit_delay": "退出延迟（秒）",
     "setting.burnout_exit_time": "退出时间（秒）",
+    "setting.burnout_launch_exit_time": "起步回正时间（秒）",
     "setting.burnout_entry_speed": "进入速度（m/s）",
     "setting.burnout_hold_speed": "保持速度（m/s）",
     "setting.burnout_side": "特写侧别（进入时锁定）",

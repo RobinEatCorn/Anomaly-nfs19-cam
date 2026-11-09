@@ -17,6 +17,7 @@
 | `burnoutEntryTime` | 1.0 s | 0.1..4 | 进入 orbit 时长 |
 | `burnoutExitDelay` | 0.2 s | 0..2 | 条件消失后的保持 |
 | `burnoutExitTime` | 2.5 s | 0.1..5 | 退出 orbit 时长 |
+| `burnoutLaunchExitTime` | 1.8 s | 0.1..5 | 正常起步的回正时长 |
 | `burnoutFov` | 45° | 20..90 | 特写水平 FOV |
 | `burnoutShake` | 1.0 | 0..2 | 特写震动倍率，独立于 chase shake |
 | `burnoutSideMode` | 0 | 0..3 | 0 自动，1 左后，2 右后，3 居中 |
@@ -30,7 +31,7 @@
   `sideMode` 整数、`holdSpeed >= entrySpeed`；
 - `PersistSettings()` / `LoadSettings()` / `SetDefaults()` / `RestoreDefaults()` 全部覆盖；
 - `kMaximumSettingsBytes` 从 2048 增至 4096；
-- settings JSON 的字段数上限从 40 增至 60（当前 schema 41 个属性）。
+- settings JSON 的字段数上限从 40 增至 60（当前 schema 42 个属性）。
 
 `burnoutEnabled=false` 时 render 侧立即 `BurnoutShot::Reset()`，view 精确回到 chase；
 不会留下一个已 latch 的 shot 在重新开启时直接满混合。
@@ -45,7 +46,7 @@
 - 标题「烧胎特写（Shift + W）」；
 - 启用复选框；
 - 水平 FOV、震动强度；
-- 进入延迟/进入时间、退出延迟/退出时间；
+- 进入延迟/进入时间、退出延迟/退出时间、起步回正时间；
 - 进入速度、保持速度；
 - 侧别四个按钮：自动/转向、左后轮、右后轮、居中，当前项用 `> ` 标出。
 

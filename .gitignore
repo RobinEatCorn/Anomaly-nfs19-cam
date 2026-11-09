@@ -23,3 +23,6 @@ CMakeUserPresets.json
 # 本地逆向/截图产物（不进入插件包）
 /analysis/
 /capture/
+
+# 安装脚本的本地输出
+/phase0-install-result.txt
