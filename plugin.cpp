@@ -434,7 +434,7 @@ constexpr std::uint32_t kAnchorSourceModel = 2;
 // translation, and fall back to the component transform. Falls back to X when
 // the character is not in a vehicle.
 constexpr std::uint32_t kAnchorSourceVehicle = 3;
-constexpr std::uint32_t kAnchorSourceDefault = kAnchorSourceX;
+constexpr std::uint32_t kAnchorSourceDefault = kAnchorSourceVehicle;
 // What the panel reports. These are also what the detour publishes as the
 // anchor it actually used this frame.
 constexpr std::uint8_t kAnchorStateX = 0;
@@ -4950,6 +4950,12 @@ void SetDefaults(Context &context) noexcept {
   context.fov_enabled.store(true, std::memory_order_release);
 }
 
+void RestoreDefaults(Context &context) noexcept {
+  SetDefaults(context);
+  context.reset_requested.store(true, std::memory_order_release);
+  MarkSettingsDirty(context);
+}
+
 // Settings are decoded through the host JSON service, so the package needs no
 // JSON library of its own. Every handle is plugin-scoped and released as soon
 // as the value has been copied out.
@@ -9321,6 +9327,13 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
       std::string selected = context->localizer.Text("status.preset", "Preset");
       selected.append(": ").append(PresetName(context->localizer, display.preset));
       ui->text(ui->user, StringView(selected));
+
+      const std::string restore_defaults_label = context->localizer.Text(
+          "setting.restore_defaults", "Restore defaults");
+      if (ui->button(ui->user, StringView(restore_defaults_label), 0.0F,
+                     0.0F) != 0) {
+        RestoreDefaults(*context);
+      }
 
       const std::string anchor_label =
           context->localizer.Text("setting.anchor_source", "Anchor source");

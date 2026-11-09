@@ -7,6 +7,7 @@
     "window.title": "NFS 2015 追车视角",
     "setting.enabled": "启用相机",
     "setting.preset": "预设",
+    "setting.restore_defaults": "恢复默认值",
     "preset.game": "NFS 2015（实机数据）",
     "preset.cinematic": "电影化重建",
     "setting.fov": "应用 NFS 镜头（FOV）",

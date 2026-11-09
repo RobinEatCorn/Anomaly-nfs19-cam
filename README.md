@@ -280,8 +280,8 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 
 | 选项 | 来源 | 用途 |
 |---|---|---|
-| **X anchored** | 视点 detour 当刻读取的玩家 `root+280` | 轻量、稳定的车 root 位置；也是默认值 |
-| **Vehicle mesh** | 角色胶囊 `AttachParent` 的 `VehicleMesh`；优先 SceneProxy 的 `LocalToWorld`，退回 `ComponentToWorld` | 最贴近渲染器画车用的车身变换；受版本门禁保护 |
+| **X anchored** | 视点 detour 当刻读取的玩家 `root+280` | 轻量、稳定的车 root 位置 |
+| **Vehicle mesh** | 角色胶囊 `AttachParent` 的 `VehicleMesh`；优先 SceneProxy 的 `LocalToWorld`，退回 `ComponentToWorld` | 最贴近渲染器画车用的车身变换；受版本门禁保护；也是默认值 |
 | **Borrow estimate** | 用游戏相机位置反推车身（低通估计） | 兼容旧行为；FOV/motion 仍来自模型 |
 | **Pure model** | 只使用 Game-tick 的车辆样本 | 完全不让相机锁到游戏相机；用于诊断 |
 
