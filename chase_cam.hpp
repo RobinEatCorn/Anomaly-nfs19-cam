@@ -396,7 +396,10 @@ struct Config final {
   cfg.yaw_spring = 5.4;
   cfg.drift_yaw_spring = 2.7;
   cfg.yaw_return_spring = 4.5;
-  cfg.look_yaw_spring = 5.4;
+  // Composition default for the look-yaw slider. The retail drift spring is
+  // 0.045 (2.7 here), but 15 keeps the car off-center while the camera position
+  // spring still follows the car.
+  cfg.look_yaw_spring = 15.0;
 
   // The retail look-at is car-local, so no slip bias.
   cfg.position_slip_weight = 0.0;
@@ -542,6 +545,34 @@ class ChaseCam final {
 
   void SetSpeedDistanceScale(const double value) noexcept {
     config_.speed_distance_scale = Clamp(value, 0.0, 2.0);
+  }
+
+  void SetPositionSpring(const double value) noexcept {
+    config_.position_spring = Clamp(value, 0.5, 30.0);
+  }
+
+  void SetYawSpring(const double value) noexcept {
+    config_.yaw_spring = Clamp(value, 0.5, 30.0);
+  }
+
+  void SetDriftYawSpring(const double value) noexcept {
+    config_.drift_yaw_spring = Clamp(value, 0.5, 30.0);
+  }
+
+  void SetYawReturnSpring(const double value) noexcept {
+    config_.yaw_return_spring = Clamp(value, 0.5, 30.0);
+  }
+
+  void SetLookYawSpring(const double value) noexcept {
+    config_.look_yaw_spring = Clamp(value, 0.5, 30.0);
+  }
+
+  void SetPitchSpring(const double value) noexcept {
+    config_.pitch_spring = Clamp(value, 1.0, 120.0);
+  }
+
+  void SetRollSpring(const double value) noexcept {
+    config_.roll_spring = Clamp(value, 1.0, 200.0);
   }
 
   void SetRollScale(const double value) noexcept {

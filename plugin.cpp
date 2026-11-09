@@ -87,6 +87,28 @@ constexpr double kRadiansToDegrees =
 constexpr double kDefaultCameraScale = 1.0;
 constexpr double kMinimumCameraScale = 0.6;
 constexpr double kMaximumCameraScale = 1.6;
+constexpr double kDefaultPositionSpring = 7.5;
+constexpr double kMinimumPositionSpring = 0.5;
+constexpr double kMaximumPositionSpring = 30.0;
+constexpr double kDefaultYawSpring = 5.4;
+constexpr double kMinimumYawSpring = 0.5;
+constexpr double kMaximumYawSpring = 30.0;
+constexpr double kDefaultDriftYawSpring = 2.7;
+constexpr double kMinimumDriftYawSpring = 0.5;
+constexpr double kMaximumDriftYawSpring = 30.0;
+// Composition default; the retail drift spring converts to 2.7.
+constexpr double kDefaultLookYawSpring = 15.0;
+constexpr double kMinimumLookYawSpring = 0.5;
+constexpr double kMaximumLookYawSpring = 30.0;
+constexpr double kDefaultYawReturnSpring = 4.5;
+constexpr double kMinimumYawReturnSpring = 0.5;
+constexpr double kMaximumYawReturnSpring = 30.0;
+constexpr double kDefaultPitchSpring = 33.0;
+constexpr double kMinimumPitchSpring = 1.0;
+constexpr double kMaximumPitchSpring = 120.0;
+constexpr double kDefaultRollSpring = 60.0;
+constexpr double kMinimumRollSpring = 1.0;
+constexpr double kMaximumRollSpring = 200.0;
 // Route B anchors the NFS camera to the vehicle proxy's ground pivot. The
 // NFS preset's local rest height is ground-relative, so the old +70 cm centre
 // offset must be cancelled by default; otherwise the first install sits about
@@ -445,6 +467,13 @@ constexpr std::string_view kSettingsSchema = R"json(
     "enabled":{"type":"boolean"},
     "preset":{"type":"integer","minimum":0,"maximum":1},
     "cameraScale":{"type":"number","minimum":0.6,"maximum":1.6},
+    "positionSpring":{"type":"number","minimum":0.5,"maximum":30.0},
+    "yawSpring":{"type":"number","minimum":0.5,"maximum":30.0},
+    "driftYawSpring":{"type":"number","minimum":0.5,"maximum":30.0},
+    "lookYawSpring":{"type":"number","minimum":0.5,"maximum":30.0},
+    "yawReturnSpring":{"type":"number","minimum":0.5,"maximum":30.0},
+    "pitchSpring":{"type":"number","minimum":1.0,"maximum":120.0},
+    "rollSpring":{"type":"number","minimum":1.0,"maximum":200.0},
     "originOffsetCm":{"type":"number","minimum":-150.0,"maximum":150.0},
     "aspectRatio":{"type":"number","minimum":1.0,"maximum":3.5},
     "fovEnabled":{"type":"boolean"},
@@ -1338,6 +1367,13 @@ struct DisplayState final {
   double view_output_hz{};
   double interpolation_ratio{};
   double camera_scale{kDefaultCameraScale};
+  double position_spring{kDefaultPositionSpring};
+  double yaw_spring{kDefaultYawSpring};
+  double drift_yaw_spring{kDefaultDriftYawSpring};
+  double look_yaw_spring{kDefaultLookYawSpring};
+  double yaw_return_spring{kDefaultYawReturnSpring};
+  double pitch_spring{kDefaultPitchSpring};
+  double roll_spring{kDefaultRollSpring};
   double origin_offset_cm{kDefaultOriginOffsetCm};
   double aspect_ratio{kDefaultAspectRatio};
   double speed_distance_scale{kDefaultSpeedDistanceScale};
@@ -1551,6 +1587,13 @@ struct Context final {
   std::atomic_bool enabled{true};
   std::atomic<std::uint32_t> preset{0};
   std::atomic<double> camera_scale{kDefaultCameraScale};
+  std::atomic<double> position_spring{kDefaultPositionSpring};
+  std::atomic<double> yaw_spring{kDefaultYawSpring};
+  std::atomic<double> drift_yaw_spring{kDefaultDriftYawSpring};
+  std::atomic<double> look_yaw_spring{kDefaultLookYawSpring};
+  std::atomic<double> yaw_return_spring{kDefaultYawReturnSpring};
+  std::atomic<double> pitch_spring{kDefaultPitchSpring};
+  std::atomic<double> roll_spring{kDefaultRollSpring};
   std::atomic<double> origin_offset_cm{kDefaultOriginOffsetCm};
   std::atomic<double> aspect_ratio{kDefaultAspectRatio};
   std::atomic<double> speed_distance_scale{kDefaultSpeedDistanceScale};
@@ -4591,6 +4634,11 @@ void MarkSettingsDirty(Context &context) noexcept {
 }
 
 bool SettingsValid(const std::uint32_t preset, const double camera_scale,
+                   const double position_spring, const double yaw_spring,
+                   const double drift_yaw_spring,
+                   const double look_yaw_spring,
+                   const double yaw_return_spring,
+                   const double pitch_spring, const double roll_spring,
                    const double origin_offset_cm, const double aspect_ratio,
                    const double speed_distance_scale,
                    const double roll_scale,
@@ -4605,6 +4653,25 @@ bool SettingsValid(const std::uint32_t preset, const double camera_scale,
   return std::isfinite(camera_scale) &&
          camera_scale >= kMinimumCameraScale &&
          camera_scale <= kMaximumCameraScale &&
+         std::isfinite(position_spring) &&
+         position_spring >= kMinimumPositionSpring &&
+         position_spring <= kMaximumPositionSpring &&
+         std::isfinite(yaw_spring) && yaw_spring >= kMinimumYawSpring &&
+         yaw_spring <= kMaximumYawSpring &&
+         std::isfinite(drift_yaw_spring) &&
+         drift_yaw_spring >= kMinimumDriftYawSpring &&
+         drift_yaw_spring <= kMaximumDriftYawSpring &&
+         std::isfinite(look_yaw_spring) &&
+         look_yaw_spring >= kMinimumLookYawSpring &&
+         look_yaw_spring <= kMaximumLookYawSpring &&
+         std::isfinite(yaw_return_spring) &&
+         yaw_return_spring >= kMinimumYawReturnSpring &&
+         yaw_return_spring <= kMaximumYawReturnSpring &&
+         std::isfinite(pitch_spring) &&
+         pitch_spring >= kMinimumPitchSpring &&
+         pitch_spring <= kMaximumPitchSpring &&
+         std::isfinite(roll_spring) && roll_spring >= kMinimumRollSpring &&
+         roll_spring <= kMaximumRollSpring &&
          std::isfinite(origin_offset_cm) &&
          origin_offset_cm >= kMinimumOriginOffsetCm &&
          origin_offset_cm <= kMaximumOriginOffsetCm &&
@@ -4681,6 +4748,20 @@ bool PersistSettings(Context &context) noexcept {
   const auto preset = context.preset.load(std::memory_order_acquire);
   const double camera_scale =
       context.camera_scale.load(std::memory_order_acquire);
+  const double position_spring =
+      context.position_spring.load(std::memory_order_acquire);
+  const double yaw_spring =
+      context.yaw_spring.load(std::memory_order_acquire);
+  const double drift_yaw_spring =
+      context.drift_yaw_spring.load(std::memory_order_acquire);
+  const double look_yaw_spring =
+      context.look_yaw_spring.load(std::memory_order_acquire);
+  const double yaw_return_spring =
+      context.yaw_return_spring.load(std::memory_order_acquire);
+  const double pitch_spring =
+      context.pitch_spring.load(std::memory_order_acquire);
+  const double roll_spring =
+      context.roll_spring.load(std::memory_order_acquire);
   const double origin_offset_cm =
       context.origin_offset_cm.load(std::memory_order_acquire);
   const double aspect_ratio =
@@ -4724,9 +4805,11 @@ bool PersistSettings(Context &context) noexcept {
   const bool diagnostic_skip_rotation =
       context.diagnostic_skip_rotation.load(std::memory_order_acquire);
   if (!ConfigReady(context.config) ||
-      !SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
-                     speed_distance_scale, roll_scale, pitch_scale,
-                     shake_scale, slope_strength,
+      !SettingsValid(preset, camera_scale, position_spring, yaw_spring,
+                     drift_yaw_spring, look_yaw_spring, yaw_return_spring,
+                     pitch_spring, roll_spring, origin_offset_cm,
+                     aspect_ratio, speed_distance_scale, roll_scale,
+                     pitch_scale, shake_scale, slope_strength,
                      slope_max_gradient_degrees, slope_up_look_at,
                      slope_up_rest, slope_down_look_at,
                      slope_down_rest) ||
@@ -4748,6 +4831,20 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, static_cast<double>(preset)) &&
       AppendText(cursor, end, ",\"cameraScale\":") &&
       AppendNumber(cursor, end, camera_scale) &&
+      AppendText(cursor, end, ",\"positionSpring\":") &&
+      AppendNumber(cursor, end, position_spring) &&
+      AppendText(cursor, end, ",\"yawSpring\":") &&
+      AppendNumber(cursor, end, yaw_spring) &&
+      AppendText(cursor, end, ",\"driftYawSpring\":") &&
+      AppendNumber(cursor, end, drift_yaw_spring) &&
+      AppendText(cursor, end, ",\"lookYawSpring\":") &&
+      AppendNumber(cursor, end, look_yaw_spring) &&
+      AppendText(cursor, end, ",\"yawReturnSpring\":") &&
+      AppendNumber(cursor, end, yaw_return_spring) &&
+      AppendText(cursor, end, ",\"pitchSpring\":") &&
+      AppendNumber(cursor, end, pitch_spring) &&
+      AppendText(cursor, end, ",\"rollSpring\":") &&
+      AppendNumber(cursor, end, roll_spring) &&
       AppendText(cursor, end, ",\"originOffsetCm\":") &&
       AppendNumber(cursor, end, origin_offset_cm) &&
       AppendText(cursor, end, ",\"aspectRatio\":") &&
@@ -4811,6 +4908,17 @@ void SetDefaults(Context &context) noexcept {
   context.enabled.store(true, std::memory_order_release);
   context.preset.store(0, std::memory_order_release);
   context.camera_scale.store(kDefaultCameraScale, std::memory_order_release);
+  context.position_spring.store(kDefaultPositionSpring,
+                                std::memory_order_release);
+  context.yaw_spring.store(kDefaultYawSpring, std::memory_order_release);
+  context.drift_yaw_spring.store(kDefaultDriftYawSpring,
+                                 std::memory_order_release);
+  context.look_yaw_spring.store(kDefaultLookYawSpring,
+                                std::memory_order_release);
+  context.yaw_return_spring.store(kDefaultYawReturnSpring,
+                                  std::memory_order_release);
+  context.pitch_spring.store(kDefaultPitchSpring, std::memory_order_release);
+  context.roll_spring.store(kDefaultRollSpring, std::memory_order_release);
   context.origin_offset_cm.store(kDefaultOriginOffsetCm,
                                  std::memory_order_release);
   context.aspect_ratio.store(kDefaultAspectRatio, std::memory_order_release);
@@ -4944,19 +5052,26 @@ bool LoadSettings(Context &context) noexcept {
   const AnomalyJsonServiceV1 &json = *context.json;
   std::uint32_t kind{};
   std::size_t field_count{};
-  // The schema has 24 properties today. Keep headroom so a future optional
+  // The schema has 31 properties today. Keep headroom so a future optional
   // field does not make existing documents unreadable.
   if (json.kind(json.user, root, &kind).code != ANOMALY_STATUS_V1_OK ||
       kind != ANOMALY_JSON_V1_OBJECT ||
       json.object_size(json.user, root, &field_count).code !=
           ANOMALY_STATUS_V1_OK ||
-      field_count < 6 || field_count > 32) {
+      field_count < 6 || field_count > 40) {
     return false;
   }
   bool enabled{};
   bool fov_enabled{};
   double preset_number{};
   double camera_scale{};
+  double position_spring = kDefaultPositionSpring;
+  double yaw_spring = kDefaultYawSpring;
+  double drift_yaw_spring = kDefaultDriftYawSpring;
+  double look_yaw_spring = kDefaultLookYawSpring;
+  double yaw_return_spring = kDefaultYawReturnSpring;
+  double pitch_spring = kDefaultPitchSpring;
+  double roll_spring = kDefaultRollSpring;
   double origin_offset_cm{};
   double aspect_ratio{};
   if (!JsonObjectBoolean(json, root, "enabled", enabled) ||
@@ -4990,6 +5105,18 @@ bool LoadSettings(Context &context) noexcept {
   double slope_up_rest = kDefaultSlopeUpRest;
   double slope_down_look_at = kDefaultSlopeDownLookAt;
   double slope_down_rest = kDefaultSlopeDownRest;
+  static_cast<void>(JsonObjectNumber(json, root, "positionSpring",
+                                     position_spring));
+  static_cast<void>(JsonObjectNumber(json, root, "yawSpring", yaw_spring));
+  static_cast<void>(JsonObjectNumber(json, root, "driftYawSpring",
+                                     drift_yaw_spring));
+  static_cast<void>(JsonObjectNumber(json, root, "lookYawSpring",
+                                     look_yaw_spring));
+  static_cast<void>(JsonObjectNumber(json, root, "yawReturnSpring",
+                                     yaw_return_spring));
+  static_cast<void>(JsonObjectNumber(json, root, "pitchSpring",
+                                     pitch_spring));
+  static_cast<void>(JsonObjectNumber(json, root, "rollSpring", roll_spring));
   static_cast<void>(JsonObjectNumber(json, root, "speedDistanceScale",
                                      speed_distance_scale));
   static_cast<void>(JsonObjectNumber(json, root, "rollScale", roll_scale));
@@ -5025,9 +5152,11 @@ bool LoadSettings(Context &context) noexcept {
                                      slope_down_look_at));
   static_cast<void>(JsonObjectNumber(json, root, "slopeDownRest",
                                      slope_down_rest));
-  if (!SettingsValid(preset, camera_scale, origin_offset_cm, aspect_ratio,
-                     speed_distance_scale, roll_scale, pitch_scale,
-                     shake_scale, slope_strength,
+  if (!SettingsValid(preset, camera_scale, position_spring, yaw_spring,
+                     drift_yaw_spring, look_yaw_spring, yaw_return_spring,
+                     pitch_spring, roll_spring, origin_offset_cm,
+                     aspect_ratio, speed_distance_scale, roll_scale,
+                     pitch_scale, shake_scale, slope_strength,
                      slope_max_gradient_degrees, slope_up_look_at,
                      slope_up_rest, slope_down_look_at,
                      slope_down_rest)) {
@@ -5036,6 +5165,15 @@ bool LoadSettings(Context &context) noexcept {
   context.enabled.store(enabled, std::memory_order_release);
   context.preset.store(preset, std::memory_order_release);
   context.camera_scale.store(camera_scale, std::memory_order_release);
+  context.position_spring.store(position_spring, std::memory_order_release);
+  context.yaw_spring.store(yaw_spring, std::memory_order_release);
+  context.drift_yaw_spring.store(drift_yaw_spring,
+                                 std::memory_order_release);
+  context.look_yaw_spring.store(look_yaw_spring, std::memory_order_release);
+  context.yaw_return_spring.store(yaw_return_spring,
+                                  std::memory_order_release);
+  context.pitch_spring.store(pitch_spring, std::memory_order_release);
+  context.roll_spring.store(roll_spring, std::memory_order_release);
   context.origin_offset_cm.store(origin_offset_cm,
                                  std::memory_order_release);
   context.aspect_ratio.store(aspect_ratio, std::memory_order_release);
@@ -6651,6 +6789,20 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   bool fov_enabled = context.fov_enabled.load(std::memory_order_acquire);
   const double camera_scale =
       context.camera_scale.load(std::memory_order_acquire);
+  const double position_spring =
+      context.position_spring.load(std::memory_order_acquire);
+  const double yaw_spring =
+      context.yaw_spring.load(std::memory_order_acquire);
+  const double drift_yaw_spring =
+      context.drift_yaw_spring.load(std::memory_order_acquire);
+  const double look_yaw_spring =
+      context.look_yaw_spring.load(std::memory_order_acquire);
+  const double yaw_return_spring =
+      context.yaw_return_spring.load(std::memory_order_acquire);
+  const double pitch_spring =
+      context.pitch_spring.load(std::memory_order_acquire);
+  const double roll_spring =
+      context.roll_spring.load(std::memory_order_acquire);
   const double aspect_ratio =
       context.aspect_ratio.load(std::memory_order_acquire);
   const double speed_distance_scale =
@@ -6697,6 +6849,17 @@ void UpdateCamera(Context &context, const double dt) noexcept {
                                         : nfs2015_chase::CinematicPreset());
     RequestPresenterReset(context);
     NoteViewSnap(context, kSnapReasonPreset);
+  }
+  // The spring sliders are Game-preset tuning aids; the cinematic preset
+  // keeps its own values.
+  if (preset == 0) {
+    context.chase.SetPositionSpring(position_spring);
+    context.chase.SetYawSpring(yaw_spring);
+    context.chase.SetDriftYawSpring(drift_yaw_spring);
+    context.chase.SetLookYawSpring(look_yaw_spring);
+    context.chase.SetYawReturnSpring(yaw_return_spring);
+    context.chase.SetPitchSpring(pitch_spring);
+    context.chase.SetRollSpring(roll_spring);
   }
   // These are cheap setters that do not reset the springs.
   context.chase.SetSpeedDistanceScale(speed_distance_scale);
@@ -7896,6 +8059,20 @@ void UpdateDisplay(Context &context) noexcept {
       context.fov_enabled.load(std::memory_order_acquire);
   context.display.camera_scale =
       context.camera_scale.load(std::memory_order_acquire);
+  context.display.position_spring =
+      context.position_spring.load(std::memory_order_acquire);
+  context.display.yaw_spring =
+      context.yaw_spring.load(std::memory_order_acquire);
+  context.display.drift_yaw_spring =
+      context.drift_yaw_spring.load(std::memory_order_acquire);
+  context.display.look_yaw_spring =
+      context.look_yaw_spring.load(std::memory_order_acquire);
+  context.display.yaw_return_spring =
+      context.yaw_return_spring.load(std::memory_order_acquire);
+  context.display.pitch_spring =
+      context.pitch_spring.load(std::memory_order_acquire);
+  context.display.roll_spring =
+      context.roll_spring.load(std::memory_order_acquire);
   context.display.origin_offset_cm =
       context.origin_offset_cm.load(std::memory_order_acquire);
   context.display.aspect_ratio =
@@ -9185,6 +9362,68 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
         MarkSettingsDirty(*context);
       }
 
+      if (display.preset == 0) {
+        ui->separator(ui->user);
+        const std::string springs_label = context->localizer.Text(
+            "setting.springs", "Camera springs");
+        ui->text(ui->user, StringView(springs_label));
+        const std::string springs_hint = context->localizer.Text(
+            "setting.springs_hint",
+            "Higher = faster follow; look spring: more side offset");
+        ui->text(ui->user, StringView(springs_hint));
+
+        const auto spring_slider =
+            [&](const char *key, const char *fallback,
+                const char *widget_key, const double value,
+                const double minimum, const double maximum,
+                std::atomic<double> &target) {
+              const std::string label = context->localizer.Label(
+                  key, fallback, widget_key);
+              float slider_value = static_cast<float>(value);
+              if (ui->slider_float(
+                      ui->user, StringView(label), &slider_value,
+                      static_cast<float>(minimum),
+                      static_cast<float>(maximum)) != 0) {
+                target.store(
+                    nfs2015_chase::Clamp(
+                        static_cast<double>(slider_value), minimum, maximum),
+                    std::memory_order_release);
+                MarkSettingsDirty(*context);
+              }
+            };
+        spring_slider("setting.position_spring", "Camera position spring",
+                      "chase-spring-position", display.position_spring,
+                      kMinimumPositionSpring, kMaximumPositionSpring,
+                      context->position_spring);
+        spring_slider("setting.yaw_spring", "Normal yaw spring",
+                      "chase-spring-yaw", display.yaw_spring,
+                      kMinimumYawSpring, kMaximumYawSpring,
+                      context->yaw_spring);
+        spring_slider("setting.drift_yaw_spring",
+                      "Drift yaw spring (camera position)",
+                      "chase-spring-drift-yaw", display.drift_yaw_spring,
+                      kMinimumDriftYawSpring, kMaximumDriftYawSpring,
+                      context->drift_yaw_spring);
+        spring_slider("setting.look_yaw_spring",
+                      "Drift look spring (larger = more side offset)",
+                      "chase-look-yaw-spring", display.look_yaw_spring,
+                      kMinimumLookYawSpring, kMaximumLookYawSpring,
+                      context->look_yaw_spring);
+        spring_slider("setting.yaw_return_spring",
+                      "Drift yaw return spring",
+                      "chase-spring-yaw-return", display.yaw_return_spring,
+                      kMinimumYawReturnSpring, kMaximumYawReturnSpring,
+                      context->yaw_return_spring);
+        spring_slider("setting.pitch_spring", "Pitch spring",
+                      "chase-spring-pitch", display.pitch_spring,
+                      kMinimumPitchSpring, kMaximumPitchSpring,
+                      context->pitch_spring);
+        spring_slider("setting.roll_spring", "Roll spring",
+                      "chase-spring-roll", display.roll_spring,
+                      kMinimumRollSpring, kMaximumRollSpring,
+                      context->roll_spring);
+      }
+
       const std::string slope_follow_label = context->localizer.Label(
           "setting.slope_follow", "Follow slope (body pitch)",
           "chase-slope-follow");
@@ -9555,7 +9794,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
       StringView(kPluginId),
       StringView("NFS 2015 Chase Cam"),
       StringView("RobinEatCorn"),
-      StringView("2.0.1"),
+      StringView("2.0.2"),
       Load,
       Start,
       Stop,

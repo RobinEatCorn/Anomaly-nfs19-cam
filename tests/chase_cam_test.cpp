@@ -203,6 +203,37 @@ int main() {
              -12.0);
   CheckDrift("game heavy drift", GamePreset(), 4.7, 5.3, 2.0, 47.3, -3.0);
 
+  // The settings panel's spring sliders write through these setters.
+  {
+    ChaseCam camera(GamePreset());
+    camera.SetPositionSpring(12.0);
+    ExpectNear("position spring setter", camera.config().position_spring,
+               12.0, 0.001);
+    camera.SetYawSpring(9.0);
+    ExpectNear("yaw spring setter", camera.config().yaw_spring, 9.0, 0.001);
+    camera.SetDriftYawSpring(1.5);
+    ExpectNear("drift yaw spring setter", camera.config().drift_yaw_spring,
+               1.5, 0.001);
+    camera.SetLookYawSpring(3.25);
+    ExpectNear("look yaw spring setter", camera.config().look_yaw_spring,
+               3.25, 0.001);
+    camera.SetYawReturnSpring(7.0);
+    ExpectNear("yaw return spring setter", camera.config().yaw_return_spring,
+               7.0, 0.001);
+    camera.SetPitchSpring(80.0);
+    ExpectNear("pitch spring setter", camera.config().pitch_spring, 80.0,
+               0.001);
+    camera.SetRollSpring(150.0);
+    ExpectNear("roll spring setter", camera.config().roll_spring, 150.0,
+               0.001);
+    camera.SetLookYawSpring(0.0);
+    ExpectNear("look yaw spring clamp low", camera.config().look_yaw_spring,
+               0.5, 0.001);
+    camera.SetLookYawSpring(99.0);
+    ExpectNear("look yaw spring clamp high", camera.config().look_yaw_spring,
+               30.0, 0.001);
+  }
+
   // --- Slope follow: body frame and GradientAdjustments -------------------
   // The body-frame rig keeps a nearly constant height above the slope. The
   // gradient trim is asymmetric: full 2.0 m/rad uphill, only 0.25 m/rad

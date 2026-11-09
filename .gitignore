@@ -1,6 +1,7 @@
 # 构建产物
 /build/
 /build.mingw/
+/build.*/
 /dist/
 /out/
 /package/

@@ -124,6 +124,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
+├── RELEASE-NOTES-2.0.2.md 弹簧滑块与默认看向值说明
 ├── RELEASE-NOTES-2.0.1.md 闪屏/重影修复说明
 ├── RELEASE-NOTES-2.0.0.md 2.7.0 适配与迁移说明
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
@@ -393,7 +394,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 ## 发布
 
 `manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
-`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.1`。ID 一旦发布就不应再变。
+`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.2`。ID 一旦发布就不应再变。
 
 发布门禁、离线/实机测试矩阵、产物哈希和回滚步骤记录在
 [RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。完整发布前至少完成两个不同地图、
@@ -405,7 +406,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 
    ```powershell
    Compress-Archive -Path .\build\package\robineatcorn.nfs2015-chase-cam\* `
-     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.1.zip -Force
+     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.2.zip -Force
    ```
 
    WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`；
@@ -414,9 +415,9 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
 
    ```sh
-   gh release create v2.0.1 dist/Nfs2015ChaseCam-2.0.1.zip \
-     --title "NFS 2015 Chase Cam 2.0.1" \
-     --notes "Anomaly 2.7.0 加载/编译适配；新插件 ID 与旧数据迁移说明"
+   gh release create v2.0.2 dist/Nfs2015ChaseCam-2.0.2.zip \
+     --title "NFS 2015 Chase Cam 2.0.2" \
+     --notes "新增镜头弹簧滑块；漂移看向弹簧默认值改为 15"
    ```
 
 5. 最后更新 `pluginmaster.json` 的 `Version` 与 `DownloadLinkInstall` / `DownloadLinkUpdate`，
