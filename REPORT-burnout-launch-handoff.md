@@ -62,6 +62,36 @@ Blend CINEBOT_BLEND_EULER_ORBIT
    起步、超过 `burnoutHoldSpeed` 后才触发；直接照搬 2.5 s 会把“模式退出前”
    的时间也算进去，实机总时长接近 3 s，所以看起来太慢。
 
+### 2.1 镜头倾斜 / roll 回正
+
+资产里**没有**单独的“倾斜回正”动画或曲线。具体看：
+
+| 项 | NFS 2015 数据 | 说明 |
+|---|---|---|
+| `LeftWheelSpin` / `RightWheelSpin` / `WheelSpin` | `Roll 0.0` | 特写模式本身不设基础 roll |
+| `FixedTargetComposer` `Instance6/7/8` | `Up (0,1,0)` | 用固定 up 构图，不主动做 Dutch |
+| WheelSpin 的控制器 | `BasicController` + target noise + 相机输出 | 没有 `CINEBOT_REACTION_OUTPUT_DUTCH` |
+| 普通 Chase `Instance105` | `DUTCH`（`Instance40`）、`NOISE_ROLL`（`Instance16`）等 | 正常追车才挂 roll/侧倾控制器 |
+| 退出过渡 `Instance140` | `EULER_ORBIT`，0.2 s 延迟 + 2.5 s | 位置和朝向一起混合 |
+
+因此：
+
+- 特写镜头本身是低机位、固定 up 的镜头；画面里明显的“倾斜”主要来自低机位
+  的 pitch / 透视，而不是一个持续旋转的 Dutch roll。
+- 退出时没有第二条“roll 弹簧”或“先回正再拉远”的时间线。`EULER_ORBIT`
+  在同一个 2.5 s 过渡里同时插值位置和朝向，所以低机位 pitch、横向 offset
+  以及（如果端点有差异的）roll 都会随这条过渡一起渐进回正。
+- 如果 WheelSpin 通过 `InheritControllers` 继承了 Chase 的 DUTCH/roll 控制器，
+  roll 也仍由 Chase 的弹簧体系处理，而不是 WheelSpin 独有的回正段。
+
+当前实现对应关系：
+
+- `BuildShotView()` 的 `view.roll = 0.0`，特写不做额外 Dutch；
+- `BlendBurnoutCamera()` 对 up 向量和标量 roll 都按 `blend` 插值，并让机位
+  沿 pivot 做圆柱轨道运动；
+- 因此起步时看到的是“低机位 pitch + 位置逐步抬起”，而不是一条独立的
+  roll 回正曲线；这与 prefab 里只有 `EULER_ORBIT` 的结构一致。
+
 ## 3. 实现
 
 ### 3.1 `BurnoutShotConfig`
@@ -152,7 +182,8 @@ ctest --test-dir build.mingw --output-on-failure
 |---|---|---|
 | 退出延迟 | 0.2 s | 0.2 s（正常/起步） |
 | 退出时长 | 2.5 s | 普通 2.5 s；起步 1.8 s |
-| 混合 | `EULER_ORBIT` | 现有轨道混合（等价目标） |
+| 混合 | `EULER_ORBIT` | 现有轨道混合（位置 + up/roll 插值） |
+| 特写 roll | 0.0，无专用 roll 控制器 | 0.0；roll/up 随轨道过渡 |
 | 缓动 | ease in 0.6 / out 0.4 | `SmoothStep` |
 | 异常退出 | 未单独建模 | 腾空/倒车 0.5 s 安全退出 |
 

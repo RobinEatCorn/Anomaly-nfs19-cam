@@ -470,6 +470,9 @@ class BurnoutShot final {
     view.up = up;
     view.fov_y_degrees = BurnoutVerticalFovDegrees(
         config_.horizontal_fov_degrees, aspect_ratio);
+    // NFS WheelSpin has Roll 0.0 and no DUTCH controller. The low-angle tilt
+    // is pitch, and the orbit blend recovers it; there is no separate roll
+    // spring to emulate here.
     view.roll = 0.0;
     view.pitch_degrees =
         std::asin(Clamp(forward.z, -1.0, 1.0)) * kDegreesPerRadian;
@@ -488,7 +491,8 @@ class BurnoutShot final {
 // not a straight lerp: NFS uses EULER_ORBIT, so the eye travels in cylindrical
 // coordinates around the rear quarter. The look direction uses a slerp and the
 // up vector is re-orthogonalised, keeping the blend free of the usual
-// target-length/pitch pops.
+// target-length/pitch pops. WheelSpin has Roll 0.0 and no DUTCH controller, so
+// its visible tilt recovery is this one orbit/euler blend, not a roll spring.
 //
 // `blend == 0` returns `chase` bit-for-bit (no normalisation), and `blend == 1`
 // returns `shot` bit-for-bit; only the interior takes the orbit path.
