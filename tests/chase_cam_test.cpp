@@ -195,6 +195,9 @@ int main() {
   // §6.3 straight-line rows: distance / height / FOV.
   CheckStraight("cinematic straight", CinematicPreset(), 5.28, 1.57, 56.8);
   CheckStraight("game straight", GamePreset(), 6.35, 1.78, 48.2);
+  Expect("cinematic roll gate defaults on",
+         CinematicPreset().roll_only_in_drift);
+  Expect("game roll gate defaults on", GamePreset().roll_only_in_drift);
 
   // §6.3 drift rows, with the local-offset rotation corrected. The camera
   // stays close, drops, hangs to one side, banks, widens the lens, and leaves

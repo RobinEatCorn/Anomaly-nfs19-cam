@@ -253,7 +253,7 @@ struct Config final {
   double roll_yaw_gain{0.055};
   // Multiplier for the roll target, and an optional non-retail drift gate.
   double roll_scale{1.0};
-  bool roll_only_in_drift{false};
+  bool roll_only_in_drift{true};
   // Maximum braking pitch, degrees.
   double max_pitch_degrees{3.0};
 
@@ -354,7 +354,7 @@ struct Config final {
   cfg.roll_lateral_gain = 0.13;
   cfg.roll_yaw_gain = 0.055;
   cfg.roll_scale = 1.0;
-  cfg.roll_only_in_drift = false;
+  cfg.roll_only_in_drift = true;
   cfg.max_pitch_degrees = 3.0;
 
   cfg.slope_follow = true;
@@ -441,7 +441,7 @@ struct Config final {
   cfg.roll_lateral_gain = 0.02;
   cfg.roll_yaw_gain = 0.01;
   cfg.roll_scale = 1.0;
-  cfg.roll_only_in_drift = false;
+  cfg.roll_only_in_drift = true;
   cfg.max_pitch_degrees = 4.5;
 
   cfg.slope_follow = true;

@@ -1382,7 +1382,7 @@ struct DisplayState final {
   double shake_scale{kDefaultShakeScale};
   bool slope_follow{true};
   double slope_strength{kDefaultSlopeStrength};
-  bool roll_only_in_drift{};
+  bool roll_only_in_drift{true};
   bool diagnostic_flat_pose{};
   bool diagnostic_zero_lag{};
   double borrow_strength{};
@@ -1608,7 +1608,7 @@ struct Context final {
   std::atomic<double> slope_up_rest{kDefaultSlopeUpRest};
   std::atomic<double> slope_down_look_at{kDefaultSlopeDownLookAt};
   std::atomic<double> slope_down_rest{kDefaultSlopeDownRest};
-  std::atomic_bool roll_only_in_drift{};
+  std::atomic_bool roll_only_in_drift{true};
   // Bisect switch: hold every attitude term at zero and stop writing the lens,
   // so only position and yaw survive. One click decides whether the twitch is
   // inside the attitude model at all, without reading a single number.
@@ -4940,7 +4940,7 @@ void SetDefaults(Context &context) noexcept {
                                    std::memory_order_release);
   context.slope_down_rest.store(kDefaultSlopeDownRest,
                                 std::memory_order_release);
-  context.roll_only_in_drift.store(false, std::memory_order_release);
+  context.roll_only_in_drift.store(true, std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.diagnostic_zero_lag.store(false, std::memory_order_release);
   context.borrow_strength.store(1.0, std::memory_order_release);
@@ -5097,7 +5097,7 @@ bool LoadSettings(Context &context) noexcept {
   double roll_scale = kDefaultRollScale;
   double pitch_scale = kDefaultPitchScale;
   double shake_scale = kDefaultShakeScale;
-  bool roll_only_in_drift = false;
+  bool roll_only_in_drift = true;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
   double borrow_strength = 1.0;

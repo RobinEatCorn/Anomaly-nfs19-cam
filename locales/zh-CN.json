@@ -29,7 +29,7 @@
     "setting.roll_scale": "侧倾强度",
     "setting.pitch_scale": "刹车俯仰强度",
     "setting.shake_scale": "镜头震动强度",
-    "setting.roll_only_drift": "仅在漂移时侧倾",
+    "setting.roll_only_drift": "仅在漂移时倾斜",
     "status.camera": "相机",
     "status.hook": "视点 Hook",
     "status.update_rate": "相机更新频率",
