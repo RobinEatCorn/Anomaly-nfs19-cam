@@ -3,8 +3,9 @@
 > 目标仓库：`nfs2015-chase-cam`
 > 目标游戏：NTE（`HTGame.exe`）
 > 写作日期：2026-11-10
-> 状态：**Phase 0 已完成（PASS）**，Phase 1 待开始
+> 状态：**Phase 1 已完成（PASS）**，Phase 2 待开始
 > Phase 0 报告：[`REPORT-burnout-phase0.md`](REPORT-burnout-phase0.md)
+> Phase 1 报告：[`REPORT-burnout-phase1.md`](REPORT-burnout-phase1.md)
 > 原则：**只读游戏目录；所有分析副本放在当前项目内；不写游戏目录。**
 
 ---
@@ -604,6 +605,8 @@ roll     = lerp(chase.roll, shot.roll, t)
 - **失败即停**：如果所有信号都不可用，功能默认关闭，不进入 Phase 1 之后的集成。
 
 ### Phase 1：纯相机模型（1–2 天）
+
+> **结果（2026-11-10）：PASS。** `burnout_shot.hpp` 已实现状态机、机位、水平 FOV、震动、orbit blend 和安全下限；`tests/burnout_shot_test.cpp` 覆盖计划中的 10 项验收，CTest 全通过。详见 [`REPORT-burnout-phase1.md`](REPORT-burnout-phase1.md)。
 
 - 新增 `burnout_shot.hpp`：机位、FOV、震动、orbit blend、状态机。
 - 新增单测，不接插件。

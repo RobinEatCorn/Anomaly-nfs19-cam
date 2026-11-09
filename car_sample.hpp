@@ -22,6 +22,21 @@
 
 namespace nfs2015_chase {
 
+// Burnout state published by the Game tick. `active` is the already-filtered
+// gameplay condition; `left`/`right` are the per-rear-wheel flags and
+// `intensity` is the smoothed 0..1 strength used by the shot animation.
+// Phase 1 only consumes this struct; the sample-ring plumbing is Phase 2.
+struct BurnoutSample final {
+  bool active{};
+  bool left{};
+  bool right{};
+  double intensity{};
+  double throttle{};
+  double handbrake{};
+  double steering{};
+  double speed_mps{};
+};
+
 // Everything the model and the pose transform need for one instant. `car`
 // already carries the geometry; the rest is what `PublishView` used to add.
 struct CarSample final {
