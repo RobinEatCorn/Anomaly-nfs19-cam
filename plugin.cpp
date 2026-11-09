@@ -758,6 +758,171 @@ enum SpeedSource : std::uint8_t {
   kSpeedSourceExact = 2,
 };
 
+// Phase 0 burnout reconnaissance. Everything here is read-only and lives on
+// the Game tick; none of it feeds the camera yet. The function owners and
+// parameter sizes were verified against the live UE reflection table with
+// `anomaly-cli ue functions <name>` (Anomaly 2.7.0). Keep the exact paths:
+// resolving a function on the wrong owner is the usual reason a getter looks
+// unavailable even though the game has it.
+enum BurnoutProbeReceiver : std::uint8_t {
+  kBurnoutReceiverVehicle = 0,
+  kBurnoutReceiverMovement = 1,
+  kBurnoutReceiverRuntimeInfo = 2,
+};
+
+enum BurnoutProbeValue : std::uint8_t {
+  kBurnoutValueBool = 0,
+  kBurnoutValueFloat = 1,
+  kBurnoutValueInt = 2,
+  kBurnoutValuePointer = 3,
+  kBurnoutValueStruct = 4,
+};
+
+enum BurnoutProbeStatus : std::uint8_t {
+  kBurnoutProbeUnresolved = 0,
+  kBurnoutProbeResolved = 1,
+  kBurnoutProbeOk = 2,
+  kBurnoutProbeTooSmall = 3,
+};
+
+enum BurnoutProbeIndex : std::size_t {
+  kBurnoutProbeIsBurnout = 0,
+  kBurnoutProbeThrottle,
+  kBurnoutProbeBrake,
+  kBurnoutProbeSteering,
+  kBurnoutProbeSkidAngle,
+  kBurnoutProbePlayerThrottle,
+  kBurnoutProbeWheelBurnout,
+  kBurnoutProbeWheelBurnoutRep,
+  kBurnoutProbeWheelAngularSpeed,
+  kBurnoutProbeRuntimeInfo,
+  kBurnoutProbeWheelCount,
+  kBurnoutProbeInputInfo,
+  kBurnoutProbeCount
+};
+
+struct BurnoutProbeSpec final {
+  const char *label;
+  const char *path;
+  BurnoutProbeReceiver receiver;
+  BurnoutProbeValue value;
+  std::uint16_t return_offset;
+  // 0 = no parameter, 1 = uint8 wheel index, 4 = int32 wheel index.
+  std::uint8_t input_size;
+};
+
+inline constexpr BurnoutProbeSpec kBurnoutProbeSpecs[] = {
+    {"isBurnout",
+     "/Script/HTGame.HTVehicleMovementComponent:GetVehicleIsBurnout",
+     kBurnoutReceiverMovement, kBurnoutValueBool, 0, 0},
+    {"throttle",
+     "/Script/HTGame.HTVehicleMovementComponent:GetVehicleThrottle",
+     kBurnoutReceiverMovement, kBurnoutValueFloat, 0, 0},
+    {"brake",
+     "/Script/HTGame.HTVehicleMovementComponent:GetVehicleBrake",
+     kBurnoutReceiverMovement, kBurnoutValueFloat, 0, 0},
+    {"steering",
+     "/Script/HTGame.HTVehicleMovementComponent:GetRawSteeringInput",
+     kBurnoutReceiverMovement, kBurnoutValueFloat, 0, 0},
+    {"skidAngle",
+     "/Script/HTGame.HTVehicleMovementComponent:GetVehicleSkidAngle",
+     kBurnoutReceiverMovement, kBurnoutValueFloat, 0, 0},
+    {"playerThrottle",
+     "/Script/HTGame.HTWheeledVehicleDrivable:GetPlayerThrottleInput",
+     kBurnoutReceiverVehicle, kBurnoutValueFloat, 0, 0},
+    {"wheelBurnout",
+     "/Script/HTGame.HTVehicleMovementComponent:GetWheelIsBurnout",
+     kBurnoutReceiverMovement, kBurnoutValueBool, 4, 1},
+    {"wheelBurnoutRep",
+     "/Script/HTGame.HTWheeledVehicleDrivable:GetWheelIsBurnoutRep",
+     kBurnoutReceiverVehicle, kBurnoutValueBool, 4, 1},
+    {"wheelAngularSpeed",
+     "/Script/HTGame.HTVehicleMovementComponent:GetWheelAngularSpeed",
+     kBurnoutReceiverMovement, kBurnoutValueFloat, 4, 1},
+    {"runtimeInfo",
+     "/Script/HTGame.HTVehicleRuntimeInfoInterface:GetCurrentRuntimeInfo",
+     kBurnoutReceiverVehicle, kBurnoutValuePointer, 0, 0},
+    {"wheelCount",
+     "/Script/HTGame.HTWheeledVehicleRuntimeInfoBase:GetWheelCount",
+     kBurnoutReceiverRuntimeInfo, kBurnoutValueInt, 0, 0},
+    {"inputInfo",
+     "/Script/HTGame.HTVehicleRuntimeInfoBase:GetInputInfo",
+     kBurnoutReceiverRuntimeInfo, kBurnoutValueStruct, 0, 0},
+};
+
+static_assert(std::size(kBurnoutProbeSpecs) ==
+              static_cast<std::size_t>(kBurnoutProbeCount));
+
+inline constexpr std::size_t kBurnoutProbeMaxWheels = 8;
+
+struct BurnoutProbeResult final {
+  AnomalyGenerationHandleV1 function{};
+  std::uint8_t status{kBurnoutProbeUnresolved};
+  std::uint32_t last_code{};
+  std::uint32_t calls{};
+  std::uint32_t failures{};
+  double next_retry{};
+  bool logged{};
+  bool has_output{};
+  std::uint16_t output_size{};
+  alignas(16) std::uint8_t output[32]{};
+};
+
+struct BurnoutProbeState final {
+  std::array<BurnoutProbeResult, kBurnoutProbeCount> results{};
+  AnomalyGenerationHandleV1 vehicle_handle{};
+  AnomalyGenerationHandleV1 movement_handle{};
+  AnomalyGenerationHandleV1 runtime_info_handle{};
+  std::uintptr_t vehicle_object{};
+  std::uintptr_t movement_object{};
+  std::uintptr_t runtime_info_object{};
+  double next_direct{};
+  double next_wheel{};
+  double next_runtime{};
+  double next_runtime_signals{};
+  double summary_due{};
+  double last_input_log{};
+  double next_active_log{};
+  bool summary_logged{};
+  bool have_last_state{};
+  bool last_burnout{};
+  bool last_handbrake{};
+  bool last_handbrake12{};
+  bool last_handbrake0{};
+  std::uint32_t last_wheel_mask{};
+  std::uint8_t last_input_raw[16]{};
+  std::size_t last_input_raw_size{};
+
+  bool is_burnout_known{};
+  bool is_burnout{};
+  bool throttle_known{};
+  double throttle{};
+  bool brake_known{};
+  double brake{};
+  bool steering_known{};
+  double steering{};
+  bool skid_known{};
+  double skid_angle{};
+  bool player_throttle_known{};
+  double player_throttle{};
+  bool handbrake_known{};
+  bool handbrake{};
+  bool handbrake12_known{};
+  bool handbrake12{};
+  bool handbrake0_known{};
+  bool handbrake0{};
+  bool wheel_count_known{};
+  std::int32_t wheel_count{};
+  bool wheel_burnout_known[kBurnoutProbeMaxWheels]{};
+  bool wheel_burnout[kBurnoutProbeMaxWheels]{};
+  bool wheel_rep_known[kBurnoutProbeMaxWheels]{};
+  bool wheel_rep[kBurnoutProbeMaxWheels]{};
+  bool wheel_angular_known[kBurnoutProbeMaxWheels]{};
+  double wheel_angular[kBurnoutProbeMaxWheels]{};
+  std::uint8_t input_raw[16]{};
+  std::size_t input_raw_size{};
+};
+
 constexpr std::size_t kDiagnosticThreadSlots = 8;
 
 struct Diagnostics final {
@@ -1358,6 +1523,41 @@ struct DisplayState final {
   std::uint8_t speed_source{kSpeedSourceUnavailable};
   bool speed_sign_known{};
   double speed_kmh{};
+  // Phase 0 burnout probe. Copied from Context::burnout_probe on the Game
+  // tick; nothing here changes the camera.
+  bool burnout_probe_is_burnout_known{};
+  bool burnout_probe_is_burnout{};
+  bool burnout_probe_throttle_known{};
+  double burnout_probe_throttle{};
+  bool burnout_probe_brake_known{};
+  double burnout_probe_brake{};
+  bool burnout_probe_steering_known{};
+  double burnout_probe_steering{};
+  bool burnout_probe_skid_known{};
+  double burnout_probe_skid_angle{};
+  bool burnout_probe_player_throttle_known{};
+  double burnout_probe_player_throttle{};
+  bool burnout_probe_handbrake12_known{};
+  bool burnout_probe_handbrake12{};
+  bool burnout_probe_handbrake0_known{};
+  bool burnout_probe_handbrake0{};
+  bool burnout_probe_handbrake_known{};
+  bool burnout_probe_handbrake{};
+  bool burnout_probe_wheel_count_known{};
+  std::int32_t burnout_probe_wheel_count{};
+  bool burnout_probe_wheel_burnout_known[kBurnoutProbeMaxWheels]{};
+  bool burnout_probe_wheel_burnout[kBurnoutProbeMaxWheels]{};
+  bool burnout_probe_wheel_rep_known[kBurnoutProbeMaxWheels]{};
+  bool burnout_probe_wheel_rep[kBurnoutProbeMaxWheels]{};
+  bool burnout_probe_wheel_angular_known[kBurnoutProbeMaxWheels]{};
+  double burnout_probe_wheel_angular[kBurnoutProbeMaxWheels]{};
+  std::uint8_t burnout_probe_input_raw[16]{};
+  std::size_t burnout_probe_input_raw_size{};
+  std::uint32_t burnout_probe_resolved{};
+  std::uint32_t burnout_probe_ok{};
+  std::uint32_t burnout_probe_failed{};
+  std::uint32_t burnout_probe_status[kBurnoutProbeCount]{};
+  std::uint32_t burnout_probe_code[kBurnoutProbeCount]{};
   double slip_degrees{};
   double drift{};
   double fov_horizontal{};
@@ -1822,6 +2022,8 @@ struct Context final {
   // PLAN-render-thread-hook.md task group 0. Read-only: it never reaches the
   // camera or the publisher.
   RenderXProbe render_x{};
+  // Phase 0 burnout reconnaissance. Game-thread only; read-only.
+  BurnoutProbeState burnout_probe{};
   // Probe input: the world XY offset of the bounds centre from the Pawn root,
   // captured by QueryPlayer on this Game tick. A fixed vector in the car's own
   // frame, so its direction is a body-yaw candidate that never involves the
@@ -6640,6 +6842,7 @@ std::uint64_t ObjectRegistryGeneration(Context &context) noexcept {
 // streaming, or a slot replacement). Every cached handle belongs to the old
 // registry and must not be handed to invoke() afterwards.
 void ResetVehicleObjectCaches(Context &context) noexcept {
+  context.burnout_probe = BurnoutProbeState{};
   context.vehicle_getter_handles = {};
   context.next_vehicle_getter_retry = {};
   context.vehicle_query_known = false;
@@ -6787,6 +6990,583 @@ VehiclePresence QueryVehiclePresence(Context &context) noexcept {
   context.vehicle_query_speed_fresh = result.speed_fresh;
   context.vehicle_query_speed_kmh = result.speed_kmh;
   return result;
+}
+
+constexpr double kBurnoutProbeDirectIntervalSeconds = 0.05;
+constexpr double kBurnoutProbeWheelIntervalSeconds = 0.25;
+constexpr double kBurnoutProbeRuntimeIntervalSeconds = 0.25;
+constexpr double kBurnoutProbeRuntimeSignalIntervalSeconds = 0.10;
+
+bool ReadBurnoutBool(const BurnoutProbeResult &result,
+                     const std::size_t offset, bool &value) noexcept {
+  if (!result.has_output || offset >= result.output_size) {
+    return false;
+  }
+  const std::uint8_t raw = result.output[offset];
+  if (raw > 1U) {
+    return false;
+  }
+  value = raw != 0U;
+  return true;
+}
+
+bool ReadBurnoutFloat(const BurnoutProbeResult &result,
+                      const std::size_t offset, double &value) noexcept {
+  if (!result.has_output || offset + sizeof(float) > result.output_size) {
+    return false;
+  }
+  float raw = 0.0F;
+  std::memcpy(&raw, result.output + offset, sizeof(raw));
+  if (!std::isfinite(raw) || std::fabs(raw) > 1.0e6F) {
+    return false;
+  }
+  value = static_cast<double>(raw);
+  return true;
+}
+
+bool ReadBurnoutInt(const BurnoutProbeResult &result,
+                    const std::size_t offset, std::int32_t &value) noexcept {
+  if (!result.has_output || offset + sizeof(std::int32_t) > result.output_size) {
+    return false;
+  }
+  std::int32_t raw = 0;
+  std::memcpy(&raw, result.output + offset, sizeof(raw));
+  value = raw;
+  return true;
+}
+
+bool ReadBurnoutPointer(const BurnoutProbeResult &result,
+                        const std::size_t offset,
+                        std::uintptr_t &value) noexcept {
+  if (!result.has_output || offset + sizeof(std::uintptr_t) > result.output_size) {
+    return false;
+  }
+  std::uintptr_t raw = 0;
+  std::memcpy(&raw, result.output + offset, sizeof(raw));
+  value = raw;
+  return raw != 0;
+}
+
+// GetWheelIsBurnout/Rep return at offset 4 because the reflected parameter
+// layout puts the one-byte wheel index first. Fall back to offset 0 so the
+// probe still reports a value if a future build reorders the parameters.
+bool ReadBurnoutWheelBool(const BurnoutProbeResult &result,
+                          bool &value) noexcept {
+  if (ReadBurnoutBool(result, 4, value)) {
+    return true;
+  }
+  return ReadBurnoutBool(result, 0, value);
+}
+
+bool IsDirectBurnoutProbe(const BurnoutProbeIndex index) noexcept {
+  switch (index) {
+    case kBurnoutProbeIsBurnout:
+    case kBurnoutProbeThrottle:
+    case kBurnoutProbeBrake:
+    case kBurnoutProbeSteering:
+    case kBurnoutProbeSkidAngle:
+    case kBurnoutProbePlayerThrottle:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsWheelBurnoutProbe(const BurnoutProbeIndex index) noexcept {
+  return index == kBurnoutProbeWheelBurnout ||
+         index == kBurnoutProbeWheelBurnoutRep ||
+         index == kBurnoutProbeWheelAngularSpeed;
+}
+
+bool ResolveBurnoutFunction(Context &context, const BurnoutProbeIndex index,
+                            BurnoutProbeResult &result) noexcept {
+  if (result.function.id != 0) {
+    return true;
+  }
+  if (context.elapsed < result.next_retry) {
+    return false;
+  }
+  result.next_retry = context.elapsed + kVehicleGetterRetrySeconds;
+  const auto &spec = kBurnoutProbeSpecs[static_cast<std::size_t>(index)];
+  AnomalyGenerationHandleV1 function{};
+  const auto status = context.objects->find_exact(
+      context.objects->user, StringView(spec.path), &function);
+  if (status.code == ANOMALY_STATUS_V1_OK && function.id != 0) {
+    result.function = function;
+    result.status = kBurnoutProbeResolved;
+    char message[256]{};
+    std::snprintf(message, sizeof(message),
+                  "nfs2015 chase cam: burnout probe %s resolved: %s",
+                  spec.label, spec.path);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+    return true;
+  }
+  if (!result.logged) {
+    result.logged = true;
+    char message[256]{};
+    std::snprintf(message, sizeof(message),
+                  "nfs2015 chase cam: burnout probe %s unresolved (%u): %s",
+                  spec.label, status.code, spec.path);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, message);
+  }
+  return false;
+}
+
+bool InvokeBurnoutFunction(Context &context, const BurnoutProbeIndex index,
+                           const AnomalyGenerationHandleV1 receiver,
+                           const int wheel_index,
+                           BurnoutProbeResult &result) noexcept {
+  if (receiver.id == 0 || result.function.id == 0) {
+    return false;
+  }
+  const auto &spec = kBurnoutProbeSpecs[static_cast<std::size_t>(index)];
+  alignas(16) std::array<std::uint8_t, 32> buffer{};
+  if (spec.input_size == 1) {
+    buffer[0] = static_cast<std::uint8_t>(wheel_index);
+  } else if (spec.input_size == 4) {
+    const std::int32_t value = static_cast<std::int32_t>(wheel_index);
+    std::memcpy(buffer.data(), &value, sizeof(value));
+  }
+  const auto status = context.events->invoke(
+      context.events->user, receiver, result.function, buffer.data(),
+      buffer.size());
+  result.last_code = status.code;
+  if (status.code != ANOMALY_STATUS_V1_OK) {
+    ++result.failures;
+    if (status.code == ANOMALY_STATUS_V1_BUFFER_TOO_SMALL) {
+      result.status = kBurnoutProbeTooSmall;
+    } else if (status.code == ANOMALY_STATUS_V1_NOT_FOUND ||
+               status.code == ANOMALY_STATUS_V1_FAILED) {
+      result.function = {};
+      result.status = kBurnoutProbeUnresolved;
+      result.next_retry = context.elapsed + kVehicleGetterRetrySeconds;
+    }
+    if (result.failures == 1U) {
+      char message[256]{};
+      std::snprintf(message, sizeof(message),
+                    "nfs2015 chase cam: burnout probe %s invoke failed "
+                    "code=%u receiver=%llx function=%llx",
+                    spec.label, status.code,
+                    static_cast<unsigned long long>(receiver.id),
+                    static_cast<unsigned long long>(result.function.id));
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, message);
+    }
+    return false;
+  }
+  ++result.calls;
+  result.status = kBurnoutProbeOk;
+  result.has_output = true;
+  result.output_size = static_cast<std::uint16_t>(buffer.size());
+  std::memcpy(result.output, buffer.data(),
+              (std::min)(buffer.size(), sizeof(result.output)));
+  return true;
+}
+
+AnomalyGenerationHandleV1 BurnoutReceiverHandle(
+    Context &context, const BurnoutProbeReceiver receiver) noexcept {
+  BurnoutProbeState &probe = context.burnout_probe;
+  switch (receiver) {
+    case kBurnoutReceiverVehicle:
+      return probe.vehicle_handle;
+    case kBurnoutReceiverMovement:
+      return probe.movement_handle;
+    case kBurnoutReceiverRuntimeInfo:
+      return probe.runtime_info_handle;
+    default:
+      return {};
+  }
+}
+
+void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
+                        const double speed_mps,
+                        const double forward_speed) noexcept {
+  BurnoutProbeState &probe = context.burnout_probe;
+  if (!vehicle.present || vehicle.object == 0 ||
+      !Ue5ObjectSnapshotReady(context.objects) ||
+      !Ue5ProcessEventInvokeReady(context.events)) {
+    probe = BurnoutProbeState{};
+    return;
+  }
+  if (!RefreshVehicleObjectGeneration(context)) {
+    return;
+  }
+  if (probe.vehicle_object != vehicle.object) {
+    probe = BurnoutProbeState{};
+    probe.vehicle_object = vehicle.object;
+  }
+  if (probe.summary_due <= 0.0) {
+    probe.summary_due = context.elapsed + 2.0;
+  }
+  if (probe.vehicle_handle.id == 0 &&
+      !ObjectHandleFromPointer(context, vehicle.object,
+                               probe.vehicle_handle)) {
+    return;
+  }
+
+  if (probe.movement_object == 0) {
+    std::uintptr_t movement = 0;
+    if (Read(context.core, vehicle.object + kVehicleMovementComponentOffset,
+             movement) &&
+        movement != 0) {
+      probe.movement_object = movement;
+    }
+  }
+  if (probe.movement_handle.id == 0 && probe.movement_object != 0 &&
+      !ObjectHandleFromPointer(context, probe.movement_object,
+                               probe.movement_handle)) {
+    probe.movement_object = 0;
+  }
+
+  // GetCurrentRuntimeInfo returns the UObject that owns GetInputInfo and
+  // GetWheelCount. Resolve it through the interface function; the runtime
+  // object is not the vehicle actor.
+  if (context.elapsed >= probe.next_runtime) {
+    probe.next_runtime =
+        context.elapsed + kBurnoutProbeRuntimeIntervalSeconds;
+    auto &runtime = probe.results[kBurnoutProbeRuntimeInfo];
+    if (probe.vehicle_handle.id != 0 &&
+        ResolveBurnoutFunction(context, kBurnoutProbeRuntimeInfo, runtime) &&
+        InvokeBurnoutFunction(context, kBurnoutProbeRuntimeInfo,
+                              probe.vehicle_handle, 0, runtime)) {
+      std::uintptr_t runtime_object = 0;
+      if (ReadBurnoutPointer(runtime, 0, runtime_object)) {
+        if (probe.runtime_info_object != runtime_object) {
+          probe.runtime_info_object = runtime_object;
+          probe.runtime_info_handle = {};
+        }
+        if (probe.runtime_info_handle.id == 0) {
+          static_cast<void>(ObjectHandleFromPointer(
+              context, runtime_object, probe.runtime_info_handle));
+        }
+      }
+    }
+  }
+
+  // Direct vehicle/movement getters at 20 Hz.
+  if (context.elapsed >= probe.next_direct) {
+    probe.next_direct =
+        context.elapsed + kBurnoutProbeDirectIntervalSeconds;
+    for (std::size_t raw_index = 0; raw_index < kBurnoutProbeCount;
+         ++raw_index) {
+      const auto index = static_cast<BurnoutProbeIndex>(raw_index);
+      if (!IsDirectBurnoutProbe(index)) {
+        continue;
+      }
+      auto &result = probe.results[raw_index];
+      if (!ResolveBurnoutFunction(context, index, result)) {
+        continue;
+      }
+      const auto receiver = BurnoutReceiverHandle(
+          context, kBurnoutProbeSpecs[raw_index].receiver);
+      if (receiver.id == 0) {
+        continue;
+      }
+      static_cast<void>(
+          InvokeBurnoutFunction(context, index, receiver, 0, result));
+    }
+  }
+
+  // Runtime-owned getters at 10 Hz.
+  if (probe.runtime_info_handle.id != 0 &&
+      context.elapsed >= probe.next_runtime_signals) {
+    probe.next_runtime_signals =
+        context.elapsed + kBurnoutProbeRuntimeSignalIntervalSeconds;
+    constexpr BurnoutProbeIndex kRuntimeSignals[] = {
+        kBurnoutProbeWheelCount, kBurnoutProbeInputInfo};
+    for (const BurnoutProbeIndex index : kRuntimeSignals) {
+      const auto slot = static_cast<std::size_t>(index);
+      auto &result = probe.results[slot];
+      if (!ResolveBurnoutFunction(context, index, result)) {
+        continue;
+      }
+      static_cast<void>(InvokeBurnoutFunction(
+          context, index, probe.runtime_info_handle, 0, result));
+    }
+  }
+
+  // Per-wheel getters at 4 Hz. Each wheel call is a separate output buffer, so
+  // interpret it immediately and keep the canonical result only for the
+  // cached function handle and counters.
+  if (context.elapsed >= probe.next_wheel) {
+    probe.next_wheel = context.elapsed + kBurnoutProbeWheelIntervalSeconds;
+    const std::int32_t count = probe.wheel_count_known ? probe.wheel_count : 4;
+    const std::size_t wheel_limit = static_cast<std::size_t>(
+        std::clamp<std::int32_t>(count, 1, kBurnoutProbeMaxWheels));
+    for (std::size_t raw_index = 0; raw_index < kBurnoutProbeCount;
+         ++raw_index) {
+      const auto index = static_cast<BurnoutProbeIndex>(raw_index);
+      if (!IsWheelBurnoutProbe(index)) {
+        continue;
+      }
+      auto &canonical = probe.results[raw_index];
+      if (!ResolveBurnoutFunction(context, index, canonical)) {
+        continue;
+      }
+      const auto receiver = BurnoutReceiverHandle(
+          context, kBurnoutProbeSpecs[raw_index].receiver);
+      if (receiver.id == 0) {
+        continue;
+      }
+      for (std::size_t wheel = 0; wheel < wheel_limit; ++wheel) {
+        BurnoutProbeResult call = canonical;
+        if (!InvokeBurnoutFunction(context, index, receiver,
+                                   static_cast<int>(wheel), call)) {
+          continue;
+        }
+        if (index == kBurnoutProbeWheelBurnout) {
+          bool value = false;
+          if (ReadBurnoutWheelBool(call, value)) {
+            probe.wheel_burnout_known[wheel] = true;
+            probe.wheel_burnout[wheel] = value;
+          }
+        } else if (index == kBurnoutProbeWheelBurnoutRep) {
+          bool value = false;
+          if (ReadBurnoutWheelBool(call, value)) {
+            probe.wheel_rep_known[wheel] = true;
+            probe.wheel_rep[wheel] = value;
+          }
+        } else if (index == kBurnoutProbeWheelAngularSpeed) {
+          double value = 0.0;
+          if (ReadBurnoutFloat(call, 4, value) ||
+              ReadBurnoutFloat(call, 0, value)) {
+            probe.wheel_angular_known[wheel] = true;
+            probe.wheel_angular[wheel] = value;
+          }
+        }
+        canonical = call;
+      }
+    }
+  }
+
+  // Interpret the direct results. A transient invoke failure keeps the last
+  // successful output; the diagnostic panel shows the failure counter.
+  bool value = false;
+  double numeric = 0.0;
+  if (ReadBurnoutBool(probe.results[kBurnoutProbeIsBurnout], 0, value)) {
+    probe.is_burnout_known = true;
+    probe.is_burnout = value;
+  } else {
+    probe.is_burnout_known = false;
+  }
+  if (ReadBurnoutFloat(probe.results[kBurnoutProbeThrottle], 0, numeric)) {
+    probe.throttle_known = true;
+    probe.throttle = numeric;
+  } else {
+    probe.throttle_known = false;
+  }
+  if (ReadBurnoutFloat(probe.results[kBurnoutProbeBrake], 0, numeric)) {
+    probe.brake_known = true;
+    probe.brake = numeric;
+  } else {
+    probe.brake_known = false;
+  }
+  if (ReadBurnoutFloat(probe.results[kBurnoutProbeSteering], 0, numeric)) {
+    probe.steering_known = true;
+    probe.steering = numeric;
+  } else {
+    probe.steering_known = false;
+  }
+  if (ReadBurnoutFloat(probe.results[kBurnoutProbeSkidAngle], 0, numeric)) {
+    probe.skid_known = true;
+    probe.skid_angle = numeric;
+  } else {
+    probe.skid_known = false;
+  }
+  if (ReadBurnoutFloat(probe.results[kBurnoutProbePlayerThrottle], 0,
+                       numeric)) {
+    probe.player_throttle_known = true;
+    probe.player_throttle = numeric;
+  } else {
+    probe.player_throttle_known = false;
+  }
+  if (ReadBurnoutInt(probe.results[kBurnoutProbeWheelCount], 0,
+                     probe.wheel_count)) {
+    probe.wheel_count_known = true;
+  } else {
+    probe.wheel_count_known = false;
+  }
+
+  auto &input = probe.results[kBurnoutProbeInputInfo];
+  if (input.has_output && input.output_size != 0) {
+    probe.input_raw_size =
+        (std::min)(static_cast<std::size_t>(input.output_size),
+                   sizeof(probe.input_raw));
+    std::memcpy(probe.input_raw, input.output, probe.input_raw_size);
+    // Reflection confirms the 16-byte layout: ThrottleInput float @0,
+    // SteeringInput float @4, BrakeInput float @8, bHandbrakeInput bool @12.
+    // Byte 0 is therefore the low byte of a float, not a handbrake candidate;
+    // keep it visible as a legacy cross-check, but resolve the handbrake from
+    // byte 12 only. The old byte-0 fallback is intentionally gone.
+    probe.handbrake12_known =
+        ReadBurnoutBool(input, 12, probe.handbrake12);
+    probe.handbrake0_known = ReadBurnoutBool(input, 0, probe.handbrake0);
+    if (probe.handbrake12_known) {
+      probe.handbrake_known = true;
+      probe.handbrake = probe.handbrake12;
+    } else {
+      probe.handbrake_known = false;
+    }
+    const bool changed =
+        probe.input_raw_size != probe.last_input_raw_size ||
+        std::memcmp(probe.input_raw, probe.last_input_raw,
+                    probe.input_raw_size) != 0;
+    if (changed && context.elapsed - probe.last_input_log >= 0.5) {
+      probe.last_input_log = context.elapsed;
+      char message[256]{};
+      int used = std::snprintf(message, sizeof(message),
+                               "nfs2015 chase cam: GetInputInfo raw=");
+      for (std::size_t byte = 0;
+           byte < probe.input_raw_size && used > 0 &&
+           static_cast<std::size_t>(used) + 4 < sizeof(message);
+           ++byte) {
+        used += std::snprintf(message + used,
+                              sizeof(message) - static_cast<std::size_t>(used),
+                              "%02x ", probe.input_raw[byte]);
+      }
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+    }
+    std::memcpy(probe.last_input_raw, probe.input_raw,
+                probe.input_raw_size);
+    probe.last_input_raw_size = probe.input_raw_size;
+  } else {
+    probe.handbrake_known = false;
+    probe.handbrake12_known = false;
+    probe.handbrake0_known = false;
+    probe.input_raw_size = 0;
+  }
+
+  std::uint32_t wheel_mask = 0;
+  std::uint32_t rep_mask = 0;
+  for (std::size_t wheel = 0; wheel < kBurnoutProbeMaxWheels; ++wheel) {
+    if (probe.wheel_burnout_known[wheel] && probe.wheel_burnout[wheel]) {
+      wheel_mask |= 1U << wheel;
+    }
+    if (probe.wheel_rep_known[wheel] && probe.wheel_rep[wheel]) {
+      rep_mask |= 1U << wheel;
+    }
+  }
+  const bool burnout_state = probe.is_burnout_known && probe.is_burnout;
+  const bool handbrake_state = probe.handbrake_known && probe.handbrake;
+  const bool handbrake12_state =
+      probe.handbrake12_known && probe.handbrake12;
+  const bool handbrake0_state = probe.handbrake0_known && probe.handbrake0;
+  if (!probe.have_last_state) {
+    probe.have_last_state = true;
+  } else if (burnout_state != probe.last_burnout ||
+             handbrake_state != probe.last_handbrake ||
+             handbrake12_state != probe.last_handbrake12 ||
+             handbrake0_state != probe.last_handbrake0 ||
+             wheel_mask != probe.last_wheel_mask) {
+    char message[320]{};
+    std::snprintf(message, sizeof(message),
+                  "nfs2015 chase cam: burnout state=%d HB12=%d B0=%d "
+                  "resolvedHB=%d throttle=%.3f brake=%.3f steer=%+.3f "
+                  "wheels=%02x speed=%.2f fwd=%.2f",
+                  burnout_state ? 1 : 0, handbrake12_state ? 1 : 0,
+                  handbrake0_state ? 1 : 0, handbrake_state ? 1 : 0,
+                  probe.throttle_known ? probe.throttle : -1.0,
+                  probe.brake_known ? probe.brake : -1.0,
+                  probe.steering_known ? probe.steering : 0.0,
+                  wheel_mask, speed_mps, forward_speed);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+  }
+  probe.last_burnout = burnout_state;
+  probe.last_handbrake = handbrake_state;
+  probe.last_handbrake12 = handbrake12_state;
+  probe.last_handbrake0 = handbrake0_state;
+  probe.last_wheel_mask = wheel_mask;
+
+  // While the burnout is active, sample angular speed and speed every 0.5 s.
+  // This is the data Phase 1 needs for shake/intensity, and it is cheap enough
+  // to keep alongside the 4 Hz wheel probe.
+  if (!burnout_state) {
+    probe.next_active_log = 0.0;
+  } else if (context.elapsed >= probe.next_active_log) {
+    probe.next_active_log = context.elapsed + 0.5;
+    char active[512]{};
+    std::snprintf(
+        active, sizeof(active),
+        "nfs2015 chase cam: burnout active throttle=%.3f brake=%.3f "
+        "steer=%+.3f playerThr=%.3f skid=%.1f HB12=%d wheels=%02x "
+        "rep=%02x angular=%.1f/%.1f/%.1f/%.1f speed=%.2f fwd=%.2f",
+        probe.throttle_known ? probe.throttle : -1.0,
+        probe.brake_known ? probe.brake : -1.0,
+        probe.steering_known ? probe.steering : 0.0,
+        probe.player_throttle_known ? probe.player_throttle : -1.0,
+        probe.skid_known ? probe.skid_angle : 0.0,
+        handbrake12_state ? 1 : 0, wheel_mask, rep_mask,
+        probe.wheel_angular_known[0] ? probe.wheel_angular[0] : 0.0,
+        probe.wheel_angular_known[1] ? probe.wheel_angular[1] : 0.0,
+        probe.wheel_angular_known[2] ? probe.wheel_angular[2] : 0.0,
+        probe.wheel_angular_known[3] ? probe.wheel_angular[3] : 0.0,
+        speed_mps, forward_speed);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, active);
+  }
+
+  if (!probe.summary_logged && context.elapsed >= probe.summary_due) {
+    probe.summary_logged = true;
+    std::uint32_t resolved = 0;
+    std::uint32_t ok = 0;
+    std::uint32_t failed = 0;
+    for (const BurnoutProbeResult &result : probe.results) {
+      if (result.function.id != 0) {
+        ++resolved;
+      }
+      if (result.status == kBurnoutProbeOk) {
+        ++ok;
+      }
+      if (result.failures != 0) {
+        ++failed;
+      }
+    }
+    char message[640]{};
+    std::snprintf(message, sizeof(message),
+                  "nfs2015 chase cam: burnout probe resolved=%u/%zu ok=%u "
+                  "failed=%u isBurnout=%d HB12=%d B0=%d throttle=%.3f "
+                  "brake=%.3f steer=%+.3f playerThr=%.3f skid=%.1f "
+                  "wheels=%d burnoutMask=%02x repMask=%02x "
+                  "angular=%.1f/%.1f/%.1f/%.1f",
+                  resolved, kBurnoutProbeCount, ok, failed,
+                  burnout_state ? 1 : 0, handbrake12_state ? 1 : 0,
+                  handbrake0_state ? 1 : 0,
+                  probe.throttle_known ? probe.throttle : -1.0,
+                  probe.brake_known ? probe.brake : -1.0,
+                  probe.steering_known ? probe.steering : 0.0,
+                  probe.player_throttle_known ? probe.player_throttle : -1.0,
+                  probe.skid_known ? probe.skid_angle : 0.0,
+                  probe.wheel_count_known ? probe.wheel_count : -1,
+                  wheel_mask, rep_mask,
+                  probe.wheel_angular_known[0] ? probe.wheel_angular[0] : 0.0,
+                  probe.wheel_angular_known[1] ? probe.wheel_angular[1] : 0.0,
+                  probe.wheel_angular_known[2] ? probe.wheel_angular[2] : 0.0,
+                  probe.wheel_angular_known[3] ? probe.wheel_angular[3] : 0.0);
+    std::string summary(message);
+    summary.append(" input=");
+    for (std::size_t byte = 0; byte < probe.input_raw_size; ++byte) {
+      char hex[4]{};
+      std::snprintf(hex, sizeof(hex), "%02x", probe.input_raw[byte]);
+      summary.append(hex);
+      if (byte + 1 < probe.input_raw_size) {
+        summary.push_back(' ');
+      }
+    }
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, summary);
+    std::string details;
+    details.reserve(512);
+    for (std::size_t index = 0; index < kBurnoutProbeCount; ++index) {
+      const auto &result = probe.results[index];
+      if (!details.empty()) {
+        details.push_back(' ');
+      }
+      details.append(kBurnoutProbeSpecs[index].label);
+      details.push_back('=');
+      details.append(std::to_string(result.status));
+      details.push_back('/');
+      details.append(std::to_string(result.last_code));
+    }
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+        std::string_view(details));
+  }
 }
 
 void UpdateCamera(Context &context, const double dt) noexcept {
@@ -7173,6 +7953,11 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   car.brake = context.brake_input;
   car.on_ground = true;
 
+  // Phase 0: read the reflected burnout/input signals at 20 Hz. This is
+  // read-only and deliberately runs after the car sample is assembled so it
+  // cannot affect the camera path.
+  UpdateBurnoutProbe(context, vehicle_query, speed_mps, forward_speed);
+
   // T2: the tick no longer advances the model - it publishes a car sample and
   // the render thread integrates the springs on its own clock.
   {
@@ -7242,6 +8027,69 @@ void UpdateCamera(Context &context, const double dt) noexcept {
         context.presenter_distance_cm.load(std::memory_order_relaxed) / 100.0;
     context.display.camera_distance_raw_m =
         context.display.camera_distance_m;
+    const BurnoutProbeState &burnout = context.burnout_probe;
+    context.display.burnout_probe_is_burnout_known =
+        burnout.is_burnout_known;
+    context.display.burnout_probe_is_burnout = burnout.is_burnout;
+    context.display.burnout_probe_throttle_known = burnout.throttle_known;
+    context.display.burnout_probe_throttle = burnout.throttle;
+    context.display.burnout_probe_brake_known = burnout.brake_known;
+    context.display.burnout_probe_brake = burnout.brake;
+    context.display.burnout_probe_steering_known = burnout.steering_known;
+    context.display.burnout_probe_steering = burnout.steering;
+    context.display.burnout_probe_skid_known = burnout.skid_known;
+    context.display.burnout_probe_skid_angle = burnout.skid_angle;
+    context.display.burnout_probe_player_throttle_known =
+        burnout.player_throttle_known;
+    context.display.burnout_probe_player_throttle = burnout.player_throttle;
+    context.display.burnout_probe_handbrake12_known =
+        burnout.handbrake12_known;
+    context.display.burnout_probe_handbrake12 = burnout.handbrake12;
+    context.display.burnout_probe_handbrake0_known =
+        burnout.handbrake0_known;
+    context.display.burnout_probe_handbrake0 = burnout.handbrake0;
+    context.display.burnout_probe_handbrake_known = burnout.handbrake_known;
+    context.display.burnout_probe_handbrake = burnout.handbrake;
+    context.display.burnout_probe_wheel_count_known =
+        burnout.wheel_count_known;
+    context.display.burnout_probe_wheel_count = burnout.wheel_count;
+    for (std::size_t wheel = 0; wheel < kBurnoutProbeMaxWheels; ++wheel) {
+      context.display.burnout_probe_wheel_burnout_known[wheel] =
+          burnout.wheel_burnout_known[wheel];
+      context.display.burnout_probe_wheel_burnout[wheel] =
+          burnout.wheel_burnout[wheel];
+      context.display.burnout_probe_wheel_rep_known[wheel] =
+          burnout.wheel_rep_known[wheel];
+      context.display.burnout_probe_wheel_rep[wheel] =
+          burnout.wheel_rep[wheel];
+      context.display.burnout_probe_wheel_angular_known[wheel] =
+          burnout.wheel_angular_known[wheel];
+      context.display.burnout_probe_wheel_angular[wheel] =
+          burnout.wheel_angular[wheel];
+    }
+    context.display.burnout_probe_input_raw_size = burnout.input_raw_size;
+    std::memcpy(context.display.burnout_probe_input_raw, burnout.input_raw,
+                burnout.input_raw_size);
+    std::uint32_t resolved = 0;
+    std::uint32_t ok = 0;
+    std::uint32_t failed = 0;
+    for (std::size_t index = 0; index < kBurnoutProbeCount; ++index) {
+      const BurnoutProbeResult &result = burnout.results[index];
+      context.display.burnout_probe_status[index] = result.status;
+      context.display.burnout_probe_code[index] = result.last_code;
+      if (result.function.id != 0) {
+        ++resolved;
+      }
+      if (result.status == kBurnoutProbeOk) {
+        ++ok;
+      }
+      if (result.failures != 0) {
+        ++failed;
+      }
+    }
+    context.display.burnout_probe_resolved = resolved;
+    context.display.burnout_probe_ok = ok;
+    context.display.burnout_probe_failed = failed;
   }
 }
 
@@ -8916,6 +9764,97 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                    display.speed_sign_known
                        ? localizer.Text("status.known", "known")
                        : localizer.Text("status.unknown", "unknown"));
+  }
+  // Phase 0: the raw reflected signals that will drive the burnout shot.
+  // Kept at the top of the diagnostics body because this is the only data the
+  // next phase needs from the current session.
+  {
+    const auto bit = [](const bool known, const bool value) -> char {
+      return known ? (value ? '1' : '0') : '-';
+    };
+    DrawStatusLine(
+        ui, localizer, "diag.burnout_signal", "Burnout flag",
+        display.burnout_probe_is_burnout_known
+            ? (display.burnout_probe_is_burnout ? "1" : "0")
+            : "unknown");
+    std::snprintf(
+        line, sizeof(line), "THR %.2f  BRK %.2f  STR %+.2f  SKID %.1f",
+        display.burnout_probe_throttle_known
+            ? display.burnout_probe_throttle
+            : -1.0,
+        display.burnout_probe_brake_known ? display.burnout_probe_brake : -1.0,
+        display.burnout_probe_steering_known
+            ? display.burnout_probe_steering
+            : 0.0,
+        display.burnout_probe_skid_known ? display.burnout_probe_skid_angle
+                                         : 0.0);
+    DrawStatusLine(ui, localizer, "diag.burnout_inputs", "Burnout inputs",
+                   line);
+    std::snprintf(
+        line, sizeof(line),
+        "n=%d  B %c%c%c%c  R %c%c%c%c  HB12 %c  B0 %c",
+        display.burnout_probe_wheel_count_known
+            ? static_cast<int>(display.burnout_probe_wheel_count)
+            : -1,
+        bit(display.burnout_probe_wheel_burnout_known[0],
+            display.burnout_probe_wheel_burnout[0]),
+        bit(display.burnout_probe_wheel_burnout_known[1],
+            display.burnout_probe_wheel_burnout[1]),
+        bit(display.burnout_probe_wheel_burnout_known[2],
+            display.burnout_probe_wheel_burnout[2]),
+        bit(display.burnout_probe_wheel_burnout_known[3],
+            display.burnout_probe_wheel_burnout[3]),
+        bit(display.burnout_probe_wheel_rep_known[0],
+            display.burnout_probe_wheel_rep[0]),
+        bit(display.burnout_probe_wheel_rep_known[1],
+            display.burnout_probe_wheel_rep[1]),
+        bit(display.burnout_probe_wheel_rep_known[2],
+            display.burnout_probe_wheel_rep[2]),
+        bit(display.burnout_probe_wheel_rep_known[3],
+            display.burnout_probe_wheel_rep[3]),
+        bit(display.burnout_probe_handbrake12_known,
+            display.burnout_probe_handbrake12),
+        bit(display.burnout_probe_handbrake0_known,
+            display.burnout_probe_handbrake0));
+    DrawStatusLine(ui, localizer, "diag.burnout_wheels", "Burnout wheels",
+                   line);
+    std::snprintf(
+        line, sizeof(line), "W %.1f / %.1f / %.1f / %.1f",
+        display.burnout_probe_wheel_angular_known[0]
+            ? display.burnout_probe_wheel_angular[0]
+            : 0.0,
+        display.burnout_probe_wheel_angular_known[1]
+            ? display.burnout_probe_wheel_angular[1]
+            : 0.0,
+        display.burnout_probe_wheel_angular_known[2]
+            ? display.burnout_probe_wheel_angular[2]
+            : 0.0,
+        display.burnout_probe_wheel_angular_known[3]
+            ? display.burnout_probe_wheel_angular[3]
+            : 0.0);
+    DrawStatusLine(ui, localizer, "diag.burnout_wheel_speed",
+                   "Wheel angular", line);
+    std::snprintf(line, sizeof(line), "resolved %u/%zu  ok %u  failed %u",
+                  static_cast<unsigned>(display.burnout_probe_resolved),
+                  kBurnoutProbeCount,
+                  static_cast<unsigned>(display.burnout_probe_ok),
+                  static_cast<unsigned>(display.burnout_probe_failed));
+    DrawStatusLine(ui, localizer, "diag.burnout_probe", "Burnout probe",
+                   line);
+    if (display.burnout_probe_input_raw_size != 0) {
+      char hex[64]{};
+      int used = 0;
+      const std::size_t count =
+          (std::min)(display.burnout_probe_input_raw_size, std::size_t{8});
+      for (std::size_t index = 0; index < count; ++index) {
+        used += std::snprintf(hex + used,
+                              sizeof(hex) - static_cast<std::size_t>(used),
+                              "%02x ",
+                              display.burnout_probe_input_raw[index]);
+      }
+      DrawStatusLine(ui, localizer, "diag.burnout_raw", "InputInfo raw",
+                     hex);
+    }
   }
   // Judder instrument and the two defect amplitudes, then the probe. Read-only
   // reconnaissance, so it comes before everything else: the diagnostics body
