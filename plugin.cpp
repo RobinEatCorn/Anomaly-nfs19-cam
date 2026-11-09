@@ -44,6 +44,7 @@
 #include "chase_cam.hpp"
 #include "latency_window.hpp"
 #include "car_sample.hpp"
+#include "burnout_shot.hpp"
 #include "view_blend.hpp"
 
 #include <windows.h>
@@ -1965,6 +1966,9 @@ struct Context final {
   double interpolation_ratio{};
   std::atomic<std::uint64_t> view_output_frames{};
   nfs2015_chase::ChaseCam chase{nfs2015_chase::GamePreset()};
+  // Phase 3: render-clock burnout shot state. It is advanced and read only
+  // while presenter_lock is held, alongside the chase model.
+  nfs2015_chase::BurnoutShot burnout_shot{};
   std::uint32_t configured_preset{0};
   bool chase_initialized{};
   // T2: the chase model runs on the render clock, so the Game tick only writes
@@ -1987,6 +1991,11 @@ struct Context final {
   std::atomic<double> presenter_anchor[3]{};
   std::atomic<double> presenter_drift{};
   std::atomic<double> presenter_distance_cm{};
+  // Diagnostics for the mixed chase/shot camera. The blend is written under
+  // the presenter lock and read by route B / diagnostics.
+  std::atomic<double> presenter_burnout_blend{};
+  std::atomic<int> presenter_burnout_side{1};
+  std::atomic<std::uint64_t> presenter_burnout_fallbacks{};
   std::atomic<std::int64_t> sample_interval_ns{};
   // Running mean of the Game tick interval. The presenter looks back this far
   // times kSampleDelayFactor, which is more than one interval, so the sample
@@ -4011,6 +4020,11 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
   if (!have_pose) {
     probe.prepare_pose_fail.fetch_add(1, std::memory_order_relaxed);
     probe.route_b_early_fallbacks.fetch_add(1, std::memory_order_relaxed);
+    if (context.presenter_burnout_blend.load(std::memory_order_relaxed) >
+        0.001) {
+      context.presenter_burnout_fallbacks.fetch_add(1,
+                                                    std::memory_order_relaxed);
+    }
     return false;
   }
   // Keep the last applied pose for the one-frame hold above. The pose is in
@@ -6457,6 +6471,11 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     return false;
   }
   if (!sample.driving) {
+    // The car disappeared (exit / world change). Do not leave a latched shot
+    // waiting to resume at full blend when the next vehicle appears.
+    context.burnout_shot.Reset();
+    context.presenter_burnout_blend.store(0.0, std::memory_order_relaxed);
+    context.presenter_burnout_side.store(1, std::memory_order_relaxed);
     return false;
   }
 
@@ -6619,6 +6638,9 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   if (!context.presenter_initialized || context.presenter_epoch != sample.epoch ||
       !context.chase.initialized()) {
     context.chase.Reset(sample.car);
+    context.burnout_shot.Reset();
+    context.presenter_burnout_blend.store(0.0, std::memory_order_relaxed);
+    context.presenter_burnout_side.store(1, std::memory_order_relaxed);
     context.presenter_initialized = true;
     context.presenter_epoch = sample.epoch;
     context.presenter_last_ns = now_ns;
@@ -6644,7 +6666,34 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   // the car drifts up to 17 cm back and forth in frame at 30 m/s. That is the
   // judder: invisible at 60, worst at 45, and proportional to speed, which is
   // exactly how it has been reported.
-  const nfs2015_chase::CameraState view = context.chase.Update(elapsed, sample.car);
+  const nfs2015_chase::CameraState chase_view =
+      context.chase.Update(elapsed, sample.car);
+
+  // Phase 3: advance the burnout shot on the same render clock and blend its
+  // pose into the chase view before publishing anything. The shot consumes the
+  // same anchored car sample as the chase, so the wheel stays attached to the
+  // rendered chassis. A zero blend returns the chase view exactly.
+  nfs2015_chase::BurnoutShotConfig shot_config =
+      context.burnout_shot.config();
+  shot_config.slope_follow =
+      context.slope_follow.load(std::memory_order_acquire);
+  shot_config.camera_scale = sample.camera_scale;
+  context.burnout_shot.SetConfig(shot_config);
+  const nfs2015_chase::BurnoutShotResult burnout =
+      context.burnout_shot.Update(elapsed, sample.car, sample.burnout,
+                                 sample.aspect_ratio);
+  context.presenter_burnout_blend.store(burnout.blend,
+                                        std::memory_order_relaxed);
+  context.presenter_burnout_side.store(burnout.side,
+                                       std::memory_order_relaxed);
+  nfs2015_chase::CameraState view = nfs2015_chase::BlendBurnoutCamera(
+      chase_view, burnout.view, sample.car, burnout.blend);
+  // A disabled game FOV must not be changed by the shot. The route B publisher
+  // already writes lens=0 in that case; restoring the chase vertical FOV here
+  // keeps the CameraState consistent for any other consumer.
+  if (!sample.fov_enabled) {
+    view.fov_y_degrees = chase_view.fov_y_degrees;
+  }
   PublishRouteBModelPose(context, sample, view, now_ns);
 
   // Scale around the model origin, exactly as the old publish path did, and

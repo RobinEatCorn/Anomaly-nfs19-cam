@@ -9,9 +9,15 @@
 // the existing route B publish path; nothing here reads the game or writes a
 // camera pose.
 //
-// NFS 2015 reference values (see PLAN-burnout-camera.md):
-//   eye in car space  = (-2.2 m, side * 1.9 m, 0.4 m)
-//   look target       = (-0.9 m, side * 0.75 m, 0.10 m)
+// NFS 2015 reference values (see PLAN-burnout-camera.md), tuned for NTE:
+//
+//   eye in car space  = (-2.8 m, side * 2.0 m, 0.55 m)
+//   look target       = (-1.45 m, side * 1.0 m, 0.35 m)
+//
+// The target is the outboard face of the rear wheel, not a point inside the
+// body: an inboard target makes the fender occlude the wheel during the orbit.
+// NTE's car is wider than the NFS reference, so the eye is pulled outboard and
+// the target is moved to the wheel face.
 //   horizontal FOV    = 45 degrees
 //   enter             = 0.5 s delay + 1.0 s orbit blend
 //   exit              = 0.2 s delay + 2.5 s orbit blend
@@ -68,12 +74,12 @@ struct BurnoutShotConfig final {
   double min_eye_radius_m{1.3};
 
   // Car-local shot geometry, metres.
-  double back_m{2.2};
-  double outboard_m{1.9};
-  double height_m{0.4};
-  double target_x_m{-0.9};
-  double target_y_m{0.75};
-  double target_z_m{0.10};
+  double back_m{2.8};
+  double outboard_m{2.0};
+  double height_m{0.55};
+  double target_x_m{-1.45};
+  double target_y_m{1.0};
+  double target_z_m{0.35};
 
   // Shot-only ground protection. `car.position` is treated as the ground/body
   // origin, which is the convention used by the existing chase model.

@@ -44,8 +44,8 @@ CameraState view =
 
 ## 3. 机位、FOV、震动
 
-- 车体局部机位：`(-2.2, side * 1.9, 0.4)`。
-- 目标点：`(-0.9, side * 0.75, 0.10)`。
+- 车体局部机位：`(-2.2, side * 1.9, 0.4)`（Phase 3 实机后调为 `(-2.8, side * 2.0, 0.55)`）。
+- 目标点：`(-0.9, side * 0.75, 0.10)`（Phase 3 实机后调为后轮外侧面 `(-1.45, side * 1.0, 0.35)`）。
 - 默认 `slope_follow=true`，使用 `MakeCarBasis(yaw, pitch)`；关闭时 yaw-only。
 - 水平 FOV 45°，按 viewport aspect 转垂直 FOV；16:9 约 26.25°。
 - 震动：

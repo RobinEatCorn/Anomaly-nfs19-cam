@@ -3,10 +3,11 @@
 > 目标仓库：`nfs2015-chase-cam`
 > 目标游戏：NTE（`HTGame.exe`）
 > 写作日期：2026-11-10
-> 状态：**Phase 2 已完成（PASS）**，Phase 3 待开始
+> 状态：**Phase 3 已完成（PASS）**，Phase 4 待开始
 > Phase 0 报告：[`REPORT-burnout-phase0.md`](REPORT-burnout-phase0.md)
 > Phase 1 报告：[`REPORT-burnout-phase1.md`](REPORT-burnout-phase1.md)
 > Phase 2 报告：[`REPORT-burnout-phase2.md`](REPORT-burnout-phase2.md)
+> Phase 3 报告：[`REPORT-burnout-phase3.md`](REPORT-burnout-phase3.md)
 > 原则：**只读游戏目录；所有分析副本放在当前项目内；不写游戏目录。**
 
 ---
@@ -624,6 +625,8 @@ roll     = lerp(chase.roll, shot.roll, t)
 - 产出：诊断面板能看到 burnout 状态，但相机还未使用。
 
 ### Phase 3：presenter / route B 集成（1–2 天）
+
+> **结果（2026-11-10）：PASS。** `AdvancePresenter` 已在 `chase.Update` 后推进 `BurnoutShot`，`BlendBurnoutCamera` 的混合 view 同时用于 route B、presenter pose 和 lens；epoch/reset/inactive 会重置 shot。实机用高完整性 `PostMessage` 触发 Shift+W，截图确认 chase → 后轮特写 → chase，route B `fallbacks=0`。详见 [`REPORT-burnout-phase3.md`](REPORT-burnout-phase3.md)。
 
 - 在 `AdvancePresenter` 里 `chase.Update` 后调用 shot，混合 `view`。
 - 保证 `PublishRouteBModelPose` / presenter pose / lens 全部使用混合后的 view。
