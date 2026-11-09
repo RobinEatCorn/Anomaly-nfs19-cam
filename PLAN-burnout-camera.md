@@ -3,11 +3,12 @@
 > 目标仓库：`nfs2015-chase-cam`
 > 目标游戏：NTE（`HTGame.exe`）
 > 写作日期：2026-11-10
-> 状态：**Phase 3 已完成（PASS）**，Phase 4 待开始
+> 状态：**Phase 4 已完成（PASS，未发布）**
 > Phase 0 报告：[`REPORT-burnout-phase0.md`](REPORT-burnout-phase0.md)
 > Phase 1 报告：[`REPORT-burnout-phase1.md`](REPORT-burnout-phase1.md)
 > Phase 2 报告：[`REPORT-burnout-phase2.md`](REPORT-burnout-phase2.md)
 > Phase 3 报告：[`REPORT-burnout-phase3.md`](REPORT-burnout-phase3.md)
+> Phase 4 报告：[`REPORT-burnout-phase4.md`](REPORT-burnout-phase4.md)
 > 原则：**只读游戏目录；所有分析副本放在当前项目内；不写游戏目录。**
 
 ---
@@ -634,6 +635,8 @@ roll     = lerp(chase.roll, shot.roll, t)
 - 产出：实机可看到特写，先不做 UI。
 
 ### Phase 4：设置/UI/本地化/收尾（1 天）
+
+> **结果（2026-11-10）：PASS（未发布）。** 10 个 burnout 设置字段已加入 schema/持久化/加载/默认值；设置面板提供开关、FOV、震动、进入/退出时间、速度和侧别；诊断显示 shot blend/side/fallback。旧 31 字段配置可加载，`burnoutEnabled=false` 实机验证保持 chase；全量构建、CTest 通过。详见 [`REPORT-burnout-phase4.md`](REPORT-burnout-phase4.md)。
 
 - 设置字段、持久化、UI 开关/滑杆、zh-CN 文案。
 - 诊断计数、日志、README/RELEASE-NOTES。

@@ -11,6 +11,13 @@
 独立的第三方 Anomaly 插件：用 NFS 2015 Action Camera 的弹簧、pivot 与漂移参数替换游戏驾驶追车视角。
 本仓库既是源码仓库，也是 Anomaly 的第三方插件源（根目录的 `pluginmaster.json`）。
 
+## 烧胎特写
+
+车辆静止、拉手刹并踩油门（默认 **Shift + W**）时，相机从 chase 视角绕到后轮外侧，
+进入 NFS 2015 风格的后轮 close-up；松开按键或车辆开始移动后平滑回到 chase。
+特写使用独立的水平 FOV、震动和侧别（自动/左后/右后/居中），进入/退出时间可在设置里调整。
+`BurnoutShot` 只在渲染时钟上推进，并与现有 route B / presenter pose 使用同一个混合 view。
+
 ## 安装
 
 把下面的地址添加到 Runtime 的 **Plugins > 第三方插件 > 添加插件源**，应用后到

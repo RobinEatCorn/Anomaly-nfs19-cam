@@ -77,7 +77,7 @@ constexpr std::string_view kPluginId =
 constexpr std::string_view kSettingsSchemaId = "nfs2015-chase-cam-settings-v1";
 constexpr std::string_view kSettingsWindowId = "nfs2015-chase-cam-settings-v1";
 constexpr std::uint32_t kSettingsSchemaVersion = 1;
-constexpr std::size_t kMaximumSettingsBytes = 2048;
+constexpr std::size_t kMaximumSettingsBytes = 4096;
 constexpr std::uint64_t kSettingsSaveDelayMilliseconds = 500;
 constexpr std::uint32_t kToggleKey = VK_F7;
 
@@ -132,6 +132,35 @@ constexpr double kMaximumPitchScale = 2.0;
 constexpr double kDefaultShakeScale = 1.0;
 constexpr double kMinimumShakeScale = 0.0;
 constexpr double kMaximumShakeScale = 2.0;
+// Burnout close-up defaults. These mirror BurnoutShotConfig so the persisted
+// settings and the pure camera model agree when a field is absent.
+constexpr bool kDefaultBurnoutEnabled = true;
+constexpr double kDefaultBurnoutEntryDelay = 0.5;
+constexpr double kMinimumBurnoutEntryDelay = 0.0;
+constexpr double kMaximumBurnoutEntryDelay = 2.0;
+constexpr double kDefaultBurnoutEntryTime = 1.0;
+constexpr double kMinimumBurnoutEntryTime = 0.1;
+constexpr double kMaximumBurnoutEntryTime = 4.0;
+constexpr double kDefaultBurnoutExitDelay = 0.2;
+constexpr double kMinimumBurnoutExitDelay = 0.0;
+constexpr double kMaximumBurnoutExitDelay = 2.0;
+constexpr double kDefaultBurnoutExitTime = 2.5;
+constexpr double kMinimumBurnoutExitTime = 0.1;
+constexpr double kMaximumBurnoutExitTime = 5.0;
+constexpr double kDefaultBurnoutFov = 45.0;
+constexpr double kMinimumBurnoutFov = 20.0;
+constexpr double kMaximumBurnoutFov = 90.0;
+constexpr double kDefaultBurnoutShake = 1.0;
+constexpr double kMinimumBurnoutShake = 0.0;
+constexpr double kMaximumBurnoutShake = 2.0;
+constexpr std::uint32_t kDefaultBurnoutSideMode = 0;
+constexpr std::uint32_t kMaximumBurnoutSideMode = 3;
+constexpr double kDefaultBurnoutEntrySpeed = 1.0;
+constexpr double kMinimumBurnoutEntrySpeed = 0.0;
+constexpr double kMaximumBurnoutEntrySpeed = 10.0;
+constexpr double kDefaultBurnoutHoldSpeed = 3.0;
+constexpr double kMinimumBurnoutHoldSpeed = 0.0;
+constexpr double kMaximumBurnoutHoldSpeed = 20.0;
 // Slope following. The UI exposes only the master switch and the composition
 // strength; the gradient scalars stay in the settings file.
 constexpr double kDefaultSlopeStrength = 1.0;
@@ -495,7 +524,17 @@ constexpr std::string_view kSettingsSchema = R"json(
     "slopeUpLookAt":{"type":"number","minimum":0.0,"maximum":2.0},
     "slopeUpRest":{"type":"number","minimum":0.0,"maximum":4.0},
     "slopeDownLookAt":{"type":"number","minimum":0.0,"maximum":2.0},
-    "slopeDownRest":{"type":"number","minimum":0.0,"maximum":4.0}
+    "slopeDownRest":{"type":"number","minimum":0.0,"maximum":4.0},
+    "burnoutEnabled":{"type":"boolean"},
+    "burnoutEntryDelay":{"type":"number","minimum":0.0,"maximum":2.0},
+    "burnoutEntryTime":{"type":"number","minimum":0.1,"maximum":4.0},
+    "burnoutExitDelay":{"type":"number","minimum":0.0,"maximum":2.0},
+    "burnoutExitTime":{"type":"number","minimum":0.1,"maximum":5.0},
+    "burnoutFov":{"type":"number","minimum":20.0,"maximum":90.0},
+    "burnoutShake":{"type":"number","minimum":0.0,"maximum":2.0},
+    "burnoutSideMode":{"type":"integer","minimum":0,"maximum":3},
+    "burnoutEntrySpeed":{"type":"number","minimum":0.0,"maximum":10.0},
+    "burnoutHoldSpeed":{"type":"number","minimum":0.0,"maximum":20.0}
   }
 }
 )json";
@@ -1594,6 +1633,19 @@ struct DisplayState final {
   double roll_scale{kDefaultRollScale};
   double pitch_scale{kDefaultPitchScale};
   double shake_scale{kDefaultShakeScale};
+  bool burnout_enabled{kDefaultBurnoutEnabled};
+  double burnout_entry_delay{kDefaultBurnoutEntryDelay};
+  double burnout_entry_time{kDefaultBurnoutEntryTime};
+  double burnout_exit_delay{kDefaultBurnoutExitDelay};
+  double burnout_exit_time{kDefaultBurnoutExitTime};
+  double burnout_fov{kDefaultBurnoutFov};
+  double burnout_shake{kDefaultBurnoutShake};
+  std::uint32_t burnout_side_mode{kDefaultBurnoutSideMode};
+  double burnout_entry_speed{kDefaultBurnoutEntrySpeed};
+  double burnout_hold_speed{kDefaultBurnoutHoldSpeed};
+  double burnout_shot_blend{};
+  int burnout_shot_side{1};
+  std::uint64_t burnout_shot_fallbacks{};
   bool slope_follow{true};
   double slope_strength{kDefaultSlopeStrength};
   bool roll_only_in_drift{true};
@@ -1854,6 +1906,18 @@ struct Context final {
   std::atomic<double> roll_scale{kDefaultRollScale};
   std::atomic<double> pitch_scale{kDefaultPitchScale};
   std::atomic<double> shake_scale{kDefaultShakeScale};
+  // Burnout close-up settings. `burnoutShake` is separate from the chase shake
+  // so the two cameras can be tuned independently.
+  std::atomic_bool burnout_enabled{kDefaultBurnoutEnabled};
+  std::atomic<double> burnout_entry_delay{kDefaultBurnoutEntryDelay};
+  std::atomic<double> burnout_entry_time{kDefaultBurnoutEntryTime};
+  std::atomic<double> burnout_exit_delay{kDefaultBurnoutExitDelay};
+  std::atomic<double> burnout_exit_time{kDefaultBurnoutExitTime};
+  std::atomic<double> burnout_fov{kDefaultBurnoutFov};
+  std::atomic<double> burnout_shake{kDefaultBurnoutShake};
+  std::atomic<std::uint32_t> burnout_side_mode{kDefaultBurnoutSideMode};
+  std::atomic<double> burnout_entry_speed{kDefaultBurnoutEntrySpeed};
+  std::atomic<double> burnout_hold_speed{kDefaultBurnoutHoldSpeed};
   std::atomic_bool slope_follow{true};
   std::atomic<double> slope_strength{kDefaultSlopeStrength};
   std::atomic<double> slope_max_gradient_degrees{
@@ -4979,6 +5043,37 @@ bool SettingsValid(const std::uint32_t preset, const double camera_scale,
          slope_down_rest <= kMaximumSlopeRest && preset <= 1U;
 }
 
+bool BurnoutSettingsValid(const double entry_delay, const double entry_time,
+                          const double exit_delay, const double exit_time,
+                          const double fov, const double shake,
+                          const double side_mode, const double entry_speed,
+                          const double hold_speed) noexcept {
+  return std::isfinite(entry_delay) &&
+         entry_delay >= kMinimumBurnoutEntryDelay &&
+         entry_delay <= kMaximumBurnoutEntryDelay &&
+         std::isfinite(entry_time) &&
+         entry_time >= kMinimumBurnoutEntryTime &&
+         entry_time <= kMaximumBurnoutEntryTime &&
+         std::isfinite(exit_delay) &&
+         exit_delay >= kMinimumBurnoutExitDelay &&
+         exit_delay <= kMaximumBurnoutExitDelay &&
+         std::isfinite(exit_time) &&
+         exit_time >= kMinimumBurnoutExitTime &&
+         exit_time <= kMaximumBurnoutExitTime && std::isfinite(fov) &&
+         fov >= kMinimumBurnoutFov && fov <= kMaximumBurnoutFov &&
+         std::isfinite(shake) && shake >= kMinimumBurnoutShake &&
+         shake <= kMaximumBurnoutShake && std::isfinite(side_mode) &&
+         side_mode >= 0.0 &&
+         side_mode <= static_cast<double>(kMaximumBurnoutSideMode) &&
+         std::floor(side_mode) == side_mode &&
+         std::isfinite(entry_speed) &&
+         entry_speed >= kMinimumBurnoutEntrySpeed &&
+         entry_speed <= kMaximumBurnoutEntrySpeed &&
+         std::isfinite(hold_speed) &&
+         hold_speed >= kMinimumBurnoutHoldSpeed &&
+         hold_speed <= kMaximumBurnoutHoldSpeed && hold_speed >= entry_speed;
+}
+
 bool AppendText(char *&cursor, char *const end,
                 const std::string_view text) noexcept {
   if (text.size() > static_cast<std::size_t>(end - cursor)) {
@@ -5047,6 +5142,26 @@ bool PersistSettings(Context &context) noexcept {
       context.pitch_scale.load(std::memory_order_acquire);
   const double shake_scale =
       context.shake_scale.load(std::memory_order_acquire);
+  const bool burnout_enabled =
+      context.burnout_enabled.load(std::memory_order_acquire);
+  const double burnout_entry_delay =
+      context.burnout_entry_delay.load(std::memory_order_acquire);
+  const double burnout_entry_time =
+      context.burnout_entry_time.load(std::memory_order_acquire);
+  const double burnout_exit_delay =
+      context.burnout_exit_delay.load(std::memory_order_acquire);
+  const double burnout_exit_time =
+      context.burnout_exit_time.load(std::memory_order_acquire);
+  const double burnout_fov =
+      context.burnout_fov.load(std::memory_order_acquire);
+  const double burnout_shake =
+      context.burnout_shake.load(std::memory_order_acquire);
+  const double burnout_side_mode = static_cast<double>(
+      context.burnout_side_mode.load(std::memory_order_acquire));
+  const double burnout_entry_speed =
+      context.burnout_entry_speed.load(std::memory_order_acquire);
+  const double burnout_hold_speed =
+      context.burnout_hold_speed.load(std::memory_order_acquire);
   const bool slope_follow =
       context.slope_follow.load(std::memory_order_acquire);
   const double slope_strength =
@@ -5086,6 +5201,10 @@ bool PersistSettings(Context &context) noexcept {
                      slope_max_gradient_degrees, slope_up_look_at,
                      slope_up_rest, slope_down_look_at,
                      slope_down_rest) ||
+      !BurnoutSettingsValid(burnout_entry_delay, burnout_entry_time,
+                            burnout_exit_delay, burnout_exit_time, burnout_fov,
+                            burnout_shake, burnout_side_mode,
+                            burnout_entry_speed, burnout_hold_speed) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
     // A UI write landed while the fields were being read; keep the revision
     // unpersisted so the next tick writes a coherent document.
@@ -5146,6 +5265,26 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, pitch_scale) &&
       AppendText(cursor, end, ",\"shakeScale\":") &&
       AppendNumber(cursor, end, shake_scale) &&
+      AppendText(cursor, end, ",\"burnoutEnabled\":") &&
+      AppendText(cursor, end, burnout_enabled ? "true" : "false") &&
+      AppendText(cursor, end, ",\"burnoutEntryDelay\":") &&
+      AppendNumber(cursor, end, burnout_entry_delay) &&
+      AppendText(cursor, end, ",\"burnoutEntryTime\":") &&
+      AppendNumber(cursor, end, burnout_entry_time) &&
+      AppendText(cursor, end, ",\"burnoutExitDelay\":") &&
+      AppendNumber(cursor, end, burnout_exit_delay) &&
+      AppendText(cursor, end, ",\"burnoutExitTime\":") &&
+      AppendNumber(cursor, end, burnout_exit_time) &&
+      AppendText(cursor, end, ",\"burnoutFov\":") &&
+      AppendNumber(cursor, end, burnout_fov) &&
+      AppendText(cursor, end, ",\"burnoutShake\":") &&
+      AppendNumber(cursor, end, burnout_shake) &&
+      AppendText(cursor, end, ",\"burnoutSideMode\":") &&
+      AppendNumber(cursor, end, burnout_side_mode) &&
+      AppendText(cursor, end, ",\"burnoutEntrySpeed\":") &&
+      AppendNumber(cursor, end, burnout_entry_speed) &&
+      AppendText(cursor, end, ",\"burnoutHoldSpeed\":") &&
+      AppendNumber(cursor, end, burnout_hold_speed) &&
       AppendText(cursor, end, ",\"rollOnlyInDrift\":") &&
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
@@ -5200,6 +5339,25 @@ void SetDefaults(Context &context) noexcept {
   context.roll_scale.store(kDefaultRollScale, std::memory_order_release);
   context.pitch_scale.store(kDefaultPitchScale, std::memory_order_release);
   context.shake_scale.store(kDefaultShakeScale, std::memory_order_release);
+  context.burnout_enabled.store(kDefaultBurnoutEnabled,
+                                std::memory_order_release);
+  context.burnout_entry_delay.store(kDefaultBurnoutEntryDelay,
+                                    std::memory_order_release);
+  context.burnout_entry_time.store(kDefaultBurnoutEntryTime,
+                                   std::memory_order_release);
+  context.burnout_exit_delay.store(kDefaultBurnoutExitDelay,
+                                   std::memory_order_release);
+  context.burnout_exit_time.store(kDefaultBurnoutExitTime,
+                                  std::memory_order_release);
+  context.burnout_fov.store(kDefaultBurnoutFov, std::memory_order_release);
+  context.burnout_shake.store(kDefaultBurnoutShake,
+                              std::memory_order_release);
+  context.burnout_side_mode.store(kDefaultBurnoutSideMode,
+                                  std::memory_order_release);
+  context.burnout_entry_speed.store(kDefaultBurnoutEntrySpeed,
+                                    std::memory_order_release);
+  context.burnout_hold_speed.store(kDefaultBurnoutHoldSpeed,
+                                   std::memory_order_release);
   context.slope_follow.store(true, std::memory_order_release);
   context.slope_strength.store(kDefaultSlopeStrength,
                                std::memory_order_release);
@@ -5331,13 +5489,13 @@ bool LoadSettings(Context &context) noexcept {
   const AnomalyJsonServiceV1 &json = *context.json;
   std::uint32_t kind{};
   std::size_t field_count{};
-  // The schema has 31 properties today. Keep headroom so a future optional
+  // The schema has 41 properties today. Keep headroom so a future optional
   // field does not make existing documents unreadable.
   if (json.kind(json.user, root, &kind).code != ANOMALY_STATUS_V1_OK ||
       kind != ANOMALY_JSON_V1_OBJECT ||
       json.object_size(json.user, root, &field_count).code !=
           ANOMALY_STATUS_V1_OK ||
-      field_count < 6 || field_count > 40) {
+      field_count < 6 || field_count > 60) {
     return false;
   }
   bool enabled{};
@@ -5370,6 +5528,17 @@ bool LoadSettings(Context &context) noexcept {
   double roll_scale = kDefaultRollScale;
   double pitch_scale = kDefaultPitchScale;
   double shake_scale = kDefaultShakeScale;
+  bool burnout_enabled = kDefaultBurnoutEnabled;
+  double burnout_entry_delay = kDefaultBurnoutEntryDelay;
+  double burnout_entry_time = kDefaultBurnoutEntryTime;
+  double burnout_exit_delay = kDefaultBurnoutExitDelay;
+  double burnout_exit_time = kDefaultBurnoutExitTime;
+  double burnout_fov = kDefaultBurnoutFov;
+  double burnout_shake = kDefaultBurnoutShake;
+  double burnout_side_mode_number =
+      static_cast<double>(kDefaultBurnoutSideMode);
+  double burnout_entry_speed = kDefaultBurnoutEntrySpeed;
+  double burnout_hold_speed = kDefaultBurnoutHoldSpeed;
   bool roll_only_in_drift = true;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
@@ -5403,6 +5572,26 @@ bool LoadSettings(Context &context) noexcept {
       JsonObjectNumber(json, root, "pitchScale", pitch_scale));
   static_cast<void>(
       JsonObjectNumber(json, root, "shakeScale", shake_scale));
+  static_cast<void>(JsonObjectBoolean(json, root, "burnoutEnabled",
+                                      burnout_enabled));
+  static_cast<void>(JsonObjectNumber(json, root, "burnoutEntryDelay",
+                                     burnout_entry_delay));
+  static_cast<void>(JsonObjectNumber(json, root, "burnoutEntryTime",
+                                     burnout_entry_time));
+  static_cast<void>(JsonObjectNumber(json, root, "burnoutExitDelay",
+                                     burnout_exit_delay));
+  static_cast<void>(JsonObjectNumber(json, root, "burnoutExitTime",
+                                     burnout_exit_time));
+  static_cast<void>(
+      JsonObjectNumber(json, root, "burnoutFov", burnout_fov));
+  static_cast<void>(
+      JsonObjectNumber(json, root, "burnoutShake", burnout_shake));
+  static_cast<void>(JsonObjectNumber(json, root, "burnoutSideMode",
+                                     burnout_side_mode_number));
+  static_cast<void>(JsonObjectNumber(json, root, "burnoutEntrySpeed",
+                                     burnout_entry_speed));
+  static_cast<void>(JsonObjectNumber(json, root, "burnoutHoldSpeed",
+                                     burnout_hold_speed));
   static_cast<void>(JsonObjectBoolean(json, root, "rollOnlyInDrift",
                                       roll_only_in_drift));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticFlatPose",
@@ -5438,7 +5627,11 @@ bool LoadSettings(Context &context) noexcept {
                      pitch_scale, shake_scale, slope_strength,
                      slope_max_gradient_degrees, slope_up_look_at,
                      slope_up_rest, slope_down_look_at,
-                     slope_down_rest)) {
+                     slope_down_rest) ||
+      !BurnoutSettingsValid(burnout_entry_delay, burnout_entry_time,
+                            burnout_exit_delay, burnout_exit_time, burnout_fov,
+                            burnout_shake, burnout_side_mode_number,
+                            burnout_entry_speed, burnout_hold_speed)) {
     return false;
   }
   context.enabled.store(enabled, std::memory_order_release);
@@ -5461,6 +5654,24 @@ bool LoadSettings(Context &context) noexcept {
   context.roll_scale.store(roll_scale, std::memory_order_release);
   context.pitch_scale.store(pitch_scale, std::memory_order_release);
   context.shake_scale.store(shake_scale, std::memory_order_release);
+  context.burnout_enabled.store(burnout_enabled, std::memory_order_release);
+  context.burnout_entry_delay.store(burnout_entry_delay,
+                                    std::memory_order_release);
+  context.burnout_entry_time.store(burnout_entry_time,
+                                   std::memory_order_release);
+  context.burnout_exit_delay.store(burnout_exit_delay,
+                                   std::memory_order_release);
+  context.burnout_exit_time.store(burnout_exit_time,
+                                  std::memory_order_release);
+  context.burnout_fov.store(burnout_fov, std::memory_order_release);
+  context.burnout_shake.store(burnout_shake, std::memory_order_release);
+  context.burnout_side_mode.store(
+      static_cast<std::uint32_t>(burnout_side_mode_number),
+      std::memory_order_release);
+  context.burnout_entry_speed.store(burnout_entry_speed,
+                                    std::memory_order_release);
+  context.burnout_hold_speed.store(burnout_hold_speed,
+                                   std::memory_order_release);
   context.slope_follow.store(slope_follow, std::memory_order_release);
   context.slope_strength.store(slope_strength, std::memory_order_release);
   context.slope_max_gradient_degrees.store(
@@ -6669,25 +6880,57 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   const nfs2015_chase::CameraState chase_view =
       context.chase.Update(elapsed, sample.car);
 
-  // Phase 3: advance the burnout shot on the same render clock and blend its
-  // pose into the chase view before publishing anything. The shot consumes the
-  // same anchored car sample as the chase, so the wheel stays attached to the
-  // rendered chassis. A zero blend returns the chase view exactly.
-  nfs2015_chase::BurnoutShotConfig shot_config =
-      context.burnout_shot.config();
-  shot_config.slope_follow =
-      context.slope_follow.load(std::memory_order_acquire);
-  shot_config.camera_scale = sample.camera_scale;
-  context.burnout_shot.SetConfig(shot_config);
-  const nfs2015_chase::BurnoutShotResult burnout =
-      context.burnout_shot.Update(elapsed, sample.car, sample.burnout,
-                                 sample.aspect_ratio);
-  context.presenter_burnout_blend.store(burnout.blend,
-                                        std::memory_order_relaxed);
-  context.presenter_burnout_side.store(burnout.side,
-                                       std::memory_order_relaxed);
-  nfs2015_chase::CameraState view = nfs2015_chase::BlendBurnoutCamera(
-      chase_view, burnout.view, sample.car, burnout.blend);
+  // Phase 3/4: advance the burnout shot on the same render clock and blend
+  // its pose into the chase view before publishing anything. The shot consumes
+  // the same anchored car sample as the chase, so the wheel stays attached to
+  // the rendered chassis. A zero blend returns the chase view exactly.
+  const bool burnout_enabled =
+      context.burnout_enabled.load(std::memory_order_acquire);
+  nfs2015_chase::CameraState view = chase_view;
+  if (burnout_enabled) {
+    nfs2015_chase::BurnoutShotConfig shot_config =
+        context.burnout_shot.config();
+    shot_config.entry_delay =
+        context.burnout_entry_delay.load(std::memory_order_acquire);
+    shot_config.entry_time =
+        context.burnout_entry_time.load(std::memory_order_acquire);
+    shot_config.exit_delay =
+        context.burnout_exit_delay.load(std::memory_order_acquire);
+    shot_config.exit_time =
+        context.burnout_exit_time.load(std::memory_order_acquire);
+    shot_config.horizontal_fov_degrees =
+        context.burnout_fov.load(std::memory_order_acquire);
+    shot_config.shake_scale =
+        context.burnout_shake.load(std::memory_order_acquire);
+    shot_config.side_mode = static_cast<int>(
+        context.burnout_side_mode.load(std::memory_order_acquire));
+    shot_config.entry_speed_mps =
+        context.burnout_entry_speed.load(std::memory_order_acquire);
+    shot_config.hold_speed_mps =
+        context.burnout_hold_speed.load(std::memory_order_acquire);
+    shot_config.slope_follow =
+        context.slope_follow.load(std::memory_order_acquire);
+    // The presenter / route B still applies the user's cameraScale once,
+    // around the car origin, after the blend. Scaling the shot locally as well
+    // would square that value (0.6 -> 0.36) and pull the close-up into the car.
+    shot_config.camera_scale = 1.0;
+    context.burnout_shot.SetConfig(shot_config);
+    const nfs2015_chase::BurnoutShotResult burnout =
+        context.burnout_shot.Update(elapsed, sample.car, sample.burnout,
+                                   sample.aspect_ratio);
+    context.presenter_burnout_blend.store(burnout.blend,
+                                          std::memory_order_relaxed);
+    context.presenter_burnout_side.store(burnout.side,
+                                         std::memory_order_relaxed);
+    view = nfs2015_chase::BlendBurnoutCamera(chase_view, burnout.view,
+                                             sample.car, burnout.blend);
+  } else {
+    // Disabling the feature must cut back to the exact chase pose instead of
+    // leaving a latched shot to resume at full blend when it is re-enabled.
+    context.burnout_shot.Reset();
+    context.presenter_burnout_blend.store(0.0, std::memory_order_relaxed);
+    context.presenter_burnout_side.store(1, std::memory_order_relaxed);
+  }
   // A disabled game FOV must not be changed by the shot. The route B publisher
   // already writes lens=0 in that case; restoring the chase vertical FOV here
   // keeps the CameraState consistent for any other consumer.
@@ -9197,6 +9440,32 @@ void UpdateDisplay(Context &context) noexcept {
       context.pitch_scale.load(std::memory_order_acquire);
   context.display.shake_scale =
       context.shake_scale.load(std::memory_order_acquire);
+  context.display.burnout_enabled =
+      context.burnout_enabled.load(std::memory_order_acquire);
+  context.display.burnout_entry_delay =
+      context.burnout_entry_delay.load(std::memory_order_acquire);
+  context.display.burnout_entry_time =
+      context.burnout_entry_time.load(std::memory_order_acquire);
+  context.display.burnout_exit_delay =
+      context.burnout_exit_delay.load(std::memory_order_acquire);
+  context.display.burnout_exit_time =
+      context.burnout_exit_time.load(std::memory_order_acquire);
+  context.display.burnout_fov =
+      context.burnout_fov.load(std::memory_order_acquire);
+  context.display.burnout_shake =
+      context.burnout_shake.load(std::memory_order_acquire);
+  context.display.burnout_side_mode =
+      context.burnout_side_mode.load(std::memory_order_acquire);
+  context.display.burnout_entry_speed =
+      context.burnout_entry_speed.load(std::memory_order_acquire);
+  context.display.burnout_hold_speed =
+      context.burnout_hold_speed.load(std::memory_order_acquire);
+  context.display.burnout_shot_blend =
+      context.presenter_burnout_blend.load(std::memory_order_relaxed);
+  context.display.burnout_shot_side =
+      context.presenter_burnout_side.load(std::memory_order_relaxed);
+  context.display.burnout_shot_fallbacks =
+      context.presenter_burnout_fallbacks.load(std::memory_order_relaxed);
   context.display.slope_follow =
       context.slope_follow.load(std::memory_order_acquire);
   context.display.slope_strength =
@@ -10047,6 +10316,15 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
         display.burnout_speed_mps);
     DrawStatusLine(ui, localizer, "diag.burnout_sample", "Burnout sample",
                    line);
+    const char *shot_side = display.burnout_shot_side < 0
+                                ? "L"
+                                : (display.burnout_shot_side > 0 ? "R" : "C");
+    std::snprintf(line, sizeof(line), "blend %.2f  side %s  fallbacks %llu",
+                  display.burnout_shot_blend, shot_side,
+                  static_cast<unsigned long long>(
+                      display.burnout_shot_fallbacks));
+    DrawStatusLine(ui, localizer, "diag.burnout_shot", "Burnout shot",
+                   line);
     DrawStatusLine(
         ui, localizer, "diag.burnout_signal", "Burnout flag",
         display.burnout_probe_is_burnout_known
@@ -10753,6 +11031,103 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
             std::memory_order_release);
         MarkSettingsDirty(*context);
       }
+
+      ui->separator(ui->user);
+      ui->text(ui->user,
+               StringView(context->localizer.Text(
+                   "setting.burnout", "Burnout close-up (Shift + W)")));
+      const std::string burnout_enabled_label = context->localizer.Label(
+          "setting.burnout_enabled", "Enable burnout close-up",
+          "chase-burnout-enabled");
+      int burnout_enabled = display.burnout_enabled ? 1 : 0;
+      if (ui->checkbox(ui->user, StringView(burnout_enabled_label),
+                       &burnout_enabled) != 0) {
+        context->burnout_enabled.store(burnout_enabled != 0,
+                                       std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+      const auto burnout_slider =
+          [&](const char *key, const char *fallback, const char *widget_key,
+              const double value, const double minimum, const double maximum,
+              std::atomic<double> &target) {
+            const std::string label = context->localizer.Label(
+                key, fallback, widget_key);
+            float slider_value = static_cast<float>(value);
+            if (ui->slider_float(
+                    ui->user, StringView(label), &slider_value,
+                    static_cast<float>(minimum),
+                    static_cast<float>(maximum)) != 0) {
+              target.store(
+                  nfs2015_chase::Clamp(static_cast<double>(slider_value),
+                                       minimum, maximum),
+                  std::memory_order_release);
+              MarkSettingsDirty(*context);
+            }
+          };
+      burnout_slider("setting.burnout_fov", "Shot horizontal FOV",
+                     "chase-burnout-fov", display.burnout_fov,
+                     kMinimumBurnoutFov, kMaximumBurnoutFov,
+                     context->burnout_fov);
+      burnout_slider("setting.burnout_shake", "Shot shake strength",
+                     "chase-burnout-shake", display.burnout_shake,
+                     kMinimumBurnoutShake, kMaximumBurnoutShake,
+                     context->burnout_shake);
+      burnout_slider("setting.burnout_entry_delay", "Entry delay (s)",
+                     "chase-burnout-entry-delay",
+                     display.burnout_entry_delay, kMinimumBurnoutEntryDelay,
+                     kMaximumBurnoutEntryDelay, context->burnout_entry_delay);
+      burnout_slider("setting.burnout_entry_time", "Entry time (s)",
+                     "chase-burnout-entry-time", display.burnout_entry_time,
+                     kMinimumBurnoutEntryTime, kMaximumBurnoutEntryTime,
+                     context->burnout_entry_time);
+      burnout_slider("setting.burnout_exit_delay", "Exit delay (s)",
+                     "chase-burnout-exit-delay", display.burnout_exit_delay,
+                     kMinimumBurnoutExitDelay, kMaximumBurnoutExitDelay,
+                     context->burnout_exit_delay);
+      burnout_slider("setting.burnout_exit_time", "Exit time (s)",
+                     "chase-burnout-exit-time", display.burnout_exit_time,
+                     kMinimumBurnoutExitTime, kMaximumBurnoutExitTime,
+                     context->burnout_exit_time);
+      burnout_slider("setting.burnout_entry_speed", "Entry speed (m/s)",
+                     "chase-burnout-entry-speed",
+                     display.burnout_entry_speed, kMinimumBurnoutEntrySpeed,
+                     kMaximumBurnoutEntrySpeed, context->burnout_entry_speed);
+      // Keep the pair valid even when the entry slider is raised.
+      const double entry_speed =
+          context->burnout_entry_speed.load(std::memory_order_acquire);
+      if (context->burnout_hold_speed.load(std::memory_order_acquire) <
+          entry_speed) {
+        context->burnout_hold_speed.store(entry_speed,
+                                          std::memory_order_release);
+      }
+      // Hold speed must not be below entry speed; clamp the slider's lower
+      // bound so the persisted document always passes the validator.
+      const double hold_minimum = (std::max)(
+          kMinimumBurnoutHoldSpeed,
+          context->burnout_entry_speed.load(std::memory_order_acquire));
+      burnout_slider("setting.burnout_hold_speed", "Hold speed (m/s)",
+                     "chase-burnout-hold-speed",
+                     (std::max)(display.burnout_hold_speed, hold_minimum),
+                     hold_minimum, kMaximumBurnoutHoldSpeed,
+                     context->burnout_hold_speed);
+      ui->text(ui->user,
+               StringView(context->localizer.Text(
+                   "setting.burnout_side", "Shot side (latched on entry)")));
+      const auto burnout_side_button = [&](const std::uint32_t mode,
+                                           const char *key,
+                                           const char *fallback) {
+        std::string label;
+        label.append(display.burnout_side_mode == mode ? "> " : "  ");
+        label.append(context->localizer.Text(key, fallback));
+        if (ui->button(ui->user, StringView(label), 0.0F, 0.0F) != 0) {
+          context->burnout_side_mode.store(mode, std::memory_order_release);
+          MarkSettingsDirty(*context);
+        }
+      };
+      burnout_side_button(0, "burnout.side.auto", "Auto / steering");
+      burnout_side_button(1, "burnout.side.left", "Left rear");
+      burnout_side_button(2, "burnout.side.right", "Right rear");
+      burnout_side_button(3, "burnout.side.center", "Centred");
 
       const std::string roll_drift_label = context->localizer.Label(
           "setting.roll_only_drift", "Roll only while drifting",
