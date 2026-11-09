@@ -42,6 +42,10 @@ struct BurnoutSample final {
 struct CarSample final {
   std::int64_t time_ns{};
   CarState car{};
+  // Game-tick burnout facts. Phase 2 fills this; Phase 3 consumes it on the
+  // render clock. Booleans are taken from the newer sample by
+  // BlendCarSample(), never interpolated.
+  BurnoutSample burnout{};
   // Pawn root, cm. The pose is reported relative to this so the renderer can
   // tell where the car is, and so diagnostics can measure camera-vs-car motion.
   double anchor_cm[3]{};
@@ -91,6 +95,22 @@ struct CarSample final {
         Lerp(from.origin_cm[axis], to.origin_cm[axis], t);
   }
   result.camera_scale = Lerp(from.camera_scale, to.camera_scale, t);
+  // Burnout facts are event flags plus a smoothed strength. A boolean halfway
+  // between true and false is meaningless, so active/left/right come from the
+  // newer sample; the continuous values are safe to interpolate.
+  result.burnout.active = to.burnout.active;
+  result.burnout.left = to.burnout.left;
+  result.burnout.right = to.burnout.right;
+  result.burnout.intensity =
+      Lerp(from.burnout.intensity, to.burnout.intensity, t);
+  result.burnout.throttle =
+      Lerp(from.burnout.throttle, to.burnout.throttle, t);
+  result.burnout.handbrake =
+      Lerp(from.burnout.handbrake, to.burnout.handbrake, t);
+  result.burnout.steering =
+      Lerp(from.burnout.steering, to.burnout.steering, t);
+  result.burnout.speed_mps =
+      Lerp(from.burnout.speed_mps, to.burnout.speed_mps, t);
   // Booleans and identities come from the newer sample: blending them would be
   // meaningless, and a differing epoch is a discontinuity the caller must see.
   return result;

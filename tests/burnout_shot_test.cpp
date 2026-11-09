@@ -17,6 +17,8 @@ using nfs2015_chase::BlendBurnoutCamera;
 using nfs2015_chase::BurnoutSample;
 using nfs2015_chase::BurnoutShot;
 using nfs2015_chase::BurnoutShotConfig;
+using nfs2015_chase::BlendCarSample;
+using nfs2015_chase::CarSample;
 using nfs2015_chase::BurnoutShotResult;
 using nfs2015_chase::BurnoutVerticalFovDegrees;
 using nfs2015_chase::CameraState;
@@ -374,6 +376,45 @@ void TestSafetyAndFiniteOutputs() {
   }
 }
 
+void TestCarSampleBurnoutBlend() {
+  CarSample from;
+  from.burnout.active = false;
+  from.burnout.left = false;
+  from.burnout.right = true;
+  from.burnout.intensity = 0.0;
+  from.burnout.throttle = 0.2;
+  from.burnout.handbrake = 1.0;
+  from.burnout.steering = -1.0;
+  from.burnout.speed_mps = 2.0;
+  CarSample to;
+  to.burnout.active = true;
+  to.burnout.left = true;
+  to.burnout.right = false;
+  to.burnout.intensity = 1.0;
+  to.burnout.throttle = 0.8;
+  to.burnout.handbrake = 0.0;
+  to.burnout.steering = 1.0;
+  to.burnout.speed_mps = 0.0;
+
+  const CarSample blended = BlendCarSample(from, to, 0.5);
+  Expect("burnout active comes from newer sample",
+         blended.burnout.active == to.burnout.active);
+  Expect("burnout left comes from newer sample",
+         blended.burnout.left == to.burnout.left);
+  Expect("burnout right comes from newer sample",
+         blended.burnout.right == to.burnout.right);
+  ExpectNear("burnout intensity interpolates", blended.burnout.intensity, 0.5,
+             1e-12);
+  ExpectNear("burnout throttle interpolates", blended.burnout.throttle, 0.5,
+             1e-12);
+  ExpectNear("burnout handbrake interpolates", blended.burnout.handbrake, 0.5,
+             1e-12);
+  ExpectNear("burnout steering interpolates", blended.burnout.steering, 0.0,
+             1e-12);
+  ExpectNear("burnout speed interpolates", blended.burnout.speed_mps, 1.0,
+             1e-12);
+}
+
 void TestInvalidAspectRatio() {
   const double value = BurnoutVerticalFovDegrees(45.0, 0.0);
   Expect("zero aspect falls back to a finite FOV", std::isfinite(value));
@@ -398,6 +439,7 @@ int main() {
   TestBlendEndpointsAndOrbit();
   TestHorizontalFov();
   TestSafetyAndFiniteOutputs();
+  TestCarSampleBurnoutBlend();
   TestInvalidAspectRatio();
   std::printf("all burnout shot tests passed\n");
   return 0;

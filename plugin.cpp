@@ -1558,6 +1558,19 @@ struct DisplayState final {
   std::uint32_t burnout_probe_failed{};
   std::uint32_t burnout_probe_status[kBurnoutProbeCount]{};
   std::uint32_t burnout_probe_code[kBurnoutProbeCount]{};
+  // Phase 2 sample facts (not yet consumed by the camera).
+  bool burnout_signal_known{};
+  bool burnout_direct{};
+  bool burnout_fallback{};
+  bool burnout_active{};
+  bool burnout_left{};
+  bool burnout_right{};
+  double burnout_intensity{};
+  double burnout_throttle{};
+  double burnout_handbrake{};
+  double burnout_steering{};
+  double burnout_speed_mps{};
+  double burnout_hold_remaining{};
   double slip_degrees{};
   double drift{};
   double fov_horizontal{};
@@ -1743,6 +1756,46 @@ void RaisePeak(std::atomic<T> &peak, T value) noexcept {
                                      std::memory_order_relaxed)) {
   }
 }
+
+// Facts copied from the reflected burnout probe once per Game tick. This is
+// deliberately separate from the probe's raw diagnostic state: the sample
+// pipeline consumes a small, stable view, while the probe keeps counters and
+// the last raw output for the panel.
+struct BurnoutSignals final {
+  bool known{};
+  bool direct_known{};
+  bool direct{};
+  bool handbrake_known{};
+  bool handbrake{};
+  bool throttle_known{};
+  double throttle{};
+  bool player_throttle_known{};
+  double player_throttle{};
+  bool brake_known{};
+  double brake{};
+  bool steering_known{};
+  double steering{};
+  bool left_known{};
+  bool left{};
+  bool right_known{};
+  bool right{};
+};
+
+// Game-tick hysteresis for the sample. The render-side shot has its own
+// entry/exit delays; this state only bridges the 20 Hz poll and applies the
+// speed/ground gates and the intensity ramp.
+struct BurnoutDetectionState final {
+  bool active{};
+  bool raw_active{};
+  bool direct{};
+  bool fallback{};
+  bool have_last_log{};
+  bool last_log_active{};
+  bool last_log_direct{};
+  bool last_log_fallback{};
+  double hold_until{};
+  double intensity{};
+};
 
 struct Context final {
   nfs2015_chase_cam::Localizer localizer;
@@ -2024,6 +2077,10 @@ struct Context final {
   RenderXProbe render_x{};
   // Phase 0 burnout reconnaissance. Game-thread only; read-only.
   BurnoutProbeState burnout_probe{};
+  // Phase 2: the compact facts and the Game-tick hysteresis that feed
+  // CarSample::burnout. Neither is read by the camera yet.
+  BurnoutSignals burnout_signals{};
+  BurnoutDetectionState burnout_detection{};
   // Probe input: the world XY offset of the bounds centre from the Pawn root,
   // captured by QueryPlayer on this Game tick. A fixed vector in the car's own
   // frame, so its direction is a body-yaw candidate that never involves the
@@ -6843,6 +6900,8 @@ std::uint64_t ObjectRegistryGeneration(Context &context) noexcept {
 // registry and must not be handed to invoke() afterwards.
 void ResetVehicleObjectCaches(Context &context) noexcept {
   context.burnout_probe = BurnoutProbeState{};
+  context.burnout_signals = BurnoutSignals{};
+  context.burnout_detection = BurnoutDetectionState{};
   context.vehicle_getter_handles = {};
   context.next_vehicle_getter_retry = {};
   context.vehicle_query_known = false;
@@ -7185,6 +7244,8 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
       !Ue5ObjectSnapshotReady(context.objects) ||
       !Ue5ProcessEventInvokeReady(context.events)) {
     probe = BurnoutProbeState{};
+    context.burnout_signals = BurnoutSignals{};
+    context.burnout_detection = BurnoutDetectionState{};
     return;
   }
   if (!RefreshVehicleObjectGeneration(context)) {
@@ -7193,6 +7254,8 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
   if (probe.vehicle_object != vehicle.object) {
     probe = BurnoutProbeState{};
     probe.vehicle_object = vehicle.object;
+    context.burnout_signals = BurnoutSignals{};
+    context.burnout_detection = BurnoutDetectionState{};
   }
   if (probe.summary_due <= 0.0) {
     probe.summary_due = context.elapsed + 2.0;
@@ -7476,6 +7539,33 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
   probe.last_handbrake0 = handbrake0_state;
   probe.last_wheel_mask = wheel_mask;
 
+  BurnoutSignals signals;
+  signals.direct_known = probe.is_burnout_known;
+  signals.direct = probe.is_burnout;
+  signals.handbrake_known = probe.handbrake_known;
+  signals.handbrake = probe.handbrake;
+  signals.throttle_known = probe.throttle_known;
+  signals.throttle = probe.throttle;
+  signals.player_throttle_known = probe.player_throttle_known;
+  signals.player_throttle = probe.player_throttle;
+  signals.brake_known = probe.brake_known;
+  signals.brake = probe.brake;
+  signals.steering_known = probe.steering_known;
+  signals.steering = probe.steering;
+  // Wheel indices 2 and 3 are the rear pair on this car (Phase 0). The exact
+  // left/right mapping is intentionally not asserted here: both rear wheels
+  // report burnout together, and the shot falls back to steering when the two
+  // flags agree. A future GetWheelInfo::SideType query can make this exact.
+  signals.left_known = probe.wheel_burnout_known[2];
+  signals.left = probe.wheel_burnout[2];
+  signals.right_known = probe.wheel_burnout_known[3];
+  signals.right = probe.wheel_burnout[3];
+  signals.known = signals.direct_known || signals.handbrake_known ||
+                  signals.throttle_known || signals.player_throttle_known ||
+                  signals.steering_known || signals.left_known ||
+                  signals.right_known;
+  context.burnout_signals = signals;
+
   // While the burnout is active, sample angular speed and speed every 0.5 s.
   // This is the data Phase 1 needs for shake/intensity, and it is cheap enough
   // to keep alongside the 4 Hz wheel probe.
@@ -7567,6 +7657,104 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
     Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
         std::string_view(details));
   }
+}
+
+constexpr double kBurnoutEntrySpeedMps = 1.0;
+constexpr double kBurnoutHoldSpeedMps = 3.0;
+constexpr double kBurnoutHoldSeconds = 0.28;
+constexpr double kBurnoutIntensityAttack = 12.0;
+constexpr double kBurnoutIntensityRelease = 8.0;
+constexpr double kBurnoutFallbackThrottle = 0.15;
+
+// Turn the latest reflected facts into one CarSample::burnout. This is the
+// only place the Game tick applies policy: the ground/speed gates, the short
+// hold that bridges the 20 Hz poll and the intensity ramp. The render-side
+// shot state machine still owns the entry/exit delays and the side latch.
+[[nodiscard]] nfs2015_chase::BurnoutSample UpdateBurnoutDetection(
+    Context &context, const bool on_ground, const double speed_mps,
+    const double forward_speed, const double dt) noexcept {
+  BurnoutDetectionState &state = context.burnout_detection;
+  const BurnoutSignals &signals = context.burnout_signals;
+
+  const bool direct = signals.direct_known && signals.direct;
+  const bool throttle_known =
+      signals.throttle_known || signals.player_throttle_known;
+  const double throttle =
+      (std::max)(signals.throttle_known ? signals.throttle : 0.0,
+                 signals.player_throttle_known ? signals.player_throttle : 0.0);
+  const bool fallback = signals.handbrake_known && signals.handbrake &&
+                        throttle_known && throttle > kBurnoutFallbackThrottle;
+  const bool direction_ok = std::isfinite(forward_speed) &&
+                            forward_speed > -0.5;
+  const bool safe = on_ground && direction_ok && std::isfinite(speed_mps);
+  const double absolute_speed =
+      safe ? std::fabs(speed_mps) : std::numeric_limits<double>::infinity();
+  const bool condition = safe && (direct || fallback);
+  const bool raw_active = condition && absolute_speed < kBurnoutEntrySpeedMps;
+  const bool continue_active =
+      condition && state.active && absolute_speed < kBurnoutHoldSpeedMps;
+  const bool hold_active =
+      state.active && safe && absolute_speed < kBurnoutHoldSpeedMps &&
+      context.elapsed < state.hold_until;
+  const bool force_exit =
+      !safe || absolute_speed >= kBurnoutHoldSpeedMps;
+  const bool active =
+      !force_exit && (raw_active || continue_active || hold_active);
+
+  if (raw_active || continue_active) {
+    state.hold_until = context.elapsed + kBurnoutHoldSeconds;
+  }
+  if (force_exit) {
+    state.hold_until = 0.0;
+  }
+  state.raw_active = raw_active;
+  state.direct = direct;
+  state.fallback = fallback;
+  state.active = active;
+
+  const double target =
+      active && condition
+          ? (throttle_known ? nfs2015_chase::Clamp(throttle, 0.0, 1.0)
+                            : (direct ? 1.0 : 0.0))
+          : 0.0;
+  const double rate = target > state.intensity ? kBurnoutIntensityAttack
+                                               : kBurnoutIntensityRelease;
+  state.intensity =
+      nfs2015_chase::Clamp(nfs2015_chase::Damp(state.intensity, target, rate,
+                                               dt),
+                           0.0, 1.0);
+
+  nfs2015_chase::BurnoutSample sample;
+  sample.active = active;
+  sample.left = signals.left_known && signals.left;
+  sample.right = signals.right_known && signals.right;
+  sample.intensity = state.intensity;
+  sample.throttle = throttle_known ? throttle : 0.0;
+  sample.handbrake = signals.handbrake_known && signals.handbrake ? 1.0 : 0.0;
+  sample.steering = signals.steering_known
+                        ? nfs2015_chase::Clamp(signals.steering, -1.0, 1.0)
+                        : 0.0;
+  sample.speed_mps = std::isfinite(forward_speed) ? forward_speed : 0.0;
+
+  if (!state.have_last_log || state.last_log_active != sample.active ||
+      state.last_log_direct != direct ||
+      state.last_log_fallback != fallback) {
+    state.have_last_log = true;
+    state.last_log_active = sample.active;
+    state.last_log_direct = direct;
+    state.last_log_fallback = fallback;
+    char message[320]{};
+    std::snprintf(
+        message, sizeof(message),
+        "nfs2015 chase cam: burnout sample active=%d direct=%d fallback=%d "
+        "left=%d right=%d intensity=%.2f throttle=%.2f HB=%.0f steer=%+.2f "
+        "speed=%+.2f",
+        sample.active ? 1 : 0, direct ? 1 : 0, fallback ? 1 : 0,
+        sample.left ? 1 : 0, sample.right ? 1 : 0, sample.intensity,
+        sample.throttle, sample.handbrake, sample.steering, sample.speed_mps);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+  }
+  return sample;
 }
 
 void UpdateCamera(Context &context, const double dt) noexcept {
@@ -7953,10 +8141,12 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   car.brake = context.brake_input;
   car.on_ground = true;
 
-  // Phase 0: read the reflected burnout/input signals at 20 Hz. This is
-  // read-only and deliberately runs after the car sample is assembled so it
-  // cannot affect the camera path.
+  // Phase 0/2: read the reflected burnout/input signals at 20 Hz, then turn
+  // them into the sample facts. The camera still ignores the result.
   UpdateBurnoutProbe(context, vehicle_query, speed_mps, forward_speed);
+  const nfs2015_chase::BurnoutSample burnout_sample =
+      UpdateBurnoutDetection(context, car.on_ground, speed_mps, forward_speed,
+                             dt);
 
   // T2: the tick no longer advances the model - it publishes a car sample and
   // the render thread integrates the springs on its own clock.
@@ -7964,6 +8154,7 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     nfs2015_chase::CarSample sample;
     sample.time_ns = NowNanoseconds();
     sample.car = car;
+    sample.burnout = burnout_sample;
     for (std::size_t axis = 0; axis < 3; ++axis) {
       sample.anchor_cm[axis] = base_cm[axis];
       sample.origin_cm[axis] = origin_cm[axis];
@@ -8090,6 +8281,24 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.burnout_probe_resolved = resolved;
     context.display.burnout_probe_ok = ok;
     context.display.burnout_probe_failed = failed;
+
+    const BurnoutSignals &signals = context.burnout_signals;
+    const BurnoutDetectionState &detection = context.burnout_detection;
+    context.display.burnout_signal_known = signals.known;
+    context.display.burnout_direct = signals.direct_known && signals.direct;
+    context.display.burnout_fallback = detection.fallback;
+    context.display.burnout_active = detection.active;
+    context.display.burnout_left = signals.left_known && signals.left;
+    context.display.burnout_right = signals.right_known && signals.right;
+    context.display.burnout_intensity = detection.intensity;
+    context.display.burnout_throttle = burnout_sample.throttle;
+    context.display.burnout_handbrake = burnout_sample.handbrake;
+    context.display.burnout_steering = burnout_sample.steering;
+    context.display.burnout_speed_mps = burnout_sample.speed_mps;
+    context.display.burnout_hold_remaining =
+        detection.active && detection.hold_until > context.elapsed
+            ? detection.hold_until - context.elapsed
+            : 0.0;
   }
 }
 
@@ -9772,6 +9981,23 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     const auto bit = [](const bool known, const bool value) -> char {
       return known ? (value ? '1' : '0') : '-';
     };
+    std::snprintf(
+        line, sizeof(line), "known %c  direct %c  fallback %c  active %c  hold %.2fs",
+        display.burnout_signal_known ? '1' : '0',
+        display.burnout_direct ? '1' : '0',
+        display.burnout_fallback ? '1' : '0',
+        display.burnout_active ? '1' : '0', display.burnout_hold_remaining);
+    DrawStatusLine(ui, localizer, "diag.burnout_detection",
+                   "Burnout detection", line);
+    std::snprintf(
+        line, sizeof(line),
+        "L %c  R %c  int %.2f  thr %.2f  HB %.0f  spd %+.2f",
+        display.burnout_left ? '1' : '0',
+        display.burnout_right ? '1' : '0', display.burnout_intensity,
+        display.burnout_throttle, display.burnout_handbrake,
+        display.burnout_speed_mps);
+    DrawStatusLine(ui, localizer, "diag.burnout_sample", "Burnout sample",
+                   line);
     DrawStatusLine(
         ui, localizer, "diag.burnout_signal", "Burnout flag",
         display.burnout_probe_is_burnout_known

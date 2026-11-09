@@ -3,9 +3,10 @@
 > 目标仓库：`nfs2015-chase-cam`
 > 目标游戏：NTE（`HTGame.exe`）
 > 写作日期：2026-11-10
-> 状态：**Phase 1 已完成（PASS）**，Phase 2 待开始
+> 状态：**Phase 2 已完成（PASS）**，Phase 3 待开始
 > Phase 0 报告：[`REPORT-burnout-phase0.md`](REPORT-burnout-phase0.md)
 > Phase 1 报告：[`REPORT-burnout-phase1.md`](REPORT-burnout-phase1.md)
+> Phase 2 报告：[`REPORT-burnout-phase2.md`](REPORT-burnout-phase2.md)
 > 原则：**只读游戏目录；所有分析副本放在当前项目内；不写游戏目录。**
 
 ---
@@ -614,7 +615,9 @@ roll     = lerp(chase.roll, shot.roll, t)
 
 ### Phase 2：检测与 sample 管线（1–2 天）
 
-- 扩展 `VehiclePresence` / `CarSample` / `CarSample::Blend`。
+> **结果（2026-11-10）：PASS。** `BurnoutSignals` / `BurnoutDetectionState` 已接入 20 Hz probe；`CarSample::burnout` 随 sample ring 发布，`BlendCarSample()` 对布尔取新样本、连续值插值；诊断面板可见检测与样本。构建、CTest 与 `validate` 通过。实机 `active=1` 因 UIPI 输入注入受限，待手动 Shift+W 确认。详见 [`REPORT-burnout-phase2.md`](REPORT-burnout-phase2.md)。
+
+- 扩展 `CarSample` / `BlendCarSample`（没有扩展 `VehiclePresence`）。
 - 在 `QueryVehiclePresence` 的 20 Hz 窗口内查询 burnout 信号。
 - 在 `UpdateCamera` 组 sample 时填 `burnout`。
 - 缓存/失效/退避纳入现有 generation 机制。
@@ -632,7 +635,7 @@ roll     = lerp(chase.roll, shot.roll, t)
 - 设置字段、持久化、UI 开关/滑杆、zh-CN 文案。
 - 诊断计数、日志、README/RELEASE-NOTES。
 - 全量单测 + 实机矩阵 + 性能检查（20 Hz 查询不增加明显 tick 开销）。
-- 产出：可发布版本。
+- 产出：先不发布 。
 
 ---
 
