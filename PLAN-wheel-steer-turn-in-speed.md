@@ -641,3 +641,22 @@ nfs2015-research/extracted/defaultdriftconfig.txt
 nfs2015-research/extracted/tuning/defaultsteeringconfig.txt
 nfs2015-research/NFS15Revival/.../RevivalDriftComponent.cpp
 ```
+
+---
+
+## 11. 实现记录
+
+代码已按本方案落地，实际实现与设计稿的差异如下：
+
+- **没有维持速度下限**：`entry_speed` 只用于进入；进入后速度、前向速度下降都不退出。
+  只有总速度低于 `0.5 m/s` 且持续 `0.5s` 才作为方向退化保护释放。
+- `turn_in` 使用 `0.18s` 保持、`0.10s` 最小保持、`0.30s` 最大保持；高滑移时也必须先
+  显示至少 `0.10s` 的向弯内姿态，避免尖锐 U 型弯直接跳过入弯阶段。
+- 反打接管门槛从设计稿的 `6°` 调整为 **`5°`**：因为目标角改用前轴速度后整体变小，
+  `5°` 能让高速 U 型弯更早进入 `turn_in`，同时 12° 以下的小目标仍不会冻结原厂动画。
+- 默认值：`wheelSteerMaxDegrees = 32°`、`wheelSteerFullSlipDegrees = 40°`、
+  `wheelSteerRateDegreesPerSecond = 120°/s`。
+- 进入/退出使用后轴滑移；反打目标使用前轴中心速度；两前轮仍共用同一视觉角。
+- 真正退出后 `0.5s` 再进入冷却，防止滑移阈值附近闪烁。
+- `tests/wheel_steer_test.cpp` 已覆盖入弯、近零前向速度、低速不退出、前轴修正、
+  `turn_in` 最小保持和默认参数。

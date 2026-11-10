@@ -134,27 +134,47 @@ inline void RotatorDegreesFromQuat(const Quat q, double out[3]) noexcept {
 
 struct WheelSteerConfig final {
   bool enabled{true};
-  double max_angle_radians{40.0 * kRadiansPerDegree};
+  double max_angle_radians{32.0 * kRadiansPerDegree};
   double gain{1.0};
   double enter_slip_radians{6.5 * kRadiansPerDegree};
   double exit_slip_radians{3.0 * kRadiansPerDegree};
-  double full_slip_radians{35.0 * kRadiansPerDegree};
+  double full_slip_radians{40.0 * kRadiansPerDegree};
   double rate_radians_per_second{120.0 * kRadiansPerDegree};
-  double minimum_speed_mps{30.0 / kMphPerMetrePerSecond};
+  // NFS 2015 only checks this speed when entering a drift. Once the state
+  // machine is engaged, speed is not an exit condition; a large drift angle
+  // can make forward speed approach zero while the car is still sliding fast.
+  double entry_speed_mps{40.0 / 3.6};
   double hold_seconds{0.5};
   double exit_hold_seconds{0.25};
   double blend_in_seconds{0.20};
   double blend_out_seconds{0.30};
   double stock_max_angle_radians{35.0 * kRadiansPerDegree};
   // A zero countersteer target means "no countersteer yet", not "center the
-  // wheel". At low slip, preserving the stock angle avoids straightening a
-  // driver's full steering input during a normal high-speed turn.
-  double counter_authority_radians{6.0 * kRadiansPerDegree};
+  // wheel". Entry waits until the target has enough authority, so a normal
+  // high-speed turn does not park the stock animation just because the slip
+  // crossed the entry threshold.
+  double counter_authority_radians{5.0 * kRadiansPerDegree};
   double restore_tolerance_radians{1.5 * kRadiansPerDegree};
+  // Time spent showing the player's turn-in angle before the countersteer
+  // blend starts. This is the visual equivalent of the NFS steering phase
+  // before RemapSteeringForDrift hands the wheel to the countersteer target.
+  double turn_in_seconds{0.18};
+  double turn_in_min_seconds{0.10};
+  double turn_in_max_seconds{0.30};
+  double turn_in_release_slip_radians{18.0 * kRadiansPerDegree};
+  // After a real release, do not immediately re-enter on the next tick. This
+  // is not a speed threshold; it prevents state chatter at the exit slip.
+  double reentry_cooldown_seconds{0.5};
+  // Numerical degeneracy guard, not a driving-speed floor. When the total
+  // velocity vector is almost zero there is no direction from which to compute
+  // a countersteer target; hold the last target briefly while the car recovers.
+  double standstill_speed_mps{0.5};
+  double standstill_grace_seconds{0.5};
 };
 
 enum class WheelSteerPhase : std::uint8_t {
   grip = 0,
+  turn_in,
   entering,
   drifting,
   releasing,
@@ -167,21 +187,22 @@ struct WheelSteerDriftState final {
   WheelSteerPhase phase{WheelSteerPhase::grip};
   double hold_seconds{};
   double exit_hold_seconds{};
+  double turn_in_seconds{};
   double blend{};
   // Last countersteer target from a valid drift tick. The release phase keeps
   // using it while the blend returns to the stock angle; recomputing it from a
   // zeroed low-speed travel vector would first steer the wheel straight and
   // then back to stock.
   double counter_angle{};
+  double reentry_cooldown{};
+  double standstill_seconds{};
 };
 
 struct WheelSteerTarget final {
-  // True while the plugin should take over the wheel pose. It waits until the
-  // countersteer target has meaningful authority, so a normal turn does not
-  // freeze the stock animation just because the travel-angle state entered a
-  // drift. Once taken over, the plugin keeps the pose through release.
+  // True from turn-in through release. The plugin keeps the wheel pose until
+  // the release blend has returned to the stock angle.
   bool active{};
-  // True only while the drift state machine is entering or holding a drift.
+  // True while the state machine is entering or holding a drift.
   bool engaged{};
   // Final target after blending the stock angle and the countersteer angle.
   double angle_radians{};
@@ -189,29 +210,98 @@ struct WheelSteerTarget final {
   double counter_angle_radians{};
   // The stock front-wheel estimate from the player's steering input.
   double stock_angle_radians{};
-  // Blend after both the state blend and counter-authority gate.
+  // Blend after the state blend. The countersteer authority gate is applied
+  // when entering, so this is the final visual blend.
   double angle_blend{};
   double blend{};
   WheelSteerPhase phase{WheelSteerPhase::grip};
 };
 
+struct WheelSteerTravel final {
+  double front_angle_radians{};
+  double rear_angle_radians{};
+  bool front_valid{};
+  bool rear_valid{};
+};
+
+// Compute the travel angle at a point offset from the velocity reference. The
+// rigid-body velocity is v(P) = v(center) + omega x r. Using the front-axle
+// centre instead of the body centre keeps the visual countersteer tied to the
+// wheel contact path; using the rear-axle centre makes the entry/exit slip
+// closer to the NFS 2015 rear-wheel slip signal.
+[[nodiscard]] inline bool ComputeWheelSteerTravelAngle(
+    const Vec3 car_forward, const Vec3 car_up, const Vec3 world_velocity,
+    double& angle_radians) noexcept {
+  const Vec3 up = Normalize(car_up);
+  if (Length(up) < 1e-6) {
+    return false;
+  }
+  Vec3 forward = Sub(car_forward, Mul(up, Dot(car_forward, up)));
+  Vec3 travel = Sub(world_velocity, Mul(up, Dot(world_velocity, up)));
+  if (Length(forward) < 1e-6 || Length(travel) < 1e-6) {
+    return false;
+  }
+  forward = Normalize(forward);
+  travel = Normalize(travel);
+  angle_radians =
+      std::atan2(Dot(up, Cross(forward, travel)), Dot(forward, travel));
+  return std::isfinite(angle_radians);
+}
+
+[[nodiscard]] inline WheelSteerTravel ComputeWheelSteerTravel(
+    const Vec3 car_forward, const Vec3 car_up, const Vec3 world_velocity,
+    const double yaw_rate, const Vec3 front_axle_offset,
+    const Vec3 rear_axle_offset) noexcept {
+  WheelSteerTravel result;
+  const Vec3 up = Normalize(car_up);
+  if (Length(up) < 1e-6 || !std::isfinite(yaw_rate)) {
+    return result;
+  }
+
+  const Vec3 omega = Mul(up, yaw_rate);
+  const Vec3 front_velocity =
+      Add(world_velocity, Cross(omega, front_axle_offset));
+  const Vec3 rear_velocity =
+      Add(world_velocity, Cross(omega, rear_axle_offset));
+
+  double body_angle = 0.0;
+  const bool body_valid = ComputeWheelSteerTravelAngle(
+      car_forward, car_up, world_velocity, body_angle);
+
+  result.front_valid = ComputeWheelSteerTravelAngle(
+      car_forward, car_up, front_velocity, result.front_angle_radians);
+  if (!result.front_valid && body_valid) {
+    result.front_angle_radians = body_angle;
+    result.front_valid = true;
+  }
+  result.rear_valid = ComputeWheelSteerTravelAngle(
+      car_forward, car_up, rear_velocity, result.rear_angle_radians);
+  if (!result.rear_valid && body_valid) {
+    result.rear_angle_radians = body_angle;
+    result.rear_valid = true;
+  }
+  return result;
+}
+
 // Advance the NFS-style drift state machine and return the visual front-wheel
 // target for this tick.
 //
-// The NFS 2015 entry gate is speed plus rear slip. NTE does not expose a
-// reliable rear tire slip value here, so the body travel angle is used as the
-// fallback. The 30 mph speed gate is what keeps a low-speed U-turn or a
-// standstill donut on the stock steering: below that speed the car is not in a
-// drift, even if its yaw and velocity directions differ.
+// `front_travel` is the front-axle travel angle and `rear_travel` is the
+// rear-axle travel angle. Entry/exit use the rear angle; the countersteer
+// magnitude uses the front angle. If the caller cannot read wheel positions it
+// can pass the same body angle for both.
 //
-// `steering_input` is the raw player steering, -1..1, positive to the right in
-// UE axes. It is used for the stock-angle handoff, not for the countersteer
-// target. The countersteer target still comes from the actual travel direction.
+// The speed gate is entry-only. Once `turn_in`, `entering`, `drifting` or
+// `releasing` is active, speed and forward speed are not exit conditions. A
+// large drift can make `forward_speed_mps` approach zero while the total
+// velocity is still high; that is a normal part of the drift, not a reason to
+// straighten the wheel.
 [[nodiscard]] inline WheelSteerTarget AdvanceWheelSteerTarget(
-    WheelSteerDriftState& state, const Vec3 car_forward, const Vec3 car_up,
-    const Vec3 world_velocity, const double forward_speed_mps,
-    const double speed_mps, const double steering_input,
-    const bool steering_known, const double dt,
+    WheelSteerDriftState& state, const double front_travel_angle,
+    const double rear_travel_angle,
+    const double speed_mps, const double forward_speed_mps,
+    const double steering_input, const bool steering_known,
+    const bool reversing, const double dt,
     const WheelSteerConfig& config) noexcept {
   WheelSteerTarget result;
   result.stock_angle_radians =
@@ -221,35 +311,26 @@ struct WheelSteerTarget final {
           : 0.0;
 
   const double step = std::isfinite(dt) ? Clamp(dt, 0.0, 0.25) : 0.0;
+  const double finite_speed = std::isfinite(speed_mps) ? speed_mps : 0.0;
+  const double finite_forward =
+      std::isfinite(forward_speed_mps) ? forward_speed_mps : 0.0;
+  const bool finite_angles =
+      std::isfinite(front_travel_angle) &&
+      std::isfinite(rear_travel_angle);
+  const bool motion_valid =
+      config.enabled && std::isfinite(speed_mps) &&
+      finite_speed >= config.standstill_speed_mps;
+  const bool entry_valid =
+      motion_valid && !reversing && finite_angles &&
+      finite_speed >= config.entry_speed_mps && finite_forward > 0.1;
 
-  // The speed gate is the NFS 2015 `Minimum_speed_to_enter_drift` (30 mph).
-  // Requiring a positive forward component also excludes reverse and most
-  // handbrake pivots at a standstill.
-  bool valid = config.enabled && std::isfinite(speed_mps) &&
-               std::isfinite(forward_speed_mps) &&
-               speed_mps >= config.minimum_speed_mps &&
-               forward_speed_mps > 0.1;
-
-  double travel_angle = 0.0;
-  if (valid) {
-    const Vec3 up = Normalize(car_up);
-    Vec3 forward = Sub(car_forward, Mul(up, Dot(car_forward, up)));
-    Vec3 travel = Sub(world_velocity, Mul(up, Dot(world_velocity, up)));
-    if (Length(forward) < 1e-6 || Length(travel) < 1e-6) {
-      valid = false;
-    } else {
-      forward = Normalize(forward);
-      travel = Normalize(travel);
-      travel_angle =
-          std::atan2(Dot(up, Cross(forward, travel)), Dot(forward, travel));
-    }
-  }
-
-  const double absolute_slip = std::fabs(travel_angle);
+  const double absolute_slip =
+      finite_angles ? std::fabs(rear_travel_angle) : 0.0;
   const bool start_requested =
-      valid && absolute_slip >= config.enter_slip_radians;
+      entry_valid && absolute_slip >= config.enter_slip_radians;
   const bool below_exit =
-      valid && absolute_slip < config.exit_slip_radians;
+      motion_valid && finite_angles &&
+      absolute_slip < config.exit_slip_radians;
 
   const double full_slip = (std::max)(
       config.full_slip_radians, config.enter_slip_radians + 1e-6);
@@ -260,53 +341,114 @@ struct WheelSteerTarget final {
   const double counter_scale =
       normalized_slip * normalized_slip * (3.0 - 2.0 * normalized_slip);
   const double raw_counter =
-      Clamp(travel_angle * config.gain * counter_scale,
-            -config.max_angle_radians, config.max_angle_radians);
+      finite_angles
+          ? Clamp(front_travel_angle * config.gain * counter_scale,
+                  -config.max_angle_radians, config.max_angle_radians)
+          : 0.0;
+  const bool has_authority =
+      std::fabs(raw_counter) >= config.counter_authority_radians;
+
+  state.reentry_cooldown =
+      (std::max)(0.0, state.reentry_cooldown - step);
+  if (motion_valid) {
+    state.standstill_seconds = 0.0;
+  } else if (state.phase != WheelSteerPhase::grip &&
+             state.phase != WheelSteerPhase::releasing) {
+    state.standstill_seconds += step;
+  }
+  const bool standstill_expired =
+      !motion_valid && state.phase != WheelSteerPhase::grip &&
+      state.phase != WheelSteerPhase::releasing &&
+      state.standstill_seconds >= config.standstill_grace_seconds;
+
+  const auto update_counter = [&]() {
+    if (motion_valid && finite_angles && !below_exit) {
+      state.counter_angle = raw_counter;
+    }
+  };
+  const auto enter_release = [&]() {
+    state.phase = WheelSteerPhase::releasing;
+  };
+  const auto enter_entering = [&]() {
+    state.phase = WheelSteerPhase::entering;
+    state.turn_in_seconds = 0.0;
+  };
 
   switch (state.phase) {
     case WheelSteerPhase::grip:
-      if (start_requested) {
-        state.phase = WheelSteerPhase::entering;
+      state.blend = 0.0;
+      state.hold_seconds = 0.0;
+      state.exit_hold_seconds = 0.0;
+      state.turn_in_seconds = 0.0;
+      state.standstill_seconds = 0.0;
+      if (start_requested && state.reentry_cooldown <= 0.0 &&
+          has_authority) {
+        const bool steering_into =
+            steering_known && steering_input * raw_counter < 0.0;
+        state.phase = steering_into ? WheelSteerPhase::turn_in
+                                    : WheelSteerPhase::entering;
         state.hold_seconds = 0.0;
         state.exit_hold_seconds = 0.0;
-        state.blend = 0.0;
+        state.turn_in_seconds = 0.0;
         state.counter_angle = raw_counter;
+      } else {
+        state.counter_angle = 0.0;
+      }
+      break;
+
+    case WheelSteerPhase::turn_in:
+      state.hold_seconds += step;
+      state.turn_in_seconds += step;
+      update_counter();
+      if (below_exit) {
+        state.exit_hold_seconds += step;
+      } else {
+        state.exit_hold_seconds = 0.0;
+      }
+      if (reversing || standstill_expired) {
+        enter_release();
+      } else if (below_exit &&
+                 state.hold_seconds >= config.hold_seconds &&
+                 state.exit_hold_seconds >= config.exit_hold_seconds) {
+        enter_release();
+      } else {
+        const bool steering_into =
+            steering_known && steering_input * raw_counter < 0.0;
+        const bool slip_high =
+            finite_angles &&
+            std::fabs(rear_travel_angle) >=
+                config.turn_in_release_slip_radians &&
+            state.turn_in_seconds >= config.turn_in_min_seconds;
+        if (!steering_into || slip_high ||
+            state.turn_in_seconds >= config.turn_in_max_seconds ||
+            state.turn_in_seconds >= config.turn_in_seconds) {
+          enter_entering();
+        }
       }
       break;
 
     case WheelSteerPhase::entering:
     case WheelSteerPhase::drifting:
       state.hold_seconds += step;
-      // Freeze the last countersteer target as soon as the slip falls below
-      // the exit threshold. Updating it to zero during the exit-hold window
-      // would first steer the wheel straight, then send it to the stock angle
-      // during the release blend.
-      if (valid && !below_exit) {
-        state.counter_angle = raw_counter;
-      }
-      if (!valid) {
-        // Low speed, reverse or lost ground speed is an immediate release.
-        // The blend still runs, so the visual wheel does not snap back.
-        state.phase = WheelSteerPhase::releasing;
+      update_counter();
+      if (below_exit) {
+        state.exit_hold_seconds += step;
       } else {
-        if (below_exit) {
-          state.exit_hold_seconds += step;
-        } else {
-          state.exit_hold_seconds = 0.0;
-        }
-        const bool exit_allowed =
-            state.hold_seconds >= config.hold_seconds &&
-            state.exit_hold_seconds >= config.exit_hold_seconds;
-        if (exit_allowed) {
-          state.phase = WheelSteerPhase::releasing;
-        } else {
-          state.blend = MoveTowards(
-              state.blend, 1.0,
-              step / (std::max)(config.blend_in_seconds, 1e-6));
-          if (state.phase == WheelSteerPhase::entering &&
-              state.blend >= 1.0 - 1e-9) {
-            state.phase = WheelSteerPhase::drifting;
-          }
+        state.exit_hold_seconds = 0.0;
+      }
+      if (reversing || standstill_expired) {
+        enter_release();
+      } else if (below_exit &&
+                 state.hold_seconds >= config.hold_seconds &&
+                 state.exit_hold_seconds >= config.exit_hold_seconds) {
+        enter_release();
+      } else {
+        state.blend = MoveTowards(
+            state.blend, 1.0,
+            step / (std::max)(config.blend_in_seconds, 1e-6));
+        if (state.phase == WheelSteerPhase::entering &&
+            state.blend >= 1.0 - 1e-9) {
+          state.phase = WheelSteerPhase::drifting;
         }
       }
       break;
@@ -320,34 +462,29 @@ struct WheelSteerTarget final {
         state.phase = WheelSteerPhase::grip;
         state.hold_seconds = 0.0;
         state.exit_hold_seconds = 0.0;
+        state.turn_in_seconds = 0.0;
         state.counter_angle = 0.0;
+        state.standstill_seconds = 0.0;
+        state.reentry_cooldown = config.reentry_cooldown_seconds;
       }
       break;
   }
 
   result.counter_angle_radians = state.counter_angle;
-
   const double smooth_blend =
       state.blend * state.blend * (3.0 - 2.0 * state.blend);
-  const double normalized_authority = Clamp(
-      std::fabs(result.counter_angle_radians) /
-          (std::max)(config.counter_authority_radians, 1e-6),
-      0.0, 1.0);
-  const double counter_authority =
-      normalized_authority * normalized_authority *
-      (3.0 - 2.0 * normalized_authority);
-  result.angle_blend = smooth_blend * counter_authority;
+  result.angle_blend = smooth_blend;
   result.angle_radians =
       Lerp(result.stock_angle_radians, result.counter_angle_radians,
            result.angle_blend);
   result.blend = state.blend;
   result.phase = state.phase;
-  // Do not park the stock animation for a drift-state tick whose countersteer
-  // target is still effectively zero. That would freeze the stock wheels
-  // during a normal high-speed turn without producing any visible countersteer.
-  result.active = state.phase != WheelSteerPhase::grip &&
-                  state.blend * counter_authority > 0.35;
-  result.engaged = state.phase == WheelSteerPhase::entering ||
+  // The authority gate is applied when entering. Once the state machine has
+  // committed to a drift, keep the wheel override through release so the
+  // handoff back to the stock animation stays continuous.
+  result.active = state.phase != WheelSteerPhase::grip;
+  result.engaged = state.phase == WheelSteerPhase::turn_in ||
+                   state.phase == WheelSteerPhase::entering ||
                    state.phase == WheelSteerPhase::drifting;
   return result;
 }
