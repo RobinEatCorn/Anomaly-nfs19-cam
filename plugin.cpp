@@ -184,7 +184,9 @@ constexpr double kMaximumSlopeRest = 4.0;
 // NFS 2015-style visual front-wheel countersteer. The default max is above the
 // front Chaos wheel's 35-degree physical stop: NFS 2015 lets the visual wheel
 // overshoot a little, and the clamp is still explicit so it cannot point
-// sideways when the slip angle is large.
+// sideways when the slip angle is large. The 30 mph entry speed is the NFS
+// 2015 `Minimum_speed_to_enter_drift`; below it, a low-speed U-turn or donut
+// stays on the stock steering.
 constexpr bool kDefaultWheelSteerEnabled = true;
 constexpr double kDefaultWheelSteerMaxDegrees = 40.0;
 constexpr double kMinimumWheelSteerMaxDegrees = 20.0;
@@ -192,14 +194,23 @@ constexpr double kMaximumWheelSteerMaxDegrees = 50.0;
 constexpr double kDefaultWheelSteerGain = 1.0;
 constexpr double kMinimumWheelSteerGain = 0.5;
 constexpr double kMaximumWheelSteerGain = 1.5;
-constexpr double kDefaultWheelSteerFullSlipDegrees = 25.0;
+constexpr double kDefaultWheelSteerFullSlipDegrees = 35.0;
 constexpr double kMinimumWheelSteerFullSlipDegrees = 10.0;
 constexpr double kMaximumWheelSteerFullSlipDegrees = 60.0;
-constexpr double kDefaultWheelSteerRateDegreesPerSecond = 360.0;
+constexpr double kDefaultWheelSteerRateDegreesPerSecond = 120.0;
 constexpr double kMinimumWheelSteerRateDegreesPerSecond = 60.0;
 constexpr double kMaximumWheelSteerRateDegreesPerSecond = 1200.0;
-constexpr double kWheelSteerMinimumSpeedMps = 3.0;
-constexpr double kWheelSteerEnterSlipFraction = 0.32;
+constexpr double kWheelSteerMinimumSpeedMps =
+    30.0 / nfs2015_chase::kMphPerMetrePerSecond;
+constexpr double kWheelSteerEnterSlipDegrees = 6.5;
+constexpr double kWheelSteerExitSlipDegrees = 3.0;
+constexpr double kWheelSteerHoldSeconds = 0.5;
+constexpr double kWheelSteerExitHoldSeconds = 0.25;
+constexpr double kWheelSteerBlendInSeconds = 0.20;
+constexpr double kWheelSteerBlendOutSeconds = 0.30;
+constexpr double kWheelSteerStockMaxDegrees = 35.0;
+constexpr double kWheelSteerCounterAuthorityDegrees = 6.0;
+constexpr double kWheelSteerRestoreToleranceDegrees = 1.5;
 // Braking pitch needs a speed-based signal, not the position-derived
 // acceleration: coasting drag, curbs, and sample noise all look like braking
 // in the latter. A dead zone plus a short hold rejects those single-tick dips.
@@ -1954,6 +1965,10 @@ struct WheelSteerState final {
   double applied_angle{};
   double target_angle{};
   double target_blend{};
+  double stock_angle{};
+  nfs2015_chase::WheelSteerDriftState drift{};
+  nfs2015_chase::WheelSteerPhase phase{
+      nfs2015_chase::WheelSteerPhase::grip};
   bool engaged{};
   bool active{};
   bool resolved{};
@@ -7791,6 +7806,9 @@ void RestoreWheelPose(Context &context) noexcept {
   state.applied_angle = 0.0;
   state.target_angle = 0.0;
   state.target_blend = 0.0;
+  state.stock_angle = 0.0;
+  state.drift = {};
+  state.phase = nfs2015_chase::WheelSteerPhase::grip;
   state.engaged = false;
   state.active = false;
 }
@@ -7901,13 +7919,71 @@ bool CaptureWheelSockets(Context &context) noexcept {
   return captured_any;
 }
 
+const char *WheelSteerPhaseName(
+    const nfs2015_chase::WheelSteerPhase phase) noexcept {
+  switch (phase) {
+    case nfs2015_chase::WheelSteerPhase::grip:
+      return "grip";
+    case nfs2015_chase::WheelSteerPhase::entering:
+      return "entering";
+    case nfs2015_chase::WheelSteerPhase::drifting:
+      return "drifting";
+    case nfs2015_chase::WheelSteerPhase::releasing:
+      return "releasing";
+  }
+  return "unknown";
+}
+
+// Read the front-wheel stock angle before parking the animation controller.
+// This is only called on the first frame of a drift, while the stock socket
+// still holds the player's current steering. Averaging the two front wheels
+// also gives the small Ackermann difference a neutral handoff point.
+bool MeasureStockWheelSteer(Context &context, const WheelSteerState &state,
+                            const nfs2015_chase::Vec3 car_forward,
+                            const nfs2015_chase::Vec3 car_up,
+                            double &angle_radians) noexcept {
+  double sum = 0.0;
+  std::size_t count = 0;
+  for (std::size_t index = 0; index < state.wheel_count; ++index) {
+    if (!state.front[index] || state.wheels[index] == 0) {
+      continue;
+    }
+    nfs2015_chase::Quat wheel_world{};
+    if (!Read(context.core,
+              state.wheels[index] + kSceneComponentTransformOffset,
+              wheel_world)) {
+      continue;
+    }
+    double angle = 0.0;
+    if (!nfs2015_chase::ComputeWheelSteerAngleFromWorld(
+            car_forward, car_up,
+            nfs2015_chase::QuatNormalize(wheel_world), angle)) {
+      continue;
+    }
+    sum += angle;
+    ++count;
+  }
+  if (count == 0) {
+    return false;
+  }
+  angle_radians = sum / static_cast<double>(count);
+  return std::isfinite(angle_radians);
+}
+
 // Game-tick visual override. The game's own wheel animation is parked while the
 // drift override is active; the front wheels get a scripted steer plus roll and
 // the rear wheels get the matching roll. No physics field is written.
+//
+// Entry and exit are not binary. `AdvanceWheelSteerTarget` owns the NFS-style
+// speed/slip gates, hold time and blend; this function owns the game pose and
+// hands the wheel back to the stock animation only after the manual angle has
+// converged to the stock-input estimate.
 void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
                       const nfs2015_chase::Vec3 world_velocity,
                       const double forward_speed_mps,
-                      const double speed_mps, const double dt) noexcept {
+                      const double speed_mps, const double steering_input,
+                      const bool steering_known,
+                      const double dt) noexcept {
   WheelSteerState &state = context.wheel_steer;
   const bool enabled =
       context.wheel_steer_enabled.load(std::memory_order_acquire);
@@ -7979,13 +8055,23 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   config.gain = gain;
   config.full_slip_radians =
       full_slip_degrees * nfs2015_chase::kRadiansPerDegree;
-  config.enter_slip_radians = nfs2015_chase::Clamp(
-      config.full_slip_radians * kWheelSteerEnterSlipFraction,
-      4.0 * nfs2015_chase::kRadiansPerDegree,
-      config.full_slip_radians * 0.8);
+  config.enter_slip_radians =
+      kWheelSteerEnterSlipDegrees * nfs2015_chase::kRadiansPerDegree;
+  config.exit_slip_radians =
+      kWheelSteerExitSlipDegrees * nfs2015_chase::kRadiansPerDegree;
   config.rate_radians_per_second =
       rate_degrees_per_second * nfs2015_chase::kRadiansPerDegree;
   config.minimum_speed_mps = kWheelSteerMinimumSpeedMps;
+  config.hold_seconds = kWheelSteerHoldSeconds;
+  config.exit_hold_seconds = kWheelSteerExitHoldSeconds;
+  config.blend_in_seconds = kWheelSteerBlendInSeconds;
+  config.blend_out_seconds = kWheelSteerBlendOutSeconds;
+  config.stock_max_angle_radians =
+      kWheelSteerStockMaxDegrees * nfs2015_chase::kRadiansPerDegree;
+  config.counter_authority_radians =
+      kWheelSteerCounterAuthorityDegrees * nfs2015_chase::kRadiansPerDegree;
+  config.restore_tolerance_radians =
+      kWheelSteerRestoreToleranceDegrees * nfs2015_chase::kRadiansPerDegree;
 
   // Use the body's own forward axis for the reverse gate, not the camera yaw.
   // During a drift the camera can lag or swing, while the wheel target must
@@ -7995,20 +8081,54 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   const double wheel_forward_speed =
       std::isfinite(mesh_forward_speed) ? mesh_forward_speed
                                         : forward_speed_mps;
-  const nfs2015_chase::WheelSteerTarget target =
-      nfs2015_chase::ComputeWheelSteerTarget(
-          car_forward, car_up, world_velocity, wheel_forward_speed, speed_mps,
-          state.engaged, config);
+  const nfs2015_chase::WheelSteerPhase previous_phase = state.phase;
+  nfs2015_chase::WheelSteerTarget target =
+      nfs2015_chase::AdvanceWheelSteerTarget(
+          state.drift, car_forward, car_up, world_velocity,
+          wheel_forward_speed, speed_mps, steering_input, steering_known, dt,
+          config);
+
+  // A new drift takes over from the stock pose at the stock angle. Starting
+  // from zero is what produced the old "wheel snaps straight, then turns"
+  // entry jump. Read the real wheel heading while the stock animation is still
+  // running; raw-steering * max-angle is only the fallback for a re-entry
+  // during an unfinished handoff. The takeover waits until the countersteer
+  // target has enough authority, so a normal turn does not freeze the stock
+  // animation while the travel-angle state machine is merely entering.
+  if (target.active && !state.animation_disabled) {
+    double measured_stock = 0.0;
+    if (!state.animation_disabled &&
+        MeasureStockWheelSteer(context, state, car_forward, car_up,
+                               measured_stock)) {
+      target.stock_angle_radians = nfs2015_chase::Clamp(
+          measured_stock, -config.max_angle_radians,
+          config.max_angle_radians);
+      target.angle_radians = nfs2015_chase::Lerp(
+          target.stock_angle_radians, target.counter_angle_radians,
+          target.angle_blend);
+    }
+    state.applied_angle = target.stock_angle_radians;
+  }
+
   state.target_angle = target.angle_radians;
   state.target_blend = target.blend;
-  state.engaged = target.active;
-  const double desired = target.active ? target.angle_radians : 0.0;
-  state.applied_angle = nfs2015_chase::MoveTowards(
-      state.applied_angle, desired, config.rate_radians_per_second * dt);
-  if (!target.active &&
-      std::fabs(state.applied_angle) <
-          0.2 * nfs2015_chase::kRadiansPerDegree) {
-    RestoreWheelPose(context);
+  state.stock_angle = target.stock_angle_radians;
+  state.engaged = target.engaged;
+  state.phase = target.phase;
+
+  if (target.phase != previous_phase) {
+    char message[256]{};
+    std::snprintf(
+        message, sizeof(message),
+        "nfs2015 chase cam: wheel drift %s -> %s speed=%.2f "
+        "stock=%.1f counter=%.1f blend=%.2f",
+        WheelSteerPhaseName(previous_phase), WheelSteerPhaseName(target.phase),
+        speed_mps, state.stock_angle * kRadiansToDegrees,
+        target.counter_angle_radians * kRadiansToDegrees, target.blend);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+  }
+
+  if (!target.active && !state.animation_disabled) {
     return;
   }
 
@@ -8021,6 +8141,22 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
     if (state.settle_ticks > 0) {
       return;
     }
+  }
+
+  const double step =
+      std::isfinite(dt) ? nfs2015_chase::Clamp(dt, 0.0, 0.25) : 0.0;
+  state.applied_angle = nfs2015_chase::MoveTowards(
+      state.applied_angle, target.angle_radians,
+      config.rate_radians_per_second * step);
+
+  // The release blend has reached zero, but the manual wheel may still be
+  // travelling toward the stock angle. Keep the animation parked until that
+  // handoff is complete; restoring earlier is the exit snap.
+  if (!target.active && target.phase == nfs2015_chase::WheelSteerPhase::grip &&
+      std::fabs(state.applied_angle - target.stock_angle_radians) <=
+          config.restore_tolerance_radians) {
+    RestoreWheelPose(context);
+    return;
   }
 
   bool have_all_front_sockets = true;
@@ -8078,14 +8214,19 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   if (wrote_any) {
     if (!state.activation_logged) {
       state.activation_logged = true;
-      char message[224]{};
-      std::snprintf(message, sizeof(message),
-                    "nfs2015 chase cam: visual wheel override active "
-                    "(front=%zu rear=%zu target=%.1f deg applied=%.1f deg "
-                    "max=%.1f)",
-                    state.front_count, state.rear_count,
-                    state.target_angle * kRadiansToDegrees,
-                    state.applied_angle * kRadiansToDegrees, max_degrees);
+      char message[320]{};
+      std::snprintf(
+          message, sizeof(message),
+          "nfs2015 chase cam: visual wheel override active "
+          "(front=%zu rear=%zu phase=%s target=%.1f deg applied=%.1f deg "
+          "stock=%.1f deg counter=%.1f deg blend=%.2f max=%.1f)",
+          state.front_count, state.rear_count,
+          WheelSteerPhaseName(target.phase),
+          state.target_angle * kRadiansToDegrees,
+          state.applied_angle * kRadiansToDegrees,
+          state.stock_angle * kRadiansToDegrees,
+          target.counter_angle_radians * kRadiansToDegrees, target.blend,
+          max_degrees);
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
     }
     state.active = true;
@@ -9197,7 +9338,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   // NFS 2015-style visual countersteer. This writes only the front wheel
   // components' RelativeRotation; it never touches the movement component.
   UpdateWheelSteer(context, vehicle_query.object, world_velocity,
-                   forward_speed, speed_mps, dt);
+                   forward_speed, speed_mps, burnout_sample.steering,
+                   context.burnout_signals.steering_known, dt);
 
   // T2: the tick no longer advances the model - it publishes a car sample and
   // the render thread integrates the springs on its own clock.

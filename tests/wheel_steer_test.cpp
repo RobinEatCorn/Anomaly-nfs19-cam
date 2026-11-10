@@ -8,7 +8,8 @@ namespace {
 using nfs2015_chase::AxisAngle;
 using nfs2015_chase::ComputeSteeredRelativeRotation;
 using nfs2015_chase::ComputeVisualWheelRelativeRotation;
-using nfs2015_chase::ComputeWheelSteerTarget;
+using nfs2015_chase::ComputeWheelSteerAngleFromWorld;
+using nfs2015_chase::AdvanceWheelSteerTarget;
 using nfs2015_chase::Cross;
 using nfs2015_chase::Dot;
 using nfs2015_chase::kDegreesPerRadian;
@@ -22,7 +23,10 @@ using nfs2015_chase::QuatRotate;
 using nfs2015_chase::RemoveWheelSpinTwist;
 using nfs2015_chase::RotatorDegreesFromQuat;
 using nfs2015_chase::Vec3;
+using nfs2015_chase::WheelSteerTarget;
 using nfs2015_chase::WheelSteerConfig;
+using nfs2015_chase::WheelSteerDriftState;
+using nfs2015_chase::WheelSteerPhase;
 
 int failures = 0;
 
@@ -37,51 +41,262 @@ double WrappedDegrees(const double radians) {
   return radians * kDegreesPerRadian;
 }
 
+WheelSteerTarget Step(WheelSteerDriftState& state,
+                      const WheelSteerConfig& config,
+                      const double slip_degrees, const double speed_mps,
+                      const double steering = 0.0,
+                      const bool steering_known = true,
+                      const double dt = 1.0 / 60.0) {
+  const double slip = slip_degrees * kRadiansPerDegree;
+  const Vec3 velocity{std::cos(slip), std::sin(slip), 0.0};
+  return AdvanceWheelSteerTarget(
+      state, {1.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, velocity,
+      speed_mps * std::cos(slip), speed_mps, steering, steering_known, dt,
+      config);
+}
+
 }  // namespace
 
 int main() {
   WheelSteerConfig config;
   config.max_angle_radians = 40.0 * kRadiansPerDegree;
   config.gain = 1.0;
-  config.enter_slip_radians = 8.0 * kRadiansPerDegree;
-  config.full_slip_radians = 25.0 * kRadiansPerDegree;
-  config.rate_radians_per_second = 360.0 * kRadiansPerDegree;
-  config.minimum_speed_mps = 3.0;
+  config.enter_slip_radians = 6.5 * kRadiansPerDegree;
+  config.exit_slip_radians = 3.0 * kRadiansPerDegree;
+  config.full_slip_radians = 35.0 * kRadiansPerDegree;
+  config.rate_radians_per_second = 120.0 * kRadiansPerDegree;
+  config.minimum_speed_mps = 30.0 / nfs2015_chase::kMphPerMetrePerSecond;
+  config.hold_seconds = 0.5;
+  config.exit_hold_seconds = 0.25;
+  config.blend_in_seconds = 0.20;
+  config.blend_out_seconds = 0.30;
+  config.stock_max_angle_radians = 35.0 * kRadiansPerDegree;
+  config.counter_authority_radians = 6.0 * kRadiansPerDegree;
 
-  // NFS-style target: at full blend the wheel points along actual travel.
+  // NFS-style low-speed gate: a 30 degree body slip at 5 m/s is a pivot or a
+  // normal low-speed turn, not a drift. It must leave the stock wheel alone.
   {
-    const double slip = 25.0 * kRadiansPerDegree;
-    const Vec3 velocity{std::cos(slip), std::sin(slip), 0.0};
-    const auto target = ComputeWheelSteerTarget(
-        {1.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, velocity, 20.0, 20.0, false,
-        config);
-    Check(target.active, "25 degree slip should engage");
-    Check(std::fabs(WrappedDegrees(target.angle_radians) - 25.0) < 0.05,
-          "25 degree slip should target 25 degrees");
-    Check(std::fabs(target.blend - 1.0) < 1e-9,
-          "25 degree slip should be full blend");
+    WheelSteerDriftState state;
+    const auto target = Step(state, config, 30.0, 5.0);
+    Check(!target.active, "low-speed slip must not engage");
+    Check(!target.engaged, "low-speed slip must not enter drift");
+    Check(target.phase == WheelSteerPhase::grip,
+          "low-speed slip must stay in grip");
   }
 
-  // The explicit visual clamp still applies above the configured limit.
+  // The NFS entry threshold is 6.5 degrees, with 3 degrees to exit.
   {
-    const double slip = 60.0 * kRadiansPerDegree;
-    const Vec3 velocity{std::cos(slip), std::sin(slip), 0.0};
-    const auto target = ComputeWheelSteerTarget(
-        {1.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, velocity, 20.0, 20.0, false,
-        config);
+    WheelSteerDriftState state;
+    const auto below = Step(state, config, 6.0, 20.0);
+    Check(!below.active, "6.0 degree slip is below the entry threshold");
+    const auto entering = Step(state, config, 7.0, 20.0);
+    Check(entering.engaged, "7.0 degree slip should enter the drift state");
+    Check(entering.phase == WheelSteerPhase::entering,
+          "entry should start in the entering phase");
+    Check(!entering.active,
+          "zero-authority entry must leave the stock animation alone");
+  }
+
+  // The entry blend starts at the stock angle, not at zero.
+  {
+    WheelSteerDriftState state;
+    const auto target = Step(state, config, 7.0, 20.0, 0.5);
+    Check(target.engaged, "steering handoff must have entered the drift");
+    Check(std::fabs(WrappedDegrees(target.stock_angle_radians) - 17.5) <
+              0.01,
+          "positive steering should produce a positive stock angle");
+    Check(std::fabs(target.angle_radians - target.stock_angle_radians) <
+              2.0 * kRadiansPerDegree,
+          "the first entry target must stay close to the stock angle");
+  }
+
+  // A zero countersteer target must preserve the stock steering, not center
+  // the wheel while the driver is still holding a normal turn.
+  {
+    WheelSteerDriftState state;
+    WheelSteerTarget target{};
+    for (int tick = 0; tick < 20; ++tick) {
+      target = Step(state, config, 7.0, 20.0, 0.5, true, 0.05);
+    }
+    Check(!target.active,
+          "zero countersteer must not take over the stock animation");
+    Check(std::fabs(target.angle_radians - target.stock_angle_radians) <
+              1.0 * kRadiansPerDegree,
+          "zero countersteer must preserve the stock angle");
+  }
+
+  // A small countersteer target is not enough to park the stock animation.
+  {
+    WheelSteerDriftState state;
+    WheelSteerTarget target{};
+    for (int tick = 0; tick < 20; ++tick) {
+      target = Step(state, config, 12.0, 20.0, 0.5, true, 0.05);
+    }
+    Check(target.engaged, "12 degree slip should keep the drift state");
+    Check(!target.active,
+          "small countersteer target must not take over the stock animation");
+    Check(std::fabs(target.angle_radians - target.stock_angle_radians) <
+              5.0 * kRadiansPerDegree,
+          "small countersteer target must stay close to the stock angle");
+  }
+
+  // A high slip angle ramps the countersteer target to the visual clamp.
+  {
+    WheelSteerDriftState state;
+    WheelSteerTarget target{};
+    for (int tick = 0; tick < 12; ++tick) {
+      target = Step(state, config, 60.0, 20.0, 0.0, true, 0.05);
+    }
     Check(target.active, "60 degree slip should engage");
     Check(std::fabs(WrappedDegrees(target.angle_radians) - 40.0) < 0.05,
           "60 degree slip should clamp to 40 degrees");
+    Check(std::fabs(target.blend - 1.0) < 1e-9,
+          "60 degree slip should reach full blend");
   }
 
-  // Below the entry threshold the feature stays out of the stock steering.
+  // 25 degrees is past entry but below the 35 degree full-countersteer angle;
+  // the target should be partial, not instantly 25 or 40 degrees.
   {
-    const double slip = 4.0 * kRadiansPerDegree;
-    const Vec3 velocity{std::cos(slip), std::sin(slip), 0.0};
-    const auto target = ComputeWheelSteerTarget(
-        {1.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, velocity, 20.0, 20.0, false,
-        config);
-    Check(!target.active, "4 degree slip should stay inactive");
+    WheelSteerDriftState state;
+    WheelSteerTarget target{};
+    for (int tick = 0; tick < 12; ++tick) {
+      target = Step(state, config, 25.0, 20.0, 0.0, true, 0.05);
+    }
+    const double degrees = WrappedDegrees(target.angle_radians);
+    Check(degrees > 15.0 && degrees < 21.0,
+          "25 degree slip should produce a partial countersteer target");
+  }
+
+  // The drift cannot exit during the 0.5 second lock even if the slip drops.
+  {
+    WheelSteerDriftState state;
+    Step(state, config, 20.0, 20.0, 0.0, true, 0.05);
+    const auto early = Step(state, config, 2.0, 20.0, 0.0, true, 0.1);
+    Check(early.engaged, "drift must hold through the lock window");
+    Check(early.phase == WheelSteerPhase::entering ||
+              early.phase == WheelSteerPhase::drifting,
+          "lock window should stay in a drift phase");
+    const auto locked = Step(state, config, 2.0, 20.0, 0.0, true, 0.25);
+    Check(locked.engaged, "drift must still be locked at 0.4 seconds");
+    const auto later = Step(state, config, 2.0, 20.0, 0.0, true, 0.25);
+    Check(later.phase == WheelSteerPhase::releasing,
+          "slip below 3 degrees should release after the lock");
+    Check(later.active, "release still owns the wheel for the handoff");
+  }
+
+  // Between the exit and entry thresholds the drift stays engaged.
+  {
+    WheelSteerDriftState state;
+    Step(state, config, 10.0, 20.0, 0.0, true, 0.6);
+    const auto between = Step(state, config, 4.0, 20.0, 0.0, true, 0.3);
+    Check(between.engaged,
+          "4 degree slip is above the exit threshold and must stay engaged");
+  }
+
+  // The release phase must keep the last countersteer target while the blend
+  // returns to stock. Recomputing from the zeroed low-speed travel vector would
+  // first point the wheel straight and then back to stock.
+  {
+    WheelSteerDriftState state;
+    WheelSteerTarget engaged{};
+    for (int tick = 0; tick < 12; ++tick) {
+      engaged = Step(state, config, 25.0, 20.0, 0.0, true, 0.05);
+    }
+    const auto release = Step(state, config, 25.0, 5.0, 0.0, true, 0.05);
+    Check(std::fabs(release.angle_radians - engaged.angle_radians) <
+              1e-9,
+          "release must start from the last countersteer target");
+    Check(std::fabs(WrappedDegrees(release.angle_radians)) > 10.0,
+          "release must not zero the countersteer in one tick");
+  }
+
+  // Low speed forces a release, but the release blend still hands the wheel
+  // back through the stock angle instead of snapping.
+  {
+    WheelSteerDriftState state;
+    for (int tick = 0; tick < 12; ++tick) {
+      Step(state, config, 20.0, 20.0, 0.5, true, 0.05);
+    }
+    const auto release = Step(state, config, 20.0, 5.0, 0.5, true, 0.05);
+    Check(!release.engaged, "low speed must release the drift");
+    Check(release.phase == WheelSteerPhase::releasing,
+          "low speed should enter the release phase");
+    Check(release.active, "low speed release must still own the wheel");
+    WheelSteerTarget finished_release = release;
+    for (int tick = 0; tick < 3; ++tick) {
+      finished_release =
+          Step(state, config, 20.0, 5.0, 0.5, true, 0.25);
+    }
+    Check(finished_release.phase == WheelSteerPhase::grip,
+          "low speed release should finish in grip");
+    Check(std::fabs(finished_release.angle_radians -
+                    finished_release.stock_angle_radians) < 1e-9,
+          "finished release target must be the stock angle");
+  }
+
+  // Once the release blend is zero, the pure target no longer requests the
+  // override; the plugin keeps writing until applied reaches the stock angle.
+  {
+    WheelSteerDriftState state;
+    Step(state, config, 10.0, 20.0, 0.0, true, 0.6);
+    Step(state, config, 2.0, 20.0, 0.0, true, 0.5);
+    WheelSteerTarget finished{};
+    for (int tick = 0; tick < 3; ++tick) {
+      finished = Step(state, config, 2.0, 20.0, 0.0, true, 0.25);
+    }
+    Check(!finished.active, "finished release should return to grip");
+    Check(finished.phase == WheelSteerPhase::grip,
+          "finished release should be in grip");
+  }
+
+  // Reverse and unknown steering must not produce a positive-angle handoff.
+  {
+    WheelSteerDriftState state;
+    const auto reverse = AdvanceWheelSteerTarget(
+        state, {1.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}, -5.0,
+        20.0, 0.5, true, 0.05, config);
+    Check(!reverse.active, "reverse must not engage");
+    WheelSteerDriftState unknown_state;
+    const auto unknown = Step(unknown_state, config, 7.0, 20.0, 0.5, false);
+    Check(unknown.stock_angle_radians == 0.0,
+          "unknown steering must use a zero stock estimate");
+  }
+
+  // The final applied-angle clamp is still a pure rate limit.
+  {
+    const double current = -20.0 * kRadiansPerDegree;
+    const double target = 20.0 * kRadiansPerDegree;
+    const double step = nfs2015_chase::MoveTowards(
+        current, target, 120.0 * kRadiansPerDegree / 60.0);
+    Check(std::fabs(WrappedDegrees(step - current) - 2.0) < 1e-9,
+          "rate limit should cap the per-tick angle change");
+  }
+
+  // Stock-angle measurement is used before parking the animation. The axle
+  // is local Y, and a mirrored wheel's 180-degree socket must still read as
+  // zero stock steer.
+  {
+    const Vec3 forward{1.0, 0.0, 0.0};
+    const Vec3 up{0.0, 0.0, 1.0};
+    double angle = 0.0;
+    const Quat right =
+        AxisAngle(up, 10.0 * kRadiansPerDegree);
+    Check(ComputeWheelSteerAngleFromWorld(forward, up, right, angle),
+          "right stock wheel angle should be measurable");
+    Check(std::fabs(WrappedDegrees(angle) - 10.0) < 0.01,
+          "right stock wheel angle should be positive");
+    const Quat left =
+        AxisAngle(up, -10.0 * kRadiansPerDegree);
+    Check(ComputeWheelSteerAngleFromWorld(forward, up, left, angle),
+          "left stock wheel angle should be measurable");
+    Check(std::fabs(WrappedDegrees(angle) + 10.0) < 0.01,
+          "left stock wheel angle should be negative");
+    const Quat mirrored =
+        AxisAngle(up, 180.0 * kRadiansPerDegree);
+    Check(ComputeWheelSteerAngleFromWorld(forward, up, mirrored, angle),
+          "mirrored stock wheel angle should be measurable");
+    Check(std::fabs(WrappedDegrees(angle)) < 0.01,
+          "mirrored wheel should read zero stock steer");
   }
 
   // Feedback loop: UE applies the relative quaternion directly:

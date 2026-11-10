@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 
 namespace nfs2015_chase {
 
@@ -135,61 +136,219 @@ struct WheelSteerConfig final {
   bool enabled{true};
   double max_angle_radians{40.0 * kRadiansPerDegree};
   double gain{1.0};
-  double enter_slip_radians{8.0 * kRadiansPerDegree};
-  double full_slip_radians{25.0 * kRadiansPerDegree};
-  double rate_radians_per_second{360.0 * kRadiansPerDegree};
-  double minimum_speed_mps{3.0};
+  double enter_slip_radians{6.5 * kRadiansPerDegree};
+  double exit_slip_radians{3.0 * kRadiansPerDegree};
+  double full_slip_radians{35.0 * kRadiansPerDegree};
+  double rate_radians_per_second{120.0 * kRadiansPerDegree};
+  double minimum_speed_mps{30.0 / kMphPerMetrePerSecond};
+  double hold_seconds{0.5};
+  double exit_hold_seconds{0.25};
+  double blend_in_seconds{0.20};
+  double blend_out_seconds{0.30};
+  double stock_max_angle_radians{35.0 * kRadiansPerDegree};
+  // A zero countersteer target means "no countersteer yet", not "center the
+  // wheel". At low slip, preserving the stock angle avoids straightening a
+  // driver's full steering input during a normal high-speed turn.
+  double counter_authority_radians{6.0 * kRadiansPerDegree};
+  double restore_tolerance_radians{1.5 * kRadiansPerDegree};
+};
+
+enum class WheelSteerPhase : std::uint8_t {
+  grip = 0,
+  entering,
+  drifting,
+  releasing,
+};
+
+// Persistent part of the visual drift steering state machine. Keeping this
+// separate from the game-memory state makes the timing and hysteresis testable
+// without a running game.
+struct WheelSteerDriftState final {
+  WheelSteerPhase phase{WheelSteerPhase::grip};
+  double hold_seconds{};
+  double exit_hold_seconds{};
+  double blend{};
+  // Last countersteer target from a valid drift tick. The release phase keeps
+  // using it while the blend returns to the stock angle; recomputing it from a
+  // zeroed low-speed travel vector would first steer the wheel straight and
+  // then back to stock.
+  double counter_angle{};
 };
 
 struct WheelSteerTarget final {
+  // True while the plugin should take over the wheel pose. It waits until the
+  // countersteer target has meaningful authority, so a normal turn does not
+  // freeze the stock animation just because the travel-angle state entered a
+  // drift. Once taken over, the plugin keeps the pose through release.
   bool active{};
+  // True only while the drift state machine is entering or holding a drift.
+  bool engaged{};
+  // Final target after blending the stock angle and the countersteer angle.
   double angle_radians{};
+  // Raw velocity-facing countersteer target, before the stock-angle blend.
+  double counter_angle_radians{};
+  // The stock front-wheel estimate from the player's steering input.
+  double stock_angle_radians{};
+  // Blend after both the state blend and counter-authority gate.
+  double angle_blend{};
   double blend{};
+  WheelSteerPhase phase{WheelSteerPhase::grip};
 };
 
-// Target angle of the front wheel forward direction in the car's ground plane.
-// `world_velocity` is the actual travel direction, so at full blend this points
-// the wheels where the car is really going rather than where the driver points
-// the steering wheel.
-[[nodiscard]] inline WheelSteerTarget ComputeWheelSteerTarget(
-    const Vec3 car_forward, const Vec3 car_up, const Vec3 world_velocity,
-    const double forward_speed_mps, const double speed_mps,
-    const bool engaged, const WheelSteerConfig& config) noexcept {
-  WheelSteerTarget result{};
-  if (!config.enabled || !std::isfinite(speed_mps) ||
-      speed_mps < config.minimum_speed_mps || forward_speed_mps <= 0.1) {
-    return result;
+// Advance the NFS-style drift state machine and return the visual front-wheel
+// target for this tick.
+//
+// The NFS 2015 entry gate is speed plus rear slip. NTE does not expose a
+// reliable rear tire slip value here, so the body travel angle is used as the
+// fallback. The 30 mph speed gate is what keeps a low-speed U-turn or a
+// standstill donut on the stock steering: below that speed the car is not in a
+// drift, even if its yaw and velocity directions differ.
+//
+// `steering_input` is the raw player steering, -1..1, positive to the right in
+// UE axes. It is used for the stock-angle handoff, not for the countersteer
+// target. The countersteer target still comes from the actual travel direction.
+[[nodiscard]] inline WheelSteerTarget AdvanceWheelSteerTarget(
+    WheelSteerDriftState& state, const Vec3 car_forward, const Vec3 car_up,
+    const Vec3 world_velocity, const double forward_speed_mps,
+    const double speed_mps, const double steering_input,
+    const bool steering_known, const double dt,
+    const WheelSteerConfig& config) noexcept {
+  WheelSteerTarget result;
+  result.stock_angle_radians =
+      steering_known
+          ? Clamp(steering_input, -1.0, 1.0) *
+                config.stock_max_angle_radians
+          : 0.0;
+
+  const double step = std::isfinite(dt) ? Clamp(dt, 0.0, 0.25) : 0.0;
+
+  // The speed gate is the NFS 2015 `Minimum_speed_to_enter_drift` (30 mph).
+  // Requiring a positive forward component also excludes reverse and most
+  // handbrake pivots at a standstill.
+  bool valid = config.enabled && std::isfinite(speed_mps) &&
+               std::isfinite(forward_speed_mps) &&
+               speed_mps >= config.minimum_speed_mps &&
+               forward_speed_mps > 0.1;
+
+  double travel_angle = 0.0;
+  if (valid) {
+    const Vec3 up = Normalize(car_up);
+    Vec3 forward = Sub(car_forward, Mul(up, Dot(car_forward, up)));
+    Vec3 travel = Sub(world_velocity, Mul(up, Dot(world_velocity, up)));
+    if (Length(forward) < 1e-6 || Length(travel) < 1e-6) {
+      valid = false;
+    } else {
+      forward = Normalize(forward);
+      travel = Normalize(travel);
+      travel_angle =
+          std::atan2(Dot(up, Cross(forward, travel)), Dot(forward, travel));
+    }
   }
-  const Vec3 up = Normalize(car_up);
-  Vec3 forward = Sub(car_forward, Mul(up, Dot(car_forward, up)));
-  if (Length(forward) < 1e-6) {
-    return result;
+
+  const double absolute_slip = std::fabs(travel_angle);
+  const bool start_requested =
+      valid && absolute_slip >= config.enter_slip_radians;
+  const bool below_exit =
+      valid && absolute_slip < config.exit_slip_radians;
+
+  const double full_slip = (std::max)(
+      config.full_slip_radians, config.enter_slip_radians + 1e-6);
+  const double normalized_slip =
+      Clamp((absolute_slip - config.enter_slip_radians) /
+                (full_slip - config.enter_slip_radians),
+            0.0, 1.0);
+  const double counter_scale =
+      normalized_slip * normalized_slip * (3.0 - 2.0 * normalized_slip);
+  const double raw_counter =
+      Clamp(travel_angle * config.gain * counter_scale,
+            -config.max_angle_radians, config.max_angle_radians);
+
+  switch (state.phase) {
+    case WheelSteerPhase::grip:
+      if (start_requested) {
+        state.phase = WheelSteerPhase::entering;
+        state.hold_seconds = 0.0;
+        state.exit_hold_seconds = 0.0;
+        state.blend = 0.0;
+        state.counter_angle = raw_counter;
+      }
+      break;
+
+    case WheelSteerPhase::entering:
+    case WheelSteerPhase::drifting:
+      state.hold_seconds += step;
+      // Freeze the last countersteer target as soon as the slip falls below
+      // the exit threshold. Updating it to zero during the exit-hold window
+      // would first steer the wheel straight, then send it to the stock angle
+      // during the release blend.
+      if (valid && !below_exit) {
+        state.counter_angle = raw_counter;
+      }
+      if (!valid) {
+        // Low speed, reverse or lost ground speed is an immediate release.
+        // The blend still runs, so the visual wheel does not snap back.
+        state.phase = WheelSteerPhase::releasing;
+      } else {
+        if (below_exit) {
+          state.exit_hold_seconds += step;
+        } else {
+          state.exit_hold_seconds = 0.0;
+        }
+        const bool exit_allowed =
+            state.hold_seconds >= config.hold_seconds &&
+            state.exit_hold_seconds >= config.exit_hold_seconds;
+        if (exit_allowed) {
+          state.phase = WheelSteerPhase::releasing;
+        } else {
+          state.blend = MoveTowards(
+              state.blend, 1.0,
+              step / (std::max)(config.blend_in_seconds, 1e-6));
+          if (state.phase == WheelSteerPhase::entering &&
+              state.blend >= 1.0 - 1e-9) {
+            state.phase = WheelSteerPhase::drifting;
+          }
+        }
+      }
+      break;
+
+    case WheelSteerPhase::releasing:
+      state.blend = MoveTowards(
+          state.blend, 0.0,
+          step / (std::max)(config.blend_out_seconds, 1e-6));
+      if (state.blend <= 1e-9) {
+        state.blend = 0.0;
+        state.phase = WheelSteerPhase::grip;
+        state.hold_seconds = 0.0;
+        state.exit_hold_seconds = 0.0;
+        state.counter_angle = 0.0;
+      }
+      break;
   }
-  forward = Normalize(forward);
-  Vec3 travel = Sub(world_velocity, Mul(up, Dot(world_velocity, up)));
-  if (Length(travel) < 1e-6) {
-    return result;
-  }
-  travel = Normalize(travel);
-  const double angle =
-      std::atan2(Dot(up, Cross(forward, travel)), Dot(forward, travel));
-  const double absolute_angle = std::fabs(angle);
-  const double enter = config.enter_slip_radians;
-  const double release = enter * 0.65;
-  if ((!engaged && absolute_angle < enter) ||
-      (engaged && absolute_angle < release)) {
-    return result;
-  }
-  const double full = (std::max)(config.full_slip_radians, enter + 1e-6);
-  const double normalized =
-      Clamp((absolute_angle - enter) / (full - enter), 0.0, 1.0);
-  const double blend = normalized * normalized * (3.0 - 2.0 * normalized);
-  const double limited =
-      Clamp(angle * config.gain, -config.max_angle_radians,
-            config.max_angle_radians);
-  result.angle_radians = limited * blend;
-  result.blend = blend;
-  result.active = std::fabs(result.angle_radians) > 1e-4;
+
+  result.counter_angle_radians = state.counter_angle;
+
+  const double smooth_blend =
+      state.blend * state.blend * (3.0 - 2.0 * state.blend);
+  const double normalized_authority = Clamp(
+      std::fabs(result.counter_angle_radians) /
+          (std::max)(config.counter_authority_radians, 1e-6),
+      0.0, 1.0);
+  const double counter_authority =
+      normalized_authority * normalized_authority *
+      (3.0 - 2.0 * normalized_authority);
+  result.angle_blend = smooth_blend * counter_authority;
+  result.angle_radians =
+      Lerp(result.stock_angle_radians, result.counter_angle_radians,
+           result.angle_blend);
+  result.blend = state.blend;
+  result.phase = state.phase;
+  // Do not park the stock animation for a drift-state tick whose countersteer
+  // target is still effectively zero. That would freeze the stock wheels
+  // during a normal high-speed turn without producing any visible countersteer.
+  result.active = state.phase != WheelSteerPhase::grip &&
+                  state.blend * counter_authority > 0.35;
+  result.engaged = state.phase == WheelSteerPhase::entering ||
+                   state.phase == WheelSteerPhase::drifting;
   return result;
 }
 
@@ -222,6 +381,36 @@ struct WheelSteerTarget final {
   relative_new = QuatNormalize(QuatMul(delta_rotation, relative_old));
   return std::isfinite(relative_new.x) && std::isfinite(relative_new.y) &&
          std::isfinite(relative_new.z) && std::isfinite(relative_new.w);
+}
+
+// Measure the stock front-wheel angle from its world rotation. This is used
+// once, before the animation controller is parked, so the first manual pose
+// starts from the wheel's real stock angle instead of a zero-angle guess.
+// The wheel axle is local Y. A mirrored wheel can have the opposite axle sign,
+// so the axle is normalized to the car's right side before the angle is taken.
+[[nodiscard]] inline bool ComputeWheelSteerAngleFromWorld(
+    const Vec3 car_forward, const Vec3 car_up, const Quat wheel_world,
+    double& angle_radians) noexcept {
+  const Vec3 up = Normalize(car_up);
+  Vec3 forward = Sub(car_forward, Mul(up, Dot(car_forward, up)));
+  if (Length(forward) < 1e-6) {
+    return false;
+  }
+  forward = Normalize(forward);
+  const Vec3 right = Normalize(Cross(up, forward));
+  Vec3 axle = QuatRotate(wheel_world, {0.0, 1.0, 0.0});
+  axle = Sub(axle, Mul(up, Dot(axle, up)));
+  if (Length(axle) < 1e-6) {
+    return false;
+  }
+  axle = Normalize(axle);
+  if (Dot(axle, right) < 0.0) {
+    axle = Mul(axle, -1.0);
+  }
+  const double cosine = Clamp(Dot(axle, right), -1.0, 1.0);
+  const double sine = Dot(axle, forward);
+  angle_radians = std::atan2(-sine, cosine);
+  return std::isfinite(angle_radians);
 }
 
 // Compose the visual wheel rotation for the parked-wheel-animation mode.
