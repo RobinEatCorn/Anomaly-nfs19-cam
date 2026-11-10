@@ -199,6 +199,13 @@ constexpr double kMaximumWheelSteerFullSlipDegrees = 60.0;
 constexpr double kDefaultWheelSteerRateDegreesPerSecond = 120.0;
 constexpr double kMinimumWheelSteerRateDegreesPerSecond = 60.0;
 constexpr double kMaximumWheelSteerRateDegreesPerSecond = 1200.0;
+// 2.0.2 shipped these three values together. 2.0.3 changes the scale (front
+// axle target, 40 degree full slip, 32 degree cap, 120 deg/s). Only an
+// untouched old trio is migrated; a user who deliberately changed one field
+// keeps their saved values.
+constexpr double kLegacyWheelSteerMaxDegrees = 40.0;
+constexpr double kLegacyWheelSteerFullSlipDegrees = 25.0;
+constexpr double kLegacyWheelSteerRateDegreesPerSecond = 360.0;
 // NFS 2015's 30 mph gate is tuned around faster cars. NTE tends to drift at
 // lower speeds, so the entry gate is 40 km/h. This is deliberately entry-only:
 // once the drift state is engaged, speed is not an exit condition.
@@ -5766,6 +5773,7 @@ bool LoadSettings(Context &context) noexcept {
       kDefaultWheelSteerFullSlipDegrees;
   double wheel_steer_rate_degrees_per_second =
       kDefaultWheelSteerRateDegreesPerSecond;
+  bool migrated_wheel_steer_defaults = false;
   bool roll_only_in_drift = true;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
@@ -5832,6 +5840,18 @@ bool LoadSettings(Context &context) noexcept {
   static_cast<void>(JsonObjectNumber(
       json, root, "wheelSteerRateDegreesPerSecond",
       wheel_steer_rate_degrees_per_second));
+  if (wheel_steer_max_degrees == kLegacyWheelSteerMaxDegrees &&
+      wheel_steer_full_slip_degrees ==
+          kLegacyWheelSteerFullSlipDegrees &&
+      wheel_steer_rate_degrees_per_second ==
+          kLegacyWheelSteerRateDegreesPerSecond) {
+    wheel_steer_max_degrees = kDefaultWheelSteerMaxDegrees;
+    wheel_steer_full_slip_degrees =
+        kDefaultWheelSteerFullSlipDegrees;
+    wheel_steer_rate_degrees_per_second =
+        kDefaultWheelSteerRateDegreesPerSecond;
+    migrated_wheel_steer_defaults = true;
+  }
   static_cast<void>(JsonObjectBoolean(json, root, "rollOnlyInDrift",
                                       roll_only_in_drift));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticFlatPose",
@@ -5959,6 +5979,9 @@ bool LoadSettings(Context &context) noexcept {
   context.diagnostic_skip_rotation.store(diagnostic_skip_rotation,
                                          std::memory_order_release);
   context.fov_enabled.store(fov_enabled, std::memory_order_release);
+  if (migrated_wheel_steer_defaults) {
+    MarkSettingsDirty(context);
+  }
   return true;
 }
 

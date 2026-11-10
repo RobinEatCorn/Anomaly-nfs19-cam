@@ -293,9 +293,11 @@ struct WheelSteerTravel final {
 //
 // The speed gate is entry-only. Once `turn_in`, `entering`, `drifting` or
 // `releasing` is active, speed and forward speed are not exit conditions. A
-// large drift can make `forward_speed_mps` approach zero while the total
-// velocity is still high; that is a normal part of the drift, not a reason to
-// straighten the wheel.
+// large drift can make `forward_speed_mps` approach zero or go negative while
+// the total velocity is still high; that is a normal part of the drift, not a
+// reason to straighten the wheel. `reversing` only blocks entry; it is not an
+// exit gate, because a >90 degree slide can look like reverse to a signed
+// forward-speed signal.
 [[nodiscard]] inline WheelSteerTarget AdvanceWheelSteerTarget(
     WheelSteerDriftState& state, const double front_travel_angle,
     const double rear_travel_angle,
@@ -405,7 +407,7 @@ struct WheelSteerTravel final {
       } else {
         state.exit_hold_seconds = 0.0;
       }
-      if (reversing || standstill_expired) {
+      if (standstill_expired) {
         enter_release();
       } else if (below_exit &&
                  state.hold_seconds >= config.hold_seconds &&
@@ -436,7 +438,7 @@ struct WheelSteerTravel final {
       } else {
         state.exit_hold_seconds = 0.0;
       }
-      if (reversing || standstill_expired) {
+      if (standstill_expired) {
         enter_release();
       } else if (below_exit &&
                  state.hold_seconds >= config.hold_seconds &&

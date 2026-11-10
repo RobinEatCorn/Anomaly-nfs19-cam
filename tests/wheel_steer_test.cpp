@@ -319,6 +319,37 @@ int main() {
           "near-zero forward drift must keep countersteering");
   }
 
+  // An entry that immediately collapses must keep the entry counter target
+  // for the release blend instead of zeroing it on the below-exit tick.
+  {
+    WheelSteerDriftState state;
+    const auto first = Step(state, config, 28.0, 20.0, 0.0, true, 0.05);
+    Check(first.engaged, "28 degree entry should engage");
+    const double entry_counter = first.counter_angle_radians;
+    const auto collapsed = Step(state, config, 0.2, 20.0, 0.0, true, 0.05);
+    Check(collapsed.phase == WheelSteerPhase::entering ||
+              collapsed.phase == WheelSteerPhase::drifting,
+          "entry collapse should stay in a drift phase before release");
+    Check(std::fabs(collapsed.counter_angle_radians - entry_counter) < 1e-9,
+          "entry collapse must preserve the last counter target");
+  }
+
+  // A >90 degree slide can make the signed forward speed negative. That is
+  // not reverse gear and must not release an already engaged drift.
+  {
+    WheelSteerDriftState state;
+    for (int tick = 0; tick < 12; ++tick) {
+      Step(state, config, 30.0, 20.0, 0.0, true, 0.05);
+    }
+    const auto spun = AdvanceWheelSteerTarget(
+        state, 30.0 * kRadiansPerDegree, 30.0 * kRadiansPerDegree, 20.0,
+        -8.0, 0.0, true, true, 0.05, config);
+    Check(spun.engaged,
+          "negative forward speed during a big slide must stay engaged");
+    Check(std::fabs(WrappedDegrees(spun.angle_radians)) > 5.0,
+          "big slide must keep countersteering even if forward speed is negative");
+  }
+
   // Only a truly degenerate velocity vector uses the standstill grace. It
   // holds the last target briefly and then releases; it is not a speed floor.
   {

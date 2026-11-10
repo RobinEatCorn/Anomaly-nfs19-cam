@@ -330,7 +330,8 @@ engaged     = turn_in / entering / drifting / releasing
 - **一旦进入 turn_in/entering/drifting，不再因为速度、前向速度下降而退出**；
 - 漂移角接近 90° 时 `forward_speed` 接近 0 是正常现象，不能作为退出条件；
 - 维持阶段只由后轴滑移角低于 `exit_slip` 并持续 `exit_hold` 决定退出；
-- 倒车、腾空、失去抓地/碰撞等物理失效仍然退出；
+- 倒车只阻止进入；已经进入的 drift 不因 signed forward speed 变负而退出，因为大角度
+  漂移（>90°）本身就会让前向速度变负；腾空、失去抓地/碰撞等物理失效仍然退出；
 - 释放后设置 0.5s 的再进入冷却，避免真正退出后在阈值附近来回闪断。
 
 推荐值：
@@ -658,5 +659,9 @@ nfs2015-research/NFS15Revival/.../RevivalDriftComponent.cpp
   `wheelSteerRateDegreesPerSecond = 120°/s`。
 - 进入/退出使用后轴滑移；反打目标使用前轴中心速度；两前轮仍共用同一视觉角。
 - 真正退出后 `0.5s` 再进入冷却，防止滑移阈值附近闪烁。
-- `tests/wheel_steer_test.cpp` 已覆盖入弯、近零前向速度、低速不退出、前轴修正、
-  `turn_in` 最小保持和默认参数。
+- `reversing` 只作为进入门槛；已进入的 drift 不因 signed forward speed 变负或
+  `context.reversing` 而释放，避免 >90° 大角度漂移被误判为倒车。
+- 旧配置中三项旧默认值（40° / 25° / 360°/s）会一次性迁移为 32° / 40° / 120°/s；
+  只改过其中一项的配置不会被覆盖。
+- `tests/wheel_steer_test.cpp` 已覆盖入弯、近零前向速度、低速不退出、倒车不退出已进入
+  drift、前轴修正、`turn_in` 最小保持和默认参数。
