@@ -63,7 +63,7 @@
 
 旧配置缺少新字段时继续使用默认值。旧版三项默认值（`wheelSteerMaxDegrees=40`、
 `wheelSteerFullSlipDegrees=25`、`wheelSteerRateDegreesPerSecond=360`）如果同时存在，
-会一次性迁移为 `32` / `40` / `120`；只改过其中一项的配置保留用户保存值。
+加载时会迁移为 `32` / `40` / `120`；只改过其中一项的配置保留用户保存值。
 
 ## 测试
 

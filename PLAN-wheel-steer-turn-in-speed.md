@@ -661,7 +661,7 @@ nfs2015-research/NFS15Revival/.../RevivalDriftComponent.cpp
 - 真正退出后 `0.5s` 再进入冷却，防止滑移阈值附近闪烁。
 - `reversing` 只作为进入门槛；已进入的 drift 不因 signed forward speed 变负或
   `context.reversing` 而释放，避免 >90° 大角度漂移被误判为倒车。
-- 旧配置中三项旧默认值（40° / 25° / 360°/s）会一次性迁移为 32° / 40° / 120°/s；
+- 旧配置中三项旧默认值（40° / 25° / 360°/s）加载时会迁移为 32° / 40° / 120°/s；
   只改过其中一项的配置不会被覆盖。
 - `tests/wheel_steer_test.cpp` 已覆盖入弯、近零前向速度、低速不退出、倒车不退出已进入
   drift、前轴修正、`turn_in` 最小保持和默认参数。

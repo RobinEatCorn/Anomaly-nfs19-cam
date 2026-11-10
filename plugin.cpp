@@ -5773,7 +5773,6 @@ bool LoadSettings(Context &context) noexcept {
       kDefaultWheelSteerFullSlipDegrees;
   double wheel_steer_rate_degrees_per_second =
       kDefaultWheelSteerRateDegreesPerSecond;
-  bool migrated_wheel_steer_defaults = false;
   bool roll_only_in_drift = true;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
@@ -5850,7 +5849,6 @@ bool LoadSettings(Context &context) noexcept {
         kDefaultWheelSteerFullSlipDegrees;
     wheel_steer_rate_degrees_per_second =
         kDefaultWheelSteerRateDegreesPerSecond;
-    migrated_wheel_steer_defaults = true;
   }
   static_cast<void>(JsonObjectBoolean(json, root, "rollOnlyInDrift",
                                       roll_only_in_drift));
@@ -5979,9 +5977,6 @@ bool LoadSettings(Context &context) noexcept {
   context.diagnostic_skip_rotation.store(diagnostic_skip_rotation,
                                          std::memory_order_release);
   context.fov_enabled.store(fov_enabled, std::memory_order_release);
-  if (migrated_wheel_steer_defaults) {
-    MarkSettingsDirty(context);
-  }
   return true;
 }
 
