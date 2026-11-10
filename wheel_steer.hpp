@@ -143,7 +143,8 @@ struct WheelSteerConfig final {
   // NFS 2015 only checks this speed when entering a drift. Once the state
   // machine is engaged, speed is not an exit condition; a large drift angle
   // can make forward speed approach zero while the car is still sliding fast.
-  double entry_speed_mps{40.0 / 3.6};
+  // The plugin exposes this as a km/h slider with a 54 km/h default.
+  double entry_speed_mps{54.0 / 3.6};
   double hold_seconds{0.5};
   double exit_hold_seconds{0.25};
   double blend_in_seconds{0.20};

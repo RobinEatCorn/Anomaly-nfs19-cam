@@ -81,7 +81,7 @@ int main() {
   config.exit_slip_radians = 3.0 * kRadiansPerDegree;
   config.full_slip_radians = 40.0 * kRadiansPerDegree;
   config.rate_radians_per_second = 120.0 * kRadiansPerDegree;
-  config.entry_speed_mps = 40.0 / 3.6;
+  config.entry_speed_mps = 54.0 / 3.6;
   config.hold_seconds = 0.5;
   config.exit_hold_seconds = 0.25;
   config.blend_in_seconds = 0.20;
@@ -105,6 +105,28 @@ int main() {
     Check(!target.engaged, "low-speed slip must not enter drift");
     Check(target.phase == WheelSteerPhase::grip,
           "low-speed slip must stay in grip");
+  }
+
+  // The production gate defaults to 54 km/h and is entry-only. Just below
+  // the gate the stock animation must stay in control; just above it the
+  // same slip and steering can engage.
+  {
+    WheelSteerDriftState below_state;
+    const auto below = Step(below_state, config, 20.0, 53.0 / 3.6);
+    Check(!below.active, "53 km/h must stay below the default entry gate");
+
+    WheelSteerDriftState above_state;
+    const auto above = Step(above_state, config, 20.0, 54.5 / 3.6);
+    Check(above.active, "54.5 km/h should pass the default entry gate");
+    Check(above.engaged, "the default entry gate must engage the drift state");
+
+    WheelSteerConfig lowered = config;
+    lowered.entry_speed_mps = 40.0 / 3.6;
+    WheelSteerDriftState lowered_state;
+    const auto lowered_target =
+        Step(lowered_state, lowered, 20.0, 45.0 / 3.6);
+    Check(lowered_target.active,
+          "the configurable entry speed should lower the gate");
   }
 
   // The NFS entry threshold is 6.5 degrees, with 3 degrees to exit. A target
@@ -522,7 +544,8 @@ int main() {
   }
 
   // The production defaults follow the NFS 2015 steering scale: a 40 degree
-  // drift-angle reference and a conservative 32 degree visual countersteer.
+  // drift-angle reference, a conservative 32 degree visual countersteer, and
+  // the tunable 54 km/h entry gate.
   {
     const WheelSteerConfig defaults;
     Check(std::fabs(WrappedDegrees(defaults.max_angle_radians) - 32.0) <
@@ -531,8 +554,8 @@ int main() {
     Check(std::fabs(WrappedDegrees(defaults.full_slip_radians) - 40.0) <
               0.01,
           "default full countersteer slip should be 40 degrees");
-    Check(std::fabs(defaults.entry_speed_mps - 40.0 / 3.6) < 1e-9,
-          "default entry speed should be 40 km/h");
+    Check(std::fabs(defaults.entry_speed_mps - 54.0 / 3.6) < 1e-9,
+          "default entry speed should be 54 km/h");
   }
 
   // Front-axle travel differs from body-centre travel by omega x r. With a

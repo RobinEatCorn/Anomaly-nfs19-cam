@@ -134,8 +134,9 @@ constexpr double kDefaultShakeScale = 1.0;
 constexpr double kMinimumShakeScale = 0.0;
 constexpr double kMaximumShakeScale = 2.0;
 // Burnout close-up defaults. These mirror BurnoutShotConfig so the persisted
-// settings and the pure camera model agree when a field is absent.
-constexpr bool kDefaultBurnoutEnabled = true;
+// settings and the pure camera model agree when a field is absent. The effect
+// is opt-in so a fresh install does not hijack the chase camera on a launch.
+constexpr bool kDefaultBurnoutEnabled = false;
 constexpr double kDefaultBurnoutEntryDelay = 0.5;
 constexpr double kMinimumBurnoutEntryDelay = 0.0;
 constexpr double kMaximumBurnoutEntryDelay = 2.0;
@@ -183,9 +184,9 @@ constexpr double kMinimumSlopeRest = 0.0;
 constexpr double kMaximumSlopeRest = 4.0;
 // NFS 2015-style visual front-wheel countersteer. The visual clamp stays
 // explicit so the front wheel cannot point sideways at a large slip angle.
-// NFS 2015's 30 mph gate is tuned around faster cars; NTE uses a 40 km/h entry
-// gate, and that gate is entry-only. Once a drift is engaged, low speed and
-// low forward speed are not exit conditions.
+// NFS 2015's 30 mph gate is tuned around faster cars; NTE defaults to a
+// 54 km/h entry gate, exposed as a slider. That gate is entry-only: once a
+// drift is engaged, low speed and low forward speed are not exit conditions.
 constexpr bool kDefaultWheelSteerEnabled = true;
 constexpr double kDefaultWheelSteerMaxDegrees = 32.0;
 constexpr double kMinimumWheelSteerMaxDegrees = 20.0;
@@ -207,9 +208,12 @@ constexpr double kLegacyWheelSteerMaxDegrees = 40.0;
 constexpr double kLegacyWheelSteerFullSlipDegrees = 25.0;
 constexpr double kLegacyWheelSteerRateDegreesPerSecond = 360.0;
 // NFS 2015's 30 mph gate is tuned around faster cars. NTE tends to drift at
-// lower speeds, so the entry gate is 40 km/h. This is deliberately entry-only:
-// once the drift state is engaged, speed is not an exit condition.
-constexpr double kWheelSteerEntrySpeedMps = 40.0 / 3.6;
+// lower speeds, so the default entry gate is 54 km/h and the panel exposes it
+// as a slider. This is deliberately entry-only: once the drift state is
+// engaged, speed is not an exit condition.
+constexpr double kDefaultWheelSteerEntrySpeedKmh = 54.0;
+constexpr double kMinimumWheelSteerEntrySpeedKmh = 20.0;
+constexpr double kMaximumWheelSteerEntrySpeedKmh = 160.0;
 constexpr double kWheelSteerEnterSlipDegrees = 6.5;
 constexpr double kWheelSteerExitSlipDegrees = 3.0;
 constexpr double kWheelSteerHoldSeconds = 0.5;
@@ -612,6 +616,7 @@ constexpr std::string_view kSettingsSchema = R"json(
     "burnoutEntrySpeed":{"type":"number","minimum":0.0,"maximum":10.0},
     "burnoutHoldSpeed":{"type":"number","minimum":0.0,"maximum":20.0},
     "wheelSteerEnabled":{"type":"boolean"},
+    "wheelSteerEntrySpeedKmh":{"type":"number","minimum":20.0,"maximum":160.0},
     "wheelSteerMaxDegrees":{"type":"number","minimum":20.0,"maximum":50.0},
     "wheelSteerGain":{"type":"number","minimum":0.5,"maximum":1.5},
     "wheelSteerFullSlipDegrees":{"type":"number","minimum":10.0,"maximum":60.0},
@@ -1710,6 +1715,7 @@ struct DisplayState final {
   std::uint32_t wheel_steer_wheels{};
   double wheel_steer_angle_degrees{};
   double wheel_steer_target_degrees{};
+  double wheel_steer_entry_speed_kmh{kDefaultWheelSteerEntrySpeedKmh};
   double wheel_steer_max_degrees{kDefaultWheelSteerMaxDegrees};
   double wheel_steer_gain{kDefaultWheelSteerGain};
   double wheel_steer_full_slip_degrees{kDefaultWheelSteerFullSlipDegrees};
@@ -2067,6 +2073,8 @@ struct Context final {
   // Burnout close-up settings. `burnoutShake` is separate from the chase shake
   // so the two cameras can be tuned independently.
   std::atomic_bool wheel_steer_enabled{kDefaultWheelSteerEnabled};
+  std::atomic<double> wheel_steer_entry_speed_kmh{
+      kDefaultWheelSteerEntrySpeedKmh};
   std::atomic<double> wheel_steer_max_degrees{kDefaultWheelSteerMaxDegrees};
   std::atomic<double> wheel_steer_gain{kDefaultWheelSteerGain};
   std::atomic<double> wheel_steer_full_slip_degrees{
@@ -5250,8 +5258,12 @@ bool BurnoutSettingsValid(const double entry_delay, const double entry_time,
 
 bool WheelSteerSettingsValid(const double max_degrees, const double gain,
                              const double full_slip_degrees,
-                             const double rate_degrees_per_second) noexcept {
-  return std::isfinite(max_degrees) &&
+                             const double rate_degrees_per_second,
+                             const double entry_speed_kmh) noexcept {
+  return std::isfinite(entry_speed_kmh) &&
+         entry_speed_kmh >= kMinimumWheelSteerEntrySpeedKmh &&
+         entry_speed_kmh <= kMaximumWheelSteerEntrySpeedKmh &&
+         std::isfinite(max_degrees) &&
          max_degrees >= kMinimumWheelSteerMaxDegrees &&
          max_degrees <= kMaximumWheelSteerMaxDegrees &&
          std::isfinite(gain) && gain >= kMinimumWheelSteerGain &&
@@ -5358,6 +5370,8 @@ bool PersistSettings(Context &context) noexcept {
       context.burnout_hold_speed.load(std::memory_order_acquire);
   const bool wheel_steer_enabled =
       context.wheel_steer_enabled.load(std::memory_order_acquire);
+  const double wheel_steer_entry_speed_kmh =
+      context.wheel_steer_entry_speed_kmh.load(std::memory_order_acquire);
   const double wheel_steer_max_degrees =
       context.wheel_steer_max_degrees.load(std::memory_order_acquire);
   const double wheel_steer_gain =
@@ -5413,7 +5427,8 @@ bool PersistSettings(Context &context) noexcept {
                             burnout_entry_speed, burnout_hold_speed) ||
       !WheelSteerSettingsValid(wheel_steer_max_degrees, wheel_steer_gain,
                                wheel_steer_full_slip_degrees,
-                               wheel_steer_rate_degrees_per_second) ||
+                               wheel_steer_rate_degrees_per_second,
+                               wheel_steer_entry_speed_kmh) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
     // A UI write landed while the fields were being read; keep the revision
     // unpersisted so the next tick writes a coherent document.
@@ -5498,6 +5513,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, burnout_hold_speed) &&
       AppendText(cursor, end, ",\"wheelSteerEnabled\":") &&
       AppendText(cursor, end, wheel_steer_enabled ? "true" : "false") &&
+      AppendText(cursor, end, ",\"wheelSteerEntrySpeedKmh\":") &&
+      AppendNumber(cursor, end, wheel_steer_entry_speed_kmh) &&
       AppendText(cursor, end, ",\"wheelSteerMaxDegrees\":") &&
       AppendNumber(cursor, end, wheel_steer_max_degrees) &&
       AppendText(cursor, end, ",\"wheelSteerGain\":") &&
@@ -5583,6 +5600,8 @@ void SetDefaults(Context &context) noexcept {
                                    std::memory_order_release);
   context.wheel_steer_enabled.store(kDefaultWheelSteerEnabled,
                                     std::memory_order_release);
+  context.wheel_steer_entry_speed_kmh.store(
+      kDefaultWheelSteerEntrySpeedKmh, std::memory_order_release);
   context.wheel_steer_max_degrees.store(kDefaultWheelSteerMaxDegrees,
                                         std::memory_order_release);
   context.wheel_steer_gain.store(kDefaultWheelSteerGain,
@@ -5722,7 +5741,7 @@ bool LoadSettings(Context &context) noexcept {
   const AnomalyJsonServiceV1 &json = *context.json;
   std::uint32_t kind{};
   std::size_t field_count{};
-  // The schema has 42 properties today. Keep headroom so a future optional
+  // The schema has 48 properties today. Keep headroom so a future optional
   // field does not make existing documents unreadable.
   if (json.kind(json.user, root, &kind).code != ANOMALY_STATUS_V1_OK ||
       kind != ANOMALY_JSON_V1_OBJECT ||
@@ -5774,6 +5793,8 @@ bool LoadSettings(Context &context) noexcept {
   double burnout_entry_speed = kDefaultBurnoutEntrySpeed;
   double burnout_hold_speed = kDefaultBurnoutHoldSpeed;
   bool wheel_steer_enabled = kDefaultWheelSteerEnabled;
+  double wheel_steer_entry_speed_kmh =
+      kDefaultWheelSteerEntrySpeedKmh;
   double wheel_steer_max_degrees = kDefaultWheelSteerMaxDegrees;
   double wheel_steer_gain = kDefaultWheelSteerGain;
   double wheel_steer_full_slip_degrees =
@@ -5837,6 +5858,8 @@ bool LoadSettings(Context &context) noexcept {
                                      burnout_hold_speed));
   static_cast<void>(JsonObjectBoolean(json, root, "wheelSteerEnabled",
                                       wheel_steer_enabled));
+  static_cast<void>(JsonObjectNumber(json, root, "wheelSteerEntrySpeedKmh",
+                                     wheel_steer_entry_speed_kmh));
   static_cast<void>(JsonObjectNumber(json, root, "wheelSteerMaxDegrees",
                                      wheel_steer_max_degrees));
   static_cast<void>(JsonObjectNumber(json, root, "wheelSteerGain",
@@ -5900,7 +5923,8 @@ bool LoadSettings(Context &context) noexcept {
                             burnout_entry_speed, burnout_hold_speed) ||
       !WheelSteerSettingsValid(wheel_steer_max_degrees, wheel_steer_gain,
                                wheel_steer_full_slip_degrees,
-                               wheel_steer_rate_degrees_per_second)) {
+                               wheel_steer_rate_degrees_per_second,
+                               wheel_steer_entry_speed_kmh)) {
     return false;
   }
   context.enabled.store(enabled, std::memory_order_release);
@@ -5945,6 +5969,8 @@ bool LoadSettings(Context &context) noexcept {
                                    std::memory_order_release);
   context.wheel_steer_enabled.store(wheel_steer_enabled,
                                     std::memory_order_release);
+  context.wheel_steer_entry_speed_kmh.store(
+      wheel_steer_entry_speed_kmh, std::memory_order_release);
   context.wheel_steer_max_degrees.store(wheel_steer_max_degrees,
                                         std::memory_order_release);
   context.wheel_steer_gain.store(wheel_steer_gain,
@@ -8234,6 +8260,9 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
           std::memory_order_acquire),
       kMinimumWheelSteerRateDegreesPerSecond,
       kMaximumWheelSteerRateDegreesPerSecond);
+  const double entry_speed_kmh = nfs2015_chase::Clamp(
+      context.wheel_steer_entry_speed_kmh.load(std::memory_order_acquire),
+      kMinimumWheelSteerEntrySpeedKmh, kMaximumWheelSteerEntrySpeedKmh);
   config.enabled = true;
   config.max_angle_radians =
       max_degrees * nfs2015_chase::kRadiansPerDegree;
@@ -8246,7 +8275,7 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
       kWheelSteerExitSlipDegrees * nfs2015_chase::kRadiansPerDegree;
   config.rate_radians_per_second =
       rate_degrees_per_second * nfs2015_chase::kRadiansPerDegree;
-  config.entry_speed_mps = kWheelSteerEntrySpeedMps;
+  config.entry_speed_mps = entry_speed_kmh / 3.6;
   config.hold_seconds = kWheelSteerHoldSeconds;
   config.exit_hold_seconds = kWheelSteerExitHoldSeconds;
   config.blend_in_seconds = kWheelSteerBlendInSeconds;
@@ -9655,6 +9684,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
         context.wheel_steer.applied_angle * kRadiansToDegrees;
     context.display.wheel_steer_target_degrees =
         context.wheel_steer.target_angle * kRadiansToDegrees;
+    context.display.wheel_steer_entry_speed_kmh =
+        context.wheel_steer_entry_speed_kmh.load(std::memory_order_relaxed);
     context.display.wheel_steer_max_degrees =
         context.wheel_steer_max_degrees.load(std::memory_order_relaxed);
     context.display.wheel_steer_gain =
@@ -10144,6 +10175,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.wheel_steer.applied_angle * kRadiansToDegrees;
   context.display.wheel_steer_target_degrees =
       context.wheel_steer.target_angle * kRadiansToDegrees;
+  context.display.wheel_steer_entry_speed_kmh =
+      context.wheel_steer_entry_speed_kmh.load(std::memory_order_acquire);
   context.display.wheel_steer_max_degrees =
       context.wheel_steer_max_degrees.load(std::memory_order_acquire);
   context.display.wheel_steer_gain =
@@ -12164,7 +12197,8 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
         const std::string wheel_hint = context->localizer.Text(
             "setting.wheel_steer_hint",
             "During a drift the front wheels follow the actual travel "
-            "direction, with an explicit angle and rate limit.");
+            "direction. Entry speed only gates entering; once engaged, "
+            "low speed does not release the countersteer.");
         ui->text(ui->user, StringView(wheel_hint));
         const auto wheel_slider =
             [&](const char *key, const char *fallback,
@@ -12185,6 +12219,13 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                 MarkSettingsDirty(*context);
               }
             };
+        wheel_slider("setting.wheel_steer_entry_speed",
+                     "Drift entry speed (km/h)",
+                     "chase-wheel-steer-entry-speed",
+                     display.wheel_steer_entry_speed_kmh,
+                     kMinimumWheelSteerEntrySpeedKmh,
+                     kMaximumWheelSteerEntrySpeedKmh,
+                     context->wheel_steer_entry_speed_kmh);
         wheel_slider("setting.wheel_steer_max",
                      "Front wheel visual limit (deg)",
                      "chase-wheel-steer-max", display.wheel_steer_max_degrees,
