@@ -26,3 +26,6 @@ CMakeUserPresets.json
 
 # 安装脚本的本地输出
 /phase0-install-result.txt
+
+# 安装脚本的本地输出
+/wheel-steer-install-result.txt

@@ -8,8 +8,9 @@
 
 </div>
 
-独立的第三方 Anomaly 插件：用 NFS 2015 Action Camera 的弹簧、pivot 与漂移参数替换游戏驾驶追车视角。
-本仓库既是源码仓库，也是 Anomaly 的第三方插件源（根目录的 `pluginmaster.json`）。
+独立的第三方 Anomaly 插件：用 NFS 2015 Action Camera 的弹簧、pivot 与漂移参数替换游戏驾驶追车视角，
+并在漂移时提供 NFS 2015 风格的前轮视觉反打。本仓库既是源码仓库，也是 Anomaly 的第三方插件源
+（根目录的 `pluginmaster.json`）。
 
 ## 烧胎特写
 
@@ -295,6 +296,29 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 route B 的最终位置并不直接等于这里选中的锚点：锚点用于模型/presenter 的基准和回退；
 渲染线程的车辆 proxy 变换是最终位置的基准。`fb` 是锚点回退次数，不是车辆抖动计数。
 
+### 漂移前轮反打
+
+漂移时前轮视觉上指向车辆**实际运动方向**，形成 NFS 2015 风格的 countersteer。目标角来自
+车辆速度方向与车身前向的夹角，不是玩家输入；有独立的视觉最大角和转速限制。
+
+实现上会在漂移期间暂时关闭游戏的车轮动画控制器，直接写四个轮子的 `RelativeRotation`：
+前轮由反打角和视觉滚动组成，后轮只保留视觉滚动。这样车轮的滚动不会再和反打角叠加产生
+进动；退出漂移、离开载具、关闭功能或停止插件时，恢复原厂 `RelativeRotation` 和动画开关。
+整个功能只改视觉，不修改物理、输入或车辆移动组件。低速（< 3 m/s）、倒车或侧滑角低于
+进入阈值时保持原厂转向。
+
+| 字段 | 默认 | 范围 | 含义 |
+|---|---:|---:|---|
+| `wheelSteerEnabled` | `true` | 开/关 | 视觉反打总开关 |
+| `wheelSteerMaxDegrees` | `40` | 20–50° | 前轮视觉最大角 |
+| `wheelSteerGain` | `1.0` | 0.5–1.5 | 侧滑角到目标角的倍率；最终仍受最大角限制 |
+| `wheelSteerFullSlipDegrees` | `25` | 10–60° | 达到最大视觉反打所需的侧滑角 |
+| `wheelSteerRateDegreesPerSecond` | `360` | 60–1200°/s | 前轮角速度上限 |
+
+进入阈值默认为 `wheelSteerFullSlipDegrees * 0.32`（25° 全角时为 8°），并有少量回差，
+避免普通转弯时频繁覆盖原厂转向。窗口中的“前轮转向”状态行显示实际角 / 目标角、轮数和
+`active/stock`。
+
 ### NFS 镜头（FOV）
 
 `Apply NFS lens (FOV)` 打开时，route B 会把 NFS 模型算出的水平 FOV 写入当前 `FViewInfo`，并用
@@ -317,6 +341,7 @@ hook lease。
 - `Anchor` + `版本门禁`：当前锚点来源、
   `ok / hash / pattern / service / offset / off / read` 门禁结果，以及回退次数；
 - `水平 FOV`、`镜头-车辆距离（输出 / 原始）`、`速度`、`侧滑角`、`漂移量`；
+- `前轮转向`：漂移前轮视觉反打的实际角 / 目标角、前轮数量和 `active/stock` 状态；
 - `渲染钩`、`视图钩 R/G/线程`、`路线B 预应用/保持/回退/校验`：route B 各阶段的调用和
   回退计数；`held` 是读取撕裂时短暂保持上一帧机位的次数，`w N` 是 advisory witness 计数；
 - `渲染龄` / `视图←变换龄`：route B 使用的车辆变换和视图之间差多少毫秒。

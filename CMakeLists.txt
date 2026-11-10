@@ -78,4 +78,16 @@ if(NFS2015_CHASE_CAM_BUILD_TESTS)
             -static -static-libgcc -static-libstdc++)
     endif()
     add_test(NAME nfs2015_burnout_shot_model COMMAND nfs2015_burnout_shot_test)
+
+    add_executable(nfs2015_wheel_steer_test tests/wheel_steer_test.cpp)
+    target_include_directories(nfs2015_wheel_steer_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(MSVC)
+        target_compile_options(nfs2015_wheel_steer_test PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+    elseif(MINGW)
+        target_link_options(nfs2015_wheel_steer_test PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME nfs2015_wheel_steer_model COMMAND nfs2015_wheel_steer_test)
 endif()

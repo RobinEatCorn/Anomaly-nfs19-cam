@@ -2,10 +2,10 @@
   "schemaVersion": 2,
   "id": "robineatcorn.nfs2015-chase-cam",
   "name": "NFS 2015 Chase Cam",
-  "description": "Replaces the driving camera with the NFS 2015 action camera model: a loose drift yaw spring, a car-local pivot orbit, drift push-in/drop, body-pitch slope follow, speed-based FOV and shake.",
+  "description": "Replaces the driving camera with the NFS 2015 action camera model and adds NFS-style visual front-wheel countersteer during drifts: the front wheels follow actual travel direction with an explicit angle/rate limit. Camera features include a loose drift yaw spring, a car-local pivot orbit, drift push-in/drop, body-pitch slope follow, speed-based FOV and shake.",
   "author": "RobinEatCorn",
   "license": "AGPL-3.0-only",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "entry": "plugin.dll",
   "api": {
     "major": 1,

@@ -42,6 +42,7 @@
 #include "anomaly/sdk/services/ue5.h"
 
 #include "chase_cam.hpp"
+#include "wheel_steer.hpp"
 #include "latency_window.hpp"
 #include "car_sample.hpp"
 #include "burnout_shot.hpp"
@@ -180,6 +181,25 @@ constexpr double kMinimumSlopeLookAt = 0.0;
 constexpr double kMaximumSlopeLookAt = 2.0;
 constexpr double kMinimumSlopeRest = 0.0;
 constexpr double kMaximumSlopeRest = 4.0;
+// NFS 2015-style visual front-wheel countersteer. The default max is above the
+// front Chaos wheel's 35-degree physical stop: NFS 2015 lets the visual wheel
+// overshoot a little, and the clamp is still explicit so it cannot point
+// sideways when the slip angle is large.
+constexpr bool kDefaultWheelSteerEnabled = true;
+constexpr double kDefaultWheelSteerMaxDegrees = 40.0;
+constexpr double kMinimumWheelSteerMaxDegrees = 20.0;
+constexpr double kMaximumWheelSteerMaxDegrees = 50.0;
+constexpr double kDefaultWheelSteerGain = 1.0;
+constexpr double kMinimumWheelSteerGain = 0.5;
+constexpr double kMaximumWheelSteerGain = 1.5;
+constexpr double kDefaultWheelSteerFullSlipDegrees = 25.0;
+constexpr double kMinimumWheelSteerFullSlipDegrees = 10.0;
+constexpr double kMaximumWheelSteerFullSlipDegrees = 60.0;
+constexpr double kDefaultWheelSteerRateDegreesPerSecond = 360.0;
+constexpr double kMinimumWheelSteerRateDegreesPerSecond = 60.0;
+constexpr double kMaximumWheelSteerRateDegreesPerSecond = 1200.0;
+constexpr double kWheelSteerMinimumSpeedMps = 3.0;
+constexpr double kWheelSteerEnterSlipFraction = 0.32;
 // Braking pitch needs a speed-based signal, not the position-derived
 // acceleration: coasting drag, curbs, and sample noise all look like braking
 // in the latter. A dead zone plus a short hold rejects those single-tick dips.
@@ -316,8 +336,29 @@ constexpr std::uint32_t kSceneComponentLocationOffset = 280;
 // and the parent transform are read in the same detour pass, so their relative
 // offset is not polluted by the car moving between two reads.
 constexpr std::uint32_t kSceneComponentAttachParentOffset = 0xD8;
+constexpr std::uint32_t kSceneComponentRelativeRotationOffset = 0x168;
 constexpr std::uint32_t kSceneComponentTransformOffset = 0x1F0;
 constexpr std::uint32_t kSceneComponentTransformTranslationOffset = 0x210;
+// NTE player vehicles expose their visual wheel components as a TArray of
+// StaticMeshComponents. The animation controller normally owns all four; the
+// drift override parks it and writes the front steer plus the matching roll on
+// every wheel.
+constexpr std::uint32_t kVehicleMeshOffset = 0x348;
+constexpr std::uint32_t kVehicleFrontWheelsOffset = 0x12D8;
+constexpr std::uint32_t kVehicleRearWheelsOffset = 0x12E8;
+constexpr std::uint32_t kSceneComponentAnimScriptInstanceOffset = 0x938;
+constexpr std::uint32_t kVehicleAnimWheelAnimationOffset = 0xC98;
+constexpr std::uint32_t kTArrayDataOffset = 0x0;
+constexpr std::uint32_t kTArrayNumOffset = 0x8;
+constexpr std::size_t kMaximumFrontWheels = 4;
+constexpr std::size_t kMaximumRearWheels = 4;
+constexpr std::size_t kMaximumWheelSteerWheels =
+    kMaximumFrontWheels + kMaximumRearWheels;
+// The hand-driven visual roll is only a phase ramp. The game's tyre radius is
+// not exposed through a stable reflection path, so this value is deliberately
+// a tuning constant rather than a physics read. It only changes how fast the
+// visual wheel spins while the override owns the wheel.
+constexpr double kWheelVisualRollRadiusMeters = 0.35;
 constexpr double kVehicleAnchorMaxOffsetCm = 1000.0;
 // The vehicle mesh's ComponentToWorld translation is the chassis pivot at the
 // ground; the bounds centre used by the old X path sits about this much above
@@ -538,7 +579,12 @@ constexpr std::string_view kSettingsSchema = R"json(
     "burnoutShake":{"type":"number","minimum":0.0,"maximum":2.0},
     "burnoutSideMode":{"type":"integer","minimum":0,"maximum":3},
     "burnoutEntrySpeed":{"type":"number","minimum":0.0,"maximum":10.0},
-    "burnoutHoldSpeed":{"type":"number","minimum":0.0,"maximum":20.0}
+    "burnoutHoldSpeed":{"type":"number","minimum":0.0,"maximum":20.0},
+    "wheelSteerEnabled":{"type":"boolean"},
+    "wheelSteerMaxDegrees":{"type":"number","minimum":20.0,"maximum":50.0},
+    "wheelSteerGain":{"type":"number","minimum":0.5,"maximum":1.5},
+    "wheelSteerFullSlipDegrees":{"type":"number","minimum":10.0,"maximum":60.0},
+    "wheelSteerRateDegreesPerSecond":{"type":"number","minimum":60.0,"maximum":1200.0}
   }
 }
 )json";
@@ -745,6 +791,18 @@ bool Read(const AnomalyCoreServiceV1 *core, const std::uintptr_t address,
   AnomalyMutableByteSpanV1 destination{reinterpret_cast<std::uint8_t *>(&value),
                                        sizeof(value)};
   return core->read_memory(core->user, address, destination).code ==
+         ANOMALY_STATUS_V1_OK;
+}
+
+template <typename T>
+bool Write(const AnomalyCoreServiceV1 *core, const std::uintptr_t address,
+           const T &value) noexcept {
+  if (core == nullptr || core->write_memory == nullptr || address == 0) {
+    return false;
+  }
+  AnomalyByteSpanV1 source{reinterpret_cast<const std::uint8_t *>(&value),
+                           sizeof(value)};
+  return core->write_memory(core->user, address, source).code ==
          ANOMALY_STATUS_V1_OK;
 }
 
@@ -1615,6 +1673,17 @@ struct DisplayState final {
   double burnout_steering{};
   double burnout_speed_mps{};
   double burnout_hold_remaining{};
+  bool wheel_steer_enabled{kDefaultWheelSteerEnabled};
+  bool wheel_steer_active{};
+  bool wheel_steer_engaged{};
+  std::uint32_t wheel_steer_wheels{};
+  double wheel_steer_angle_degrees{};
+  double wheel_steer_target_degrees{};
+  double wheel_steer_max_degrees{kDefaultWheelSteerMaxDegrees};
+  double wheel_steer_gain{kDefaultWheelSteerGain};
+  double wheel_steer_full_slip_degrees{kDefaultWheelSteerFullSlipDegrees};
+  double wheel_steer_rate_degrees_per_second{
+      kDefaultWheelSteerRateDegreesPerSecond};
   double slip_degrees{};
   double drift{};
   double fov_horizontal{};
@@ -1855,6 +1924,45 @@ struct BurnoutDetectionState final {
   double intensity{};
 };
 
+// Game-thread state for the visual wheel override. NTE's wheel controller owns
+// both the steering pose and the rolling spin. A fixed RelativeRotation written
+// on top of that controller precesses as soon as the wheel rolls, so while the
+// override is active we park the controller with bEnableWheelAnimation=0 and
+// drive the visual steer and roll ourselves. The stock relative rotations and
+// the animation flag are restored on every exit path.
+struct WheelSteerState final {
+  std::uintptr_t vehicle{};
+  std::uintptr_t mesh{};
+  std::uintptr_t anim{};
+  std::array<std::uintptr_t, kMaximumWheelSteerWheels> wheels{};
+  std::array<bool, kMaximumWheelSteerWheels> front{};
+  std::array<std::array<double, 3>, kMaximumWheelSteerWheels> base_rotator{};
+  std::array<bool, kMaximumWheelSteerWheels> base_captured{};
+  // Socket orientation relative to the vehicle mesh, captured after the game's
+  // wheel controller has been parked. The front wheel steer is computed against
+  // this frozen socket, which removes the rolling-spin feedback entirely.
+  std::array<nfs2015_chase::Quat, kMaximumWheelSteerWheels> socket_local{};
+  std::array<bool, kMaximumWheelSteerWheels> socket_captured{};
+  std::size_t wheel_count{};
+  std::size_t front_count{};
+  std::size_t rear_count{};
+  std::uint8_t animation_was_enabled{};
+  bool animation_saved{};
+  bool animation_disabled{};
+  int settle_ticks{};
+  double roll_angle{};
+  double applied_angle{};
+  double target_angle{};
+  double target_blend{};
+  bool engaged{};
+  bool active{};
+  bool resolved{};
+  bool failure_logged{};
+  bool geometry_logged{};
+  bool activation_logged{};
+  double next_resolve{};
+};
+
 struct Context final {
   nfs2015_chase_cam::Localizer localizer;
   const AnomalyCoreServiceV1 *core{};
@@ -1913,6 +2021,13 @@ struct Context final {
   std::atomic<double> shake_scale{kDefaultShakeScale};
   // Burnout close-up settings. `burnoutShake` is separate from the chase shake
   // so the two cameras can be tuned independently.
+  std::atomic_bool wheel_steer_enabled{kDefaultWheelSteerEnabled};
+  std::atomic<double> wheel_steer_max_degrees{kDefaultWheelSteerMaxDegrees};
+  std::atomic<double> wheel_steer_gain{kDefaultWheelSteerGain};
+  std::atomic<double> wheel_steer_full_slip_degrees{
+      kDefaultWheelSteerFullSlipDegrees};
+  std::atomic<double> wheel_steer_rate_degrees_per_second{
+      kDefaultWheelSteerRateDegreesPerSecond};
   std::atomic_bool burnout_enabled{kDefaultBurnoutEnabled};
   std::atomic<double> burnout_entry_delay{kDefaultBurnoutEntryDelay};
   std::atomic<double> burnout_entry_time{kDefaultBurnoutEntryTime};
@@ -2161,6 +2276,8 @@ struct Context final {
   // CarSample::burnout. Neither is read by the camera yet.
   BurnoutSignals burnout_signals{};
   BurnoutDetectionState burnout_detection{};
+  // Visual front-wheel override. Game-thread only.
+  WheelSteerState wheel_steer{};
   // Probe input: the world XY offset of the bounds centre from the Pawn root,
   // captured by QueryPlayer on this Game tick. A fixed vector in the car's own
   // frame, so its direction is a body-yaw candidate that never involves the
@@ -5086,6 +5203,24 @@ bool BurnoutSettingsValid(const double entry_delay, const double entry_time,
          hold_speed <= kMaximumBurnoutHoldSpeed && hold_speed >= entry_speed;
 }
 
+bool WheelSteerSettingsValid(const double max_degrees, const double gain,
+                             const double full_slip_degrees,
+                             const double rate_degrees_per_second) noexcept {
+  return std::isfinite(max_degrees) &&
+         max_degrees >= kMinimumWheelSteerMaxDegrees &&
+         max_degrees <= kMaximumWheelSteerMaxDegrees &&
+         std::isfinite(gain) && gain >= kMinimumWheelSteerGain &&
+         gain <= kMaximumWheelSteerGain &&
+         std::isfinite(full_slip_degrees) &&
+         full_slip_degrees >= kMinimumWheelSteerFullSlipDegrees &&
+         full_slip_degrees <= kMaximumWheelSteerFullSlipDegrees &&
+         std::isfinite(rate_degrees_per_second) &&
+         rate_degrees_per_second >=
+             kMinimumWheelSteerRateDegreesPerSecond &&
+         rate_degrees_per_second <=
+             kMaximumWheelSteerRateDegreesPerSecond;
+}
+
 bool AppendText(char *&cursor, char *const end,
                 const std::string_view text) noexcept {
   if (text.size() > static_cast<std::size_t>(end - cursor)) {
@@ -5176,6 +5311,17 @@ bool PersistSettings(Context &context) noexcept {
       context.burnout_entry_speed.load(std::memory_order_acquire);
   const double burnout_hold_speed =
       context.burnout_hold_speed.load(std::memory_order_acquire);
+  const bool wheel_steer_enabled =
+      context.wheel_steer_enabled.load(std::memory_order_acquire);
+  const double wheel_steer_max_degrees =
+      context.wheel_steer_max_degrees.load(std::memory_order_acquire);
+  const double wheel_steer_gain =
+      context.wheel_steer_gain.load(std::memory_order_acquire);
+  const double wheel_steer_full_slip_degrees =
+      context.wheel_steer_full_slip_degrees.load(std::memory_order_acquire);
+  const double wheel_steer_rate_degrees_per_second =
+      context.wheel_steer_rate_degrees_per_second.load(
+          std::memory_order_acquire);
   const bool slope_follow =
       context.slope_follow.load(std::memory_order_acquire);
   const double slope_strength =
@@ -5220,6 +5366,9 @@ bool PersistSettings(Context &context) noexcept {
                             burnout_launch_exit_time, burnout_fov,
                             burnout_shake, burnout_side_mode,
                             burnout_entry_speed, burnout_hold_speed) ||
+      !WheelSteerSettingsValid(wheel_steer_max_degrees, wheel_steer_gain,
+                               wheel_steer_full_slip_degrees,
+                               wheel_steer_rate_degrees_per_second) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
     // A UI write landed while the fields were being read; keep the revision
     // unpersisted so the next tick writes a coherent document.
@@ -5302,6 +5451,16 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, burnout_entry_speed) &&
       AppendText(cursor, end, ",\"burnoutHoldSpeed\":") &&
       AppendNumber(cursor, end, burnout_hold_speed) &&
+      AppendText(cursor, end, ",\"wheelSteerEnabled\":") &&
+      AppendText(cursor, end, wheel_steer_enabled ? "true" : "false") &&
+      AppendText(cursor, end, ",\"wheelSteerMaxDegrees\":") &&
+      AppendNumber(cursor, end, wheel_steer_max_degrees) &&
+      AppendText(cursor, end, ",\"wheelSteerGain\":") &&
+      AppendNumber(cursor, end, wheel_steer_gain) &&
+      AppendText(cursor, end, ",\"wheelSteerFullSlipDegrees\":") &&
+      AppendNumber(cursor, end, wheel_steer_full_slip_degrees) &&
+      AppendText(cursor, end, ",\"wheelSteerRateDegreesPerSecond\":") &&
+      AppendNumber(cursor, end, wheel_steer_rate_degrees_per_second) &&
       AppendText(cursor, end, ",\"rollOnlyInDrift\":") &&
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
@@ -5377,6 +5536,16 @@ void SetDefaults(Context &context) noexcept {
                                     std::memory_order_release);
   context.burnout_hold_speed.store(kDefaultBurnoutHoldSpeed,
                                    std::memory_order_release);
+  context.wheel_steer_enabled.store(kDefaultWheelSteerEnabled,
+                                    std::memory_order_release);
+  context.wheel_steer_max_degrees.store(kDefaultWheelSteerMaxDegrees,
+                                        std::memory_order_release);
+  context.wheel_steer_gain.store(kDefaultWheelSteerGain,
+                                 std::memory_order_release);
+  context.wheel_steer_full_slip_degrees.store(
+      kDefaultWheelSteerFullSlipDegrees, std::memory_order_release);
+  context.wheel_steer_rate_degrees_per_second.store(
+      kDefaultWheelSteerRateDegreesPerSecond, std::memory_order_release);
   context.slope_follow.store(true, std::memory_order_release);
   context.slope_strength.store(kDefaultSlopeStrength,
                                std::memory_order_release);
@@ -5559,6 +5728,13 @@ bool LoadSettings(Context &context) noexcept {
       static_cast<double>(kDefaultBurnoutSideMode);
   double burnout_entry_speed = kDefaultBurnoutEntrySpeed;
   double burnout_hold_speed = kDefaultBurnoutHoldSpeed;
+  bool wheel_steer_enabled = kDefaultWheelSteerEnabled;
+  double wheel_steer_max_degrees = kDefaultWheelSteerMaxDegrees;
+  double wheel_steer_gain = kDefaultWheelSteerGain;
+  double wheel_steer_full_slip_degrees =
+      kDefaultWheelSteerFullSlipDegrees;
+  double wheel_steer_rate_degrees_per_second =
+      kDefaultWheelSteerRateDegreesPerSecond;
   bool roll_only_in_drift = true;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
@@ -5614,6 +5790,17 @@ bool LoadSettings(Context &context) noexcept {
                                      burnout_entry_speed));
   static_cast<void>(JsonObjectNumber(json, root, "burnoutHoldSpeed",
                                      burnout_hold_speed));
+  static_cast<void>(JsonObjectBoolean(json, root, "wheelSteerEnabled",
+                                      wheel_steer_enabled));
+  static_cast<void>(JsonObjectNumber(json, root, "wheelSteerMaxDegrees",
+                                     wheel_steer_max_degrees));
+  static_cast<void>(JsonObjectNumber(json, root, "wheelSteerGain",
+                                     wheel_steer_gain));
+  static_cast<void>(JsonObjectNumber(json, root, "wheelSteerFullSlipDegrees",
+                                     wheel_steer_full_slip_degrees));
+  static_cast<void>(JsonObjectNumber(
+      json, root, "wheelSteerRateDegreesPerSecond",
+      wheel_steer_rate_degrees_per_second));
   static_cast<void>(JsonObjectBoolean(json, root, "rollOnlyInDrift",
                                       roll_only_in_drift));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticFlatPose",
@@ -5654,7 +5841,10 @@ bool LoadSettings(Context &context) noexcept {
                             burnout_exit_delay, burnout_exit_time,
                             burnout_launch_exit_time, burnout_fov,
                             burnout_shake, burnout_side_mode_number,
-                            burnout_entry_speed, burnout_hold_speed)) {
+                            burnout_entry_speed, burnout_hold_speed) ||
+      !WheelSteerSettingsValid(wheel_steer_max_degrees, wheel_steer_gain,
+                               wheel_steer_full_slip_degrees,
+                               wheel_steer_rate_degrees_per_second)) {
     return false;
   }
   context.enabled.store(enabled, std::memory_order_release);
@@ -5697,6 +5887,16 @@ bool LoadSettings(Context &context) noexcept {
                                     std::memory_order_release);
   context.burnout_hold_speed.store(burnout_hold_speed,
                                    std::memory_order_release);
+  context.wheel_steer_enabled.store(wheel_steer_enabled,
+                                    std::memory_order_release);
+  context.wheel_steer_max_degrees.store(wheel_steer_max_degrees,
+                                        std::memory_order_release);
+  context.wheel_steer_gain.store(wheel_steer_gain,
+                                 std::memory_order_release);
+  context.wheel_steer_full_slip_degrees.store(
+      wheel_steer_full_slip_degrees, std::memory_order_release);
+  context.wheel_steer_rate_degrees_per_second.store(
+      wheel_steer_rate_degrees_per_second, std::memory_order_release);
   context.slope_follow.store(slope_follow, std::memory_order_release);
   context.slope_strength.store(slope_strength, std::memory_order_release);
   context.slope_max_gradient_degrees.store(
@@ -7214,6 +7414,9 @@ std::uint64_t ObjectRegistryGeneration(Context &context) noexcept {
   return context.objects->generation(context.objects->user);
 }
 
+void ReleaseWheelSteer(Context &context) noexcept;
+void RestoreWheelPose(Context &context) noexcept;
+
 // ue5.objects bumps its generation when the registry is rebuilt (world change,
 // streaming, or a slot replacement). Every cached handle belongs to the old
 // registry and must not be handed to invoke() afterwards.
@@ -7221,6 +7424,10 @@ void ResetVehicleObjectCaches(Context &context) noexcept {
   context.burnout_probe = BurnoutProbeState{};
   context.burnout_signals = BurnoutSignals{};
   context.burnout_detection = BurnoutDetectionState{};
+  // Restore the stock relative rotation while the old component pointers are
+  // still the best available, then drop them. If the registry change already
+  // destroyed the car the writes fail harmlessly and are simply forgotten.
+  ReleaseWheelSteer(context);
   context.vehicle_getter_handles = {};
   context.next_vehicle_getter_retry = {};
   context.vehicle_query_known = false;
@@ -7368,6 +7575,525 @@ VehiclePresence QueryVehiclePresence(Context &context) noexcept {
   context.vehicle_query_speed_fresh = result.speed_fresh;
   context.vehicle_query_speed_kmh = result.speed_kmh;
   return result;
+}
+
+bool ResolveWheelSteerGeometry(Context &context) noexcept {
+  WheelSteerState &state = context.wheel_steer;
+  const bool had_geometry = state.resolved && state.wheel_count > 0;
+  state.next_resolve = context.elapsed + (had_geometry ? 0.5 : 2.0);
+  if (state.vehicle == 0 || context.core == nullptr) {
+    if (state.animation_disabled) {
+      RestoreWheelPose(context);
+    }
+    state.resolved = false;
+    state.wheel_count = 0;
+    state.front_count = 0;
+    state.rear_count = 0;
+    return false;
+  }
+
+  std::uintptr_t mesh = 0;
+  std::uintptr_t anim = 0;
+  std::uintptr_t front_data = 0;
+  std::uintptr_t rear_data = 0;
+  std::int32_t front_count = 0;
+  std::int32_t rear_count = 0;
+  const bool geometry_valid =
+      ReadPointerAtOffset(context.core, state.vehicle, kVehicleMeshOffset,
+                          mesh) &&
+      ReadPointerAtOffset(context.core, mesh,
+                          kSceneComponentAnimScriptInstanceOffset, anim) &&
+      Read(context.core, state.vehicle + kVehicleFrontWheelsOffset,
+           front_data) &&
+      front_data != 0 &&
+      Read(context.core,
+           state.vehicle + kVehicleFrontWheelsOffset + kTArrayNumOffset,
+           front_count) &&
+      Read(context.core, state.vehicle + kVehicleRearWheelsOffset,
+           rear_data) &&
+      rear_data != 0 &&
+      Read(context.core,
+           state.vehicle + kVehicleRearWheelsOffset + kTArrayNumOffset,
+           rear_count) &&
+      front_count > 0 && rear_count > 0 &&
+      front_count <= static_cast<std::int32_t>(kMaximumFrontWheels) &&
+      rear_count <= static_cast<std::int32_t>(kMaximumRearWheels) &&
+      static_cast<std::size_t>(front_count) +
+              static_cast<std::size_t>(rear_count) <=
+          kMaximumWheelSteerWheels;
+  if (!geometry_valid) {
+    if (state.animation_disabled) {
+      RestoreWheelPose(context);
+    }
+    if (!state.failure_logged) {
+      state.failure_logged = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: wheel steering geometry unavailable; visual "
+          "countersteer stays off");
+    }
+    state.resolved = false;
+    state.wheel_count = 0;
+    state.front_count = 0;
+    state.rear_count = 0;
+    return false;
+  }
+
+  std::array<std::uintptr_t, kMaximumWheelSteerWheels> wheels{};
+  std::array<bool, kMaximumWheelSteerWheels> front{};
+  std::size_t total = 0;
+  for (std::int32_t index = 0; index < front_count; ++index) {
+    std::uintptr_t wheel = 0;
+    nfs2015_chase::Quat transform{};
+    if (!Read(context.core,
+              front_data + static_cast<std::uintptr_t>(index) *
+                               sizeof(std::uintptr_t),
+              wheel) ||
+        wheel == 0 ||
+        !Read(context.core, wheel + kSceneComponentTransformOffset,
+              transform)) {
+      if (state.animation_disabled) {
+        RestoreWheelPose(context);
+      }
+      if (!state.failure_logged) {
+        state.failure_logged = true;
+        Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+            "nfs2015 chase cam: front wheel component changed; visual "
+            "countersteer stays off");
+      }
+      state.resolved = false;
+      state.wheel_count = 0;
+      state.front_count = 0;
+      state.rear_count = 0;
+      return false;
+    }
+    wheels[total] = wheel;
+    front[total] = true;
+    ++total;
+  }
+  for (std::int32_t index = 0; index < rear_count; ++index) {
+    std::uintptr_t wheel = 0;
+    nfs2015_chase::Quat transform{};
+    if (!Read(context.core,
+              rear_data + static_cast<std::uintptr_t>(index) *
+                              sizeof(std::uintptr_t),
+              wheel) ||
+        wheel == 0 ||
+        !Read(context.core, wheel + kSceneComponentTransformOffset,
+              transform)) {
+      if (state.animation_disabled) {
+        RestoreWheelPose(context);
+      }
+      if (!state.failure_logged) {
+        state.failure_logged = true;
+        Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+            "nfs2015 chase cam: rear wheel component changed; visual "
+            "countersteer stays off");
+      }
+      state.resolved = false;
+      state.wheel_count = 0;
+      state.front_count = 0;
+      state.rear_count = 0;
+      return false;
+    }
+    wheels[total] = wheel;
+    front[total] = false;
+    ++total;
+  }
+
+  bool changed = mesh != state.mesh || anim != state.anim ||
+                 static_cast<std::size_t>(front_count) != state.front_count ||
+                 static_cast<std::size_t>(rear_count) != state.rear_count;
+  for (std::size_t index = 0; index < total && !changed; ++index) {
+    changed = state.wheels[index] != wheels[index] ||
+              state.front[index] != front[index];
+  }
+  if (changed && state.animation_disabled) {
+    RestoreWheelPose(context);
+  }
+  if (changed) {
+    state.base_captured.fill(false);
+    state.socket_captured.fill(false);
+    state.socket_local.fill({});
+  }
+
+  state.mesh = mesh;
+  state.anim = anim;
+  for (std::size_t index = 0; index < kMaximumWheelSteerWheels; ++index) {
+    state.wheels[index] = index < total ? wheels[index] : 0;
+    state.front[index] = index < total ? front[index] : false;
+  }
+  state.wheel_count = total;
+  state.front_count = static_cast<std::size_t>(front_count);
+  state.rear_count = static_cast<std::size_t>(rear_count);
+  state.resolved = true;
+  state.failure_logged = false;
+  if (!state.geometry_logged) {
+    state.geometry_logged = true;
+    char message[224]{};
+    std::snprintf(message, sizeof(message),
+                  "nfs2015 chase cam: wheel steering geometry ready "
+                  "(front=%zu rear=%zu mesh=0x%llx anim=0x%llx)",
+                  state.front_count, state.rear_count,
+                  static_cast<unsigned long long>(state.mesh),
+                  static_cast<unsigned long long>(state.anim));
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+  }
+  return true;
+}
+
+void RestoreWheelPose(Context &context) noexcept {
+  WheelSteerState &state = context.wheel_steer;
+  const bool restoring_animation =
+      state.animation_saved || state.animation_disabled;
+  const bool has_socket_state = [&state]() {
+    for (const bool captured : state.socket_captured) {
+      if (captured) {
+        return true;
+      }
+    }
+    return false;
+  }();
+  if (!state.active && !state.engaged && !restoring_animation &&
+      !has_socket_state && state.applied_angle == 0.0) {
+    return;
+  }
+
+  // Put the stock socket-relative pose back first. The game's wheel controller
+  // is still parked while these writes happen, so the wheel does not see a
+  // frame of old manual roll mixed with the stock animation.
+  for (std::size_t index = 0; index < state.wheel_count; ++index) {
+    const std::uintptr_t wheel = state.wheels[index];
+    if (wheel == 0 || !state.base_captured[index]) {
+      continue;
+    }
+    static_cast<void>(Write(context.core,
+                            wheel + kSceneComponentRelativeRotationOffset,
+                            state.base_rotator[index]));
+  }
+
+  bool animation_restored = !state.animation_saved;
+  if (state.animation_saved) {
+    animation_restored =
+        state.anim != 0 &&
+        Write(context.core, state.anim + kVehicleAnimWheelAnimationOffset,
+              state.animation_was_enabled);
+  }
+  if (animation_restored) {
+    state.animation_saved = false;
+    state.animation_disabled = false;
+    state.anim = 0;
+    state.base_captured.fill(false);
+  }
+  state.socket_captured.fill(false);
+  state.socket_local.fill({});
+  state.settle_ticks = 0;
+  state.roll_angle = 0.0;
+  state.applied_angle = 0.0;
+  state.target_angle = 0.0;
+  state.target_blend = 0.0;
+  state.engaged = false;
+  state.active = false;
+}
+
+void ReleaseWheelSteer(Context &context) noexcept {
+  RestoreWheelPose(context);
+  context.wheel_steer = WheelSteerState{};
+}
+
+bool CaptureWheelAnimation(Context &context) noexcept {
+  WheelSteerState &state = context.wheel_steer;
+  if (state.animation_saved) {
+    return true;
+  }
+  if (state.anim == 0) {
+    return false;
+  }
+  std::uint8_t enabled = 0;
+  if (!Read(context.core, state.anim + kVehicleAnimWheelAnimationOffset,
+            enabled)) {
+    return false;
+  }
+  for (std::size_t index = 0; index < state.wheel_count; ++index) {
+    const std::uintptr_t wheel = state.wheels[index];
+    if (wheel == 0) {
+      state.base_captured[index] = false;
+      continue;
+    }
+    double relative[3]{};
+    if (Read(context.core,
+             wheel + kSceneComponentRelativeRotationOffset, relative)) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        state.base_rotator[index][axis] = relative[axis];
+      }
+      state.base_captured[index] = true;
+    } else {
+      state.base_captured[index] = false;
+    }
+  }
+  state.animation_was_enabled = enabled;
+  state.animation_saved = true;
+  return true;
+}
+
+bool EnsureWheelAnimationDisabled(Context &context) noexcept {
+  WheelSteerState &state = context.wheel_steer;
+  if (!state.animation_saved && !CaptureWheelAnimation(context)) {
+    return false;
+  }
+  if (!Write(context.core, state.anim + kVehicleAnimWheelAnimationOffset,
+             std::uint8_t{0})) {
+    return false;
+  }
+  if (!state.animation_disabled) {
+    state.animation_disabled = true;
+    state.settle_ticks = 4;
+    state.roll_angle = 0.0;
+    state.socket_captured.fill(false);
+    state.socket_local.fill({});
+  }
+  return true;
+}
+
+bool CaptureWheelSockets(Context &context) noexcept {
+  WheelSteerState &state = context.wheel_steer;
+  nfs2015_chase::Quat mesh{};
+  if (!Read(context.core, state.mesh + kSceneComponentTransformOffset, mesh)) {
+    return false;
+  }
+  mesh = nfs2015_chase::QuatNormalize(mesh);
+  if (!std::isfinite(mesh.x) || !std::isfinite(mesh.y) ||
+      !std::isfinite(mesh.z) || !std::isfinite(mesh.w)) {
+    return false;
+  }
+  bool captured_any = false;
+  for (std::size_t index = 0; index < state.wheel_count; ++index) {
+    if (!state.front[index]) {
+      continue;
+    }
+    const std::uintptr_t wheel = state.wheels[index];
+    nfs2015_chase::Quat wheel_world{};
+    if (wheel == 0 ||
+        !Read(context.core, wheel + kSceneComponentTransformOffset,
+              wheel_world)) {
+      return false;
+    }
+    wheel_world = nfs2015_chase::QuatNormalize(wheel_world);
+    nfs2015_chase::Quat base{};
+    if (state.base_captured[index]) {
+      base = nfs2015_chase::QuatNormalize(
+          nfs2015_chase::QuatFromRotatorDegrees(
+              state.base_rotator[index].data()));
+    }
+    // UE applies the relative quaternion directly:
+    // wheel_world = socket_world * relative. Multiplying by the conjugate of
+    // the captured stock relative therefore recovers the frozen socket.
+    const nfs2015_chase::Quat socket_world = nfs2015_chase::QuatNormalize(
+        nfs2015_chase::QuatMul(
+            wheel_world,
+            nfs2015_chase::QuatConjugate(base)));
+    state.socket_local[index] = nfs2015_chase::RemoveWheelSpinTwist(
+        nfs2015_chase::QuatNormalize(
+            nfs2015_chase::QuatMul(
+                nfs2015_chase::QuatConjugate(mesh), socket_world)));
+    state.socket_captured[index] = true;
+    captured_any = true;
+  }
+  return captured_any;
+}
+
+// Game-tick visual override. The game's own wheel animation is parked while the
+// drift override is active; the front wheels get a scripted steer plus roll and
+// the rear wheels get the matching roll. No physics field is written.
+void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
+                      const nfs2015_chase::Vec3 world_velocity,
+                      const double forward_speed_mps,
+                      const double speed_mps, const double dt) noexcept {
+  WheelSteerState &state = context.wheel_steer;
+  const bool enabled =
+      context.wheel_steer_enabled.load(std::memory_order_acquire);
+  if (!enabled || vehicle == 0) {
+    if (state.vehicle != 0 || state.active || state.wheel_count != 0 ||
+        state.animation_disabled) {
+      ReleaseWheelSteer(context);
+    }
+    return;
+  }
+  if (state.vehicle != vehicle) {
+    ReleaseWheelSteer(context);
+    state.vehicle = vehicle;
+  }
+  if (!state.resolved || context.elapsed >= state.next_resolve) {
+    if (!ResolveWheelSteerGeometry(context)) {
+      return;
+    }
+  }
+  if (state.wheel_count == 0 || state.mesh == 0 || state.anim == 0) {
+    if (state.animation_disabled) {
+      RestoreWheelPose(context);
+    }
+    return;
+  }
+  nfs2015_chase::Quat mesh{};
+  if (!Read(context.core, state.mesh + kSceneComponentTransformOffset, mesh)) {
+    if (state.animation_disabled) {
+      RestoreWheelPose(context);
+    }
+    state.resolved = false;
+    state.next_resolve = context.elapsed + 1.0;
+    return;
+  }
+  if (!std::isfinite(mesh.x) || !std::isfinite(mesh.y) ||
+      !std::isfinite(mesh.z) || !std::isfinite(mesh.w)) {
+    if (state.animation_disabled) {
+      RestoreWheelPose(context);
+    }
+    state.resolved = false;
+    state.next_resolve = context.elapsed + 1.0;
+    return;
+  }
+  mesh = nfs2015_chase::QuatNormalize(mesh);
+  const nfs2015_chase::Vec3 car_forward =
+      nfs2015_chase::QuatRotate(mesh, {1.0, 0.0, 0.0});
+  const nfs2015_chase::Vec3 car_up =
+      nfs2015_chase::QuatRotate(mesh, {0.0, 0.0, 1.0});
+
+  nfs2015_chase::WheelSteerConfig config;
+  const double max_degrees = nfs2015_chase::Clamp(
+      context.wheel_steer_max_degrees.load(std::memory_order_acquire),
+      kMinimumWheelSteerMaxDegrees, kMaximumWheelSteerMaxDegrees);
+  const double full_slip_degrees = nfs2015_chase::Clamp(
+      context.wheel_steer_full_slip_degrees.load(std::memory_order_acquire),
+      kMinimumWheelSteerFullSlipDegrees,
+      kMaximumWheelSteerFullSlipDegrees);
+  const double gain = nfs2015_chase::Clamp(
+      context.wheel_steer_gain.load(std::memory_order_acquire),
+      kMinimumWheelSteerGain, kMaximumWheelSteerGain);
+  const double rate_degrees_per_second = nfs2015_chase::Clamp(
+      context.wheel_steer_rate_degrees_per_second.load(
+          std::memory_order_acquire),
+      kMinimumWheelSteerRateDegreesPerSecond,
+      kMaximumWheelSteerRateDegreesPerSecond);
+  config.enabled = true;
+  config.max_angle_radians =
+      max_degrees * nfs2015_chase::kRadiansPerDegree;
+  config.gain = gain;
+  config.full_slip_radians =
+      full_slip_degrees * nfs2015_chase::kRadiansPerDegree;
+  config.enter_slip_radians = nfs2015_chase::Clamp(
+      config.full_slip_radians * kWheelSteerEnterSlipFraction,
+      4.0 * nfs2015_chase::kRadiansPerDegree,
+      config.full_slip_radians * 0.8);
+  config.rate_radians_per_second =
+      rate_degrees_per_second * nfs2015_chase::kRadiansPerDegree;
+  config.minimum_speed_mps = kWheelSteerMinimumSpeedMps;
+
+  // Use the body's own forward axis for the reverse gate, not the camera yaw.
+  // During a drift the camera can lag or swing, while the wheel target must
+  // stay tied to the car mesh.
+  const double mesh_forward_speed = nfs2015_chase::Dot(
+      world_velocity, nfs2015_chase::Normalize(car_forward));
+  const double wheel_forward_speed =
+      std::isfinite(mesh_forward_speed) ? mesh_forward_speed
+                                        : forward_speed_mps;
+  const nfs2015_chase::WheelSteerTarget target =
+      nfs2015_chase::ComputeWheelSteerTarget(
+          car_forward, car_up, world_velocity, wheel_forward_speed, speed_mps,
+          state.engaged, config);
+  state.target_angle = target.angle_radians;
+  state.target_blend = target.blend;
+  state.engaged = target.active;
+  const double desired = target.active ? target.angle_radians : 0.0;
+  state.applied_angle = nfs2015_chase::MoveTowards(
+      state.applied_angle, desired, config.rate_radians_per_second * dt);
+  if (!target.active &&
+      std::fabs(state.applied_angle) <
+          0.2 * nfs2015_chase::kRadiansPerDegree) {
+    RestoreWheelPose(context);
+    return;
+  }
+
+  if (!EnsureWheelAnimationDisabled(context)) {
+    RestoreWheelPose(context);
+    return;
+  }
+  if (state.settle_ticks > 0) {
+    --state.settle_ticks;
+    if (state.settle_ticks > 0) {
+      return;
+    }
+  }
+
+  bool have_all_front_sockets = true;
+  for (std::size_t index = 0; index < state.wheel_count; ++index) {
+    if (state.front[index] && !state.socket_captured[index]) {
+      have_all_front_sockets = false;
+      break;
+    }
+  }
+  if (!have_all_front_sockets && !CaptureWheelSockets(context)) {
+    RestoreWheelPose(context);
+    return;
+  }
+
+  if (std::isfinite(wheel_forward_speed) && std::isfinite(dt)) {
+    state.roll_angle -=
+        wheel_forward_speed / kWheelVisualRollRadiusMeters * dt;
+    state.roll_angle =
+        std::fmod(state.roll_angle, 2.0 * nfs2015_chase::kPi);
+  }
+  const nfs2015_chase::Quat roll_rotation =
+      nfs2015_chase::ComputeVisualWheelRollRotation(state.roll_angle);
+  const nfs2015_chase::Vec3 target_forward = nfs2015_chase::QuatRotate(
+      nfs2015_chase::AxisAngle(nfs2015_chase::Normalize(car_up),
+                               state.applied_angle),
+      car_forward);
+  bool wrote_any = false;
+  for (std::size_t index = 0; index < state.wheel_count; ++index) {
+    const std::uintptr_t wheel = state.wheels[index];
+    if (wheel == 0) {
+      continue;
+    }
+    nfs2015_chase::Quat relative{};
+    if (state.front[index]) {
+      if (!state.socket_captured[index]) {
+        continue;
+      }
+      const nfs2015_chase::Quat socket_world = nfs2015_chase::QuatNormalize(
+          nfs2015_chase::QuatMul(mesh, state.socket_local[index]));
+      if (!nfs2015_chase::ComputeVisualWheelRelativeRotation(
+              car_forward, car_up, target_forward, socket_world,
+              state.roll_angle, relative)) {
+        continue;
+      }
+    } else {
+      relative = roll_rotation;
+    }
+    double new_rotator[3]{};
+    nfs2015_chase::RotatorDegreesFromQuat(relative, new_rotator);
+    if (Write(context.core,
+              wheel + kSceneComponentRelativeRotationOffset, new_rotator)) {
+      wrote_any = true;
+    }
+  }
+  if (wrote_any) {
+    if (!state.activation_logged) {
+      state.activation_logged = true;
+      char message[224]{};
+      std::snprintf(message, sizeof(message),
+                    "nfs2015 chase cam: visual wheel override active "
+                    "(front=%zu rear=%zu target=%.1f deg applied=%.1f deg "
+                    "max=%.1f)",
+                    state.front_count, state.rear_count,
+                    state.target_angle * kRadiansToDegrees,
+                    state.applied_angle * kRadiansToDegrees, max_degrees);
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+    }
+    state.active = true;
+  } else {
+    RestoreWheelPose(context);
+    state.resolved = false;
+    state.next_resolve = context.elapsed + 0.5;
+  }
 }
 
 constexpr double kBurnoutProbeDirectIntervalSeconds = 0.05;
@@ -8258,6 +8984,7 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   context.vehicle_present_last = vehicle_now;
 
   if (!enabled || !player_valid) {
+    ReleaseWheelSteer(context);
     PublishInactive(context);
     ResetMotion(context);
     std::scoped_lock lock(context.display_mutex);
@@ -8290,6 +9017,7 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   // car when a presence answer exists.
   const bool driving = vehicle_now || (speed_plausible && !presence_known);
   if (!driving) {
+    ReleaseWheelSteer(context);
     const bool was_active = context.last_view_active;
     PublishInactive(context);
     if (was_active) {
@@ -8466,6 +9194,10 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   const nfs2015_chase::BurnoutSample burnout_sample =
       UpdateBurnoutDetection(context, car.on_ground, speed_mps, forward_speed,
                              dt);
+  // NFS 2015-style visual countersteer. This writes only the front wheel
+  // components' RelativeRotation; it never touches the movement component.
+  UpdateWheelSteer(context, vehicle_query.object, world_velocity,
+                   forward_speed, speed_mps, dt);
 
   // T2: the tick no longer advances the model - it publishes a car sample and
   // the render thread integrates the springs on its own clock.
@@ -8525,6 +9257,26 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.speed_kmh =
         exact_speed ? std::fabs(vehicle_query.speed_kmh) : speed_mps * 3.6;
     context.display.slip_degrees = slip_angle * kRadiansToDegrees;
+    context.display.wheel_steer_enabled =
+        context.wheel_steer_enabled.load(std::memory_order_relaxed);
+    context.display.wheel_steer_active = context.wheel_steer.active;
+    context.display.wheel_steer_engaged = context.wheel_steer.engaged;
+    context.display.wheel_steer_wheels =
+        static_cast<std::uint32_t>(context.wheel_steer.wheel_count);
+    context.display.wheel_steer_angle_degrees =
+        context.wheel_steer.applied_angle * kRadiansToDegrees;
+    context.display.wheel_steer_target_degrees =
+        context.wheel_steer.target_angle * kRadiansToDegrees;
+    context.display.wheel_steer_max_degrees =
+        context.wheel_steer_max_degrees.load(std::memory_order_relaxed);
+    context.display.wheel_steer_gain =
+        context.wheel_steer_gain.load(std::memory_order_relaxed);
+    context.display.wheel_steer_full_slip_degrees =
+        context.wheel_steer_full_slip_degrees.load(
+            std::memory_order_relaxed);
+    context.display.wheel_steer_rate_degrees_per_second =
+        context.wheel_steer_rate_degrees_per_second.load(
+            std::memory_order_relaxed);
     context.display.drift =
         context.presenter_drift.load(std::memory_order_relaxed);
     const float presenter_lens =
@@ -8994,6 +9746,26 @@ void UpdateDisplay(Context &context) noexcept {
   std::scoped_lock lock(context.display_mutex);
   context.display.started = context.started.load(std::memory_order_acquire);
   context.display.enabled = context.enabled.load(std::memory_order_acquire);
+  context.display.wheel_steer_enabled =
+      context.wheel_steer_enabled.load(std::memory_order_acquire);
+  context.display.wheel_steer_active = context.wheel_steer.active;
+  context.display.wheel_steer_engaged = context.wheel_steer.engaged;
+  context.display.wheel_steer_wheels =
+      static_cast<std::uint32_t>(context.wheel_steer.wheel_count);
+  context.display.wheel_steer_angle_degrees =
+      context.wheel_steer.applied_angle * kRadiansToDegrees;
+  context.display.wheel_steer_target_degrees =
+      context.wheel_steer.target_angle * kRadiansToDegrees;
+  context.display.wheel_steer_max_degrees =
+      context.wheel_steer_max_degrees.load(std::memory_order_acquire);
+  context.display.wheel_steer_gain =
+      context.wheel_steer_gain.load(std::memory_order_acquire);
+  context.display.wheel_steer_full_slip_degrees =
+      context.wheel_steer_full_slip_degrees.load(
+          std::memory_order_acquire);
+  context.display.wheel_steer_rate_degrees_per_second =
+      context.wheel_steer_rate_degrees_per_second.load(
+          std::memory_order_acquire);
   context.display.speed_distance_scale =
       context.speed_distance_scale.load(std::memory_order_acquire);
   context.display.hook_ready =
@@ -9900,6 +10672,7 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
     context->hook_target.store(view_point_target, std::memory_order_release);
   }
   ResetMotion(*context);
+  context->wheel_steer = WheelSteerState{};
   context->vehicle_present_last = false;
   context->last_vehicle_present_time = 0.0;
   context->vehicle_getter_handles = {};
@@ -9983,6 +10756,10 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
     return Status(ANOMALY_STATUS_V1_INVALID_ARGUMENT);
   }
   context->started.store(false, std::memory_order_release);
+  // Put the front wheels back to their stock relative rotation before the
+  // vehicle getter caches are dropped. If the game is already tearing down the
+  // car the writes fail harmlessly; a normal stop restores the visual pose.
+  ReleaseWheelSteer(*context);
   // Both callbacks check `started` or `g_active` first, so dropping these two
   // before any release means the revocation below has nothing to wait for.
   // Draining a callback that is still running the model is what turns a stop
@@ -10985,6 +11762,65 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
         MarkSettingsDirty(*context);
       }
 
+      const std::string wheel_steer_label = context->localizer.Label(
+          "setting.wheel_steer_enabled", "NFS drift front wheels",
+          "chase-wheel-steer-enabled");
+      int wheel_steer_enabled = display.wheel_steer_enabled ? 1 : 0;
+      if (ui->checkbox(ui->user, StringView(wheel_steer_label),
+                       &wheel_steer_enabled) != 0) {
+        context->wheel_steer_enabled.store(wheel_steer_enabled != 0,
+                                           std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+      if (display.wheel_steer_enabled) {
+        const std::string wheel_hint = context->localizer.Text(
+            "setting.wheel_steer_hint",
+            "During a drift the front wheels follow the actual travel "
+            "direction, with an explicit angle and rate limit.");
+        ui->text(ui->user, StringView(wheel_hint));
+        const auto wheel_slider =
+            [&](const char *key, const char *fallback,
+                const char *widget_key, const double value,
+                const double minimum, const double maximum,
+                std::atomic<double> &target) {
+              const std::string label = context->localizer.Label(
+                  key, fallback, widget_key);
+              float slider_value = static_cast<float>(value);
+              if (ui->slider_float(
+                      ui->user, StringView(label), &slider_value,
+                      static_cast<float>(minimum),
+                      static_cast<float>(maximum)) != 0) {
+                target.store(
+                    nfs2015_chase::Clamp(
+                        static_cast<double>(slider_value), minimum, maximum),
+                    std::memory_order_release);
+                MarkSettingsDirty(*context);
+              }
+            };
+        wheel_slider("setting.wheel_steer_max",
+                     "Front wheel visual limit (deg)",
+                     "chase-wheel-steer-max", display.wheel_steer_max_degrees,
+                     kMinimumWheelSteerMaxDegrees,
+                     kMaximumWheelSteerMaxDegrees,
+                     context->wheel_steer_max_degrees);
+        wheel_slider("setting.wheel_steer_gain", "Countersteer gain",
+                     "chase-wheel-steer-gain", display.wheel_steer_gain,
+                     kMinimumWheelSteerGain, kMaximumWheelSteerGain,
+                     context->wheel_steer_gain);
+        wheel_slider("setting.wheel_steer_full_slip",
+                     "Full-angle slip (deg)", "chase-wheel-steer-full-slip",
+                     display.wheel_steer_full_slip_degrees,
+                     kMinimumWheelSteerFullSlipDegrees,
+                     kMaximumWheelSteerFullSlipDegrees,
+                     context->wheel_steer_full_slip_degrees);
+        wheel_slider("setting.wheel_steer_rate",
+                     "Steer rate (deg/s)", "chase-wheel-steer-rate",
+                     display.wheel_steer_rate_degrees_per_second,
+                     kMinimumWheelSteerRateDegreesPerSecond,
+                     kMaximumWheelSteerRateDegreesPerSecond,
+                     context->wheel_steer_rate_degrees_per_second);
+      }
+
       const std::string distance_label = context->localizer.Label(
           "setting.speed_distance", "Speed / accel distance scale",
           "chase-speed-distance");
@@ -11352,6 +12188,17 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                       "%.2f", display.speed_distance_scale);
         DrawStatusLine(ui, context->localizer, "status.speed_distance",
                        "Speed distance scale", speed_distance_line);
+        if (display.wheel_steer_enabled) {
+          char wheel_line[160]{};
+          std::snprintf(
+              wheel_line, sizeof(wheel_line), "%+.1f° / %+.1f°  (%u %s, %s)",
+              display.wheel_steer_angle_degrees,
+              display.wheel_steer_target_degrees,
+              display.wheel_steer_wheels, "wheels",
+              display.wheel_steer_active ? "active" : "stock");
+          DrawStatusLine(ui, context->localizer, "status.wheel_steer",
+                         "Front wheel steer", wheel_line);
+        }
         DrawStatusLine(
             ui, context->localizer, "status.speed_source", "Speed source",
             context->localizer.Text(
@@ -11431,7 +12278,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
       StringView(kPluginId),
       StringView("NFS 2015 Chase Cam"),
       StringView("RobinEatCorn"),
-      StringView("2.0.2"),
+      StringView("2.0.3"),
       Load,
       Start,
       Stop,
