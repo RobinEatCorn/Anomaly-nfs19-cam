@@ -222,6 +222,11 @@ constexpr double kWheelSteerRestoreToleranceDegrees = 1.5;
 constexpr double kWheelSteerTurnInSeconds = 0.18;
 constexpr double kWheelSteerTurnInMinSeconds = 0.10;
 constexpr double kWheelSteerTurnInMaxSeconds = 0.30;
+constexpr double kWheelSteerTurnInStartSlipDegrees = 8.0;
+constexpr double kWheelSteerTurnInFullSlipDegrees = 22.0;
+constexpr double kWheelSteerMinimumTurnInAlpha = 0.08;
+constexpr double kWheelSteerTurnInRateDegreesPerSecond = 300.0;
+constexpr double kWheelSteerTurnInMaxRateDegreesPerSecond = 900.0;
 constexpr double kWheelSteerTurnInReleaseSlipDegrees = 18.0;
 constexpr double kWheelSteerReentryCooldownSeconds = 0.5;
 constexpr double kWheelSteerStandstillSpeedMps = 0.5;
@@ -1981,6 +1986,8 @@ struct WheelSteerState final {
   double target_angle{};
   double target_blend{};
   double stock_angle{};
+  double entry_stock_angle{};
+  bool entry_stock_valid{};
   double front_travel_angle{};
   double rear_travel_angle{};
   double yaw_rate{};
@@ -7841,6 +7848,8 @@ void RestoreWheelPose(Context &context) noexcept {
   state.target_angle = 0.0;
   state.target_blend = 0.0;
   state.stock_angle = 0.0;
+  state.entry_stock_angle = 0.0;
+  state.entry_stock_valid = false;
   state.front_travel_angle = 0.0;
   state.rear_travel_angle = 0.0;
   state.yaw_rate = 0.0;
@@ -8251,6 +8260,19 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   config.turn_in_seconds = kWheelSteerTurnInSeconds;
   config.turn_in_min_seconds = kWheelSteerTurnInMinSeconds;
   config.turn_in_max_seconds = kWheelSteerTurnInMaxSeconds;
+  config.turn_in_start_slip_radians =
+      kWheelSteerTurnInStartSlipDegrees *
+      nfs2015_chase::kRadiansPerDegree;
+  config.turn_in_full_slip_radians =
+      kWheelSteerTurnInFullSlipDegrees *
+      nfs2015_chase::kRadiansPerDegree;
+  config.turn_in_min_alpha = kWheelSteerMinimumTurnInAlpha;
+  config.turn_in_rate_radians_per_second =
+      kWheelSteerTurnInRateDegreesPerSecond *
+      nfs2015_chase::kRadiansPerDegree;
+  config.turn_in_max_rate_radians_per_second =
+      kWheelSteerTurnInMaxRateDegreesPerSecond *
+      nfs2015_chase::kRadiansPerDegree;
   config.turn_in_release_slip_radians =
       kWheelSteerTurnInReleaseSlipDegrees *
       nfs2015_chase::kRadiansPerDegree;
@@ -8295,28 +8317,39 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   // A new drift takes over from the stock pose at the stock angle. Starting
   // from zero is what produced the old "wheel snaps straight, then turns"
   // entry jump. Read the real wheel heading while the stock animation is still
-  // running; raw-steering * max-angle is only the fallback for a re-entry
-  // during an unfinished handoff. The takeover waits until the countersteer
-  // target has enough authority, so a normal turn does not freeze the stock
-  // animation while the travel-angle state machine is merely entering.
+  // running and keep it only as the visual starting pose; the state machine's
+  // raw stock target remains the sweep target. Overwriting the target with the
+  // measured pose is what used to freeze turn_in at a few degrees while NTE's
+  // stock animation was still ramping up.
   if (target.active && !state.animation_disabled) {
     double measured_stock = 0.0;
-    if (!state.animation_disabled &&
-        MeasureStockWheelSteer(context, state, car_forward, car_up,
-                               measured_stock)) {
-      target.stock_angle_radians = nfs2015_chase::Clamp(
-          measured_stock, -config.max_angle_radians,
-          config.max_angle_radians);
-      target.angle_radians = nfs2015_chase::Lerp(
-          target.stock_angle_radians, target.counter_angle_radians,
-          target.angle_blend);
-    }
-    state.applied_angle = target.stock_angle_radians;
+    const bool measured = MeasureStockWheelSteer(
+        context, state, car_forward, car_up, measured_stock);
+    state.entry_stock_angle = nfs2015_chase::Clamp(
+        measured ? measured_stock : target.stock_angle_radians,
+        -config.max_angle_radians, config.max_angle_radians);
+    state.entry_stock_valid = true;
+    state.applied_angle = state.entry_stock_angle;
+  }
+
+  // Compose the final visual target. The entry stock pose is only the start;
+  // turn_in_alpha decides how much of the raw stock angle the turn-in phase
+  // should show. The release phase deliberately returns to the entry pose so
+  // the handoff to the stock animation does not jump to the raw steering angle.
+  const double entry_stock = state.entry_stock_valid
+      ? state.entry_stock_angle
+      : target.stock_angle_radians;
+  if (state.entry_stock_valid) {
+    target.angle_radians = nfs2015_chase::ComposeWheelSteerTargetAngle(
+        entry_stock, target);
+    state.stock_angle = nfs2015_chase::ComposeWheelSteerStockAngle(
+        entry_stock, target);
+  } else {
+    state.stock_angle = target.stock_angle_radians;
   }
 
   state.target_angle = target.angle_radians;
   state.target_blend = target.blend;
-  state.stock_angle = target.stock_angle_radians;
   state.engaged = target.engaged;
   state.phase = target.phase;
 
@@ -8352,17 +8385,17 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
     }
   }
 
-  const double step =
-      std::isfinite(dt) ? nfs2015_chase::Clamp(dt, 0.0, 0.25) : 0.0;
-  state.applied_angle = nfs2015_chase::MoveTowards(
-      state.applied_angle, target.angle_radians,
-      config.rate_radians_per_second * step);
+  // turn_in is a visible sweep, not a hold. It uses its own rate and is
+  // guaranteed to finish before the earliest possible handoff; countersteer
+  // keeps the existing user-configurable rate.
+  state.applied_angle = nfs2015_chase::AdvanceWheelSteerAppliedAngle(
+      state.applied_angle, target, dt, config);
 
   // The release blend has reached zero, but the manual wheel may still be
   // travelling toward the stock angle. Keep the animation parked until that
   // handoff is complete; restoring earlier is the exit snap.
   if (!target.active && target.phase == nfs2015_chase::WheelSteerPhase::grip &&
-      std::fabs(state.applied_angle - target.stock_angle_radians) <=
+      std::fabs(state.applied_angle - target.angle_radians) <=
           config.restore_tolerance_radians) {
     RestoreWheelPose(context);
     return;

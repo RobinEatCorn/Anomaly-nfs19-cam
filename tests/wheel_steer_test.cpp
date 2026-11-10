@@ -11,6 +11,9 @@ using nfs2015_chase::ComputeVisualWheelRelativeRotation;
 using nfs2015_chase::ComputeWheelSteerAngleFromWorld;
 using nfs2015_chase::ComputeWheelSteerTravel;
 using nfs2015_chase::AdvanceWheelSteerTarget;
+using nfs2015_chase::AdvanceWheelSteerAppliedAngle;
+using nfs2015_chase::ComposeWheelSteerStockAngle;
+using nfs2015_chase::ComposeWheelSteerTargetAngle;
 using nfs2015_chase::Cross;
 using nfs2015_chase::Dot;
 using nfs2015_chase::kDegreesPerRadian;
@@ -230,6 +233,130 @@ int main() {
     Check(after_min.phase == WheelSteerPhase::entering ||
               after_min.phase == WheelSteerPhase::drifting,
           "high-slip turn_in should hand over after its minimum hold");
+  }
+
+  // The into-corner pose scales with rear slip: a small slide skips the
+  // full turn-in, a medium slide gets a partial stock angle, and a high-slip
+  // U-turn gets the full stock angle. The plugin composes these with the
+  // measured entry pose, so the pure state machine only needs to expose the
+  // scale and duration.
+  {
+    WheelSteerConfig scaled = config;
+    scaled.counter_authority_radians = 0.5 * kRadiansPerDegree;
+
+    WheelSteerDriftState small_state;
+    const auto small = StepTravel(small_state, scaled, 40.0, 9.0, 20.0,
+                                  19.0, -0.5, true, 0.05);
+    Check(small.phase == WheelSteerPhase::entering,
+          "small rear slip should skip the full turn_in phase");
+    Check(small.turn_in_alpha < scaled.turn_in_min_alpha,
+          "small rear slip should keep turn_in_alpha below the threshold");
+    const double small_visual = WrappedDegrees(
+        ComposeWheelSteerTargetAngle(-5.0 * kRadiansPerDegree, small));
+    Check(std::fabs(small_visual + 5.2) < 1.0,
+          "small drift should stay near the measured entry pose");
+
+    WheelSteerDriftState medium_state;
+    const auto medium = StepTravel(medium_state, scaled, 40.0, 15.0, 20.0,
+                                   19.0, -1.0, true, 0.05);
+    Check(medium.phase == WheelSteerPhase::turn_in,
+          "medium rear slip should enter turn_in");
+    Check(medium.turn_in_alpha > 0.3 &&
+              medium.turn_in_alpha < 0.7,
+          "medium rear slip should produce a partial turn-in scale");
+    Check(std::fabs(medium.turn_in_duration_seconds - 0.10) < 1e-9,
+          "medium turn-in should use the minimum visible duration");
+    const double medium_visual = WrappedDegrees(
+        ComposeWheelSteerTargetAngle(-5.0 * kRadiansPerDegree, medium));
+    Check(medium_visual < -15.0 && medium_visual > -25.0,
+          "medium drift should show a partial stock angle, not full lock");
+
+    WheelSteerDriftState high_state;
+    const auto high = StepTravel(high_state, scaled, 30.0, 25.0, 20.0,
+                                 19.0, -1.0, true, 0.05);
+    Check(high.phase == WheelSteerPhase::turn_in,
+          "high rear slip should enter turn_in");
+    Check(high.turn_in_alpha > 0.99,
+          "high rear slip should use the full turn-in scale");
+    Check(std::fabs(high.turn_in_duration_seconds - 0.18) < 1e-9,
+          "high-slip turn-in should use the full duration");
+    const double high_visual = WrappedDegrees(
+        ComposeWheelSteerTargetAngle(-5.0 * kRadiansPerDegree, high));
+    Check(std::fabs(high_visual + 35.0) < 0.1,
+          "high-slip U-turn should reach the full stock angle");
+  }
+
+  // The composition helper is the visual contract between the state machine
+  // and the measured wheel pose: alpha scales the stock target, the drift
+  // blend then moves that target toward countersteer, and release returns to
+  // the entry pose instead of snapping to the raw steering angle.
+  {
+    WheelSteerTarget target{};
+    target.phase = WheelSteerPhase::turn_in;
+    target.stock_angle_radians = -35.0 * kRadiansPerDegree;
+    target.counter_angle_radians = 20.0 * kRadiansPerDegree;
+    target.angle_blend = 0.0;
+    target.turn_in_alpha = 0.0;
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerTargetAngle(
+                        -5.0 * kRadiansPerDegree, target)) + 5.0) < 0.01,
+          "zero alpha must keep the measured entry pose");
+    target.turn_in_alpha = 0.5;
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerStockAngle(
+                        -5.0 * kRadiansPerDegree, target)) + 20.0) < 0.01,
+          "half alpha must produce a halfway stock target");
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerTargetAngle(
+                        -5.0 * kRadiansPerDegree, target)) + 20.0) < 0.01,
+          "half alpha must blend halfway to the raw stock angle");
+    target.turn_in_alpha = 1.0;
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerTargetAngle(
+                        -5.0 * kRadiansPerDegree, target)) + 35.0) < 0.01,
+          "full alpha must reach the raw stock angle");
+
+    target.phase = WheelSteerPhase::entering;
+    target.angle_blend = 1.0;
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerTargetAngle(
+                        -5.0 * kRadiansPerDegree, target)) - 20.0) < 0.01,
+          "full drift blend must reach countersteer");
+
+    target.phase = WheelSteerPhase::releasing;
+    target.angle_blend = 0.0;
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerTargetAngle(
+                        -5.0 * kRadiansPerDegree, target)) + 5.0) < 0.01,
+          "release must return to the measured entry pose");
+
+    target.phase = WheelSteerPhase::grip;
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerTargetAngle(
+                        -5.0 * kRadiansPerDegree, target)) + 5.0) < 0.01,
+          "grip handoff must hold the measured entry pose");
+  }
+
+  // The applied-angle helper is the actual visual sweep. Starting at the
+  // measured 5 degrees, a high-slip turn_in must reach the full stock target
+  // within turn_in_min_seconds, not stay frozen at the measured pose.
+  {
+    WheelSteerTarget target{};
+    target.phase = WheelSteerPhase::turn_in;
+    target.angle_radians = -35.0 * kRadiansPerDegree;
+    target.turn_in_duration_seconds = 0.18;
+    target.turn_in_alpha = 1.0;
+    double applied = -5.0 * kRadiansPerDegree;
+    for (int tick = 0; tick < 6; ++tick) {
+      applied = AdvanceWheelSteerAppliedAngle(
+          applied, target, 1.0 / 60.0, config);
+    }
+    Check(std::fabs(WrappedDegrees(applied) + 35.0) < 0.5,
+          "high-slip turn_in must reach full stock before handoff");
+
+    target.angle_radians = -20.0 * kRadiansPerDegree;
+    target.turn_in_duration_seconds = 0.10;
+    target.turn_in_alpha = 0.5;
+    applied = -5.0 * kRadiansPerDegree;
+    for (int tick = 0; tick < 6; ++tick) {
+      applied = AdvanceWheelSteerAppliedAngle(
+          applied, target, 1.0 / 60.0, config);
+    }
+    Check(std::fabs(WrappedDegrees(applied) + 20.0) < 0.5,
+          "medium turn_in must reach its partial stock target");
   }
 
   // If the driver is already countersteering, skip turn_in.

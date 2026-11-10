@@ -161,6 +161,17 @@ struct WheelSteerConfig final {
   double turn_in_seconds{0.18};
   double turn_in_min_seconds{0.10};
   double turn_in_max_seconds{0.30};
+  // Small drifts should not flash the full stock angle. Scale the turn-in
+  // target and duration by the rear-axle slip between these two thresholds.
+  // Below the start threshold the turn-in phase is skipped entirely.
+  double turn_in_start_slip_radians{8.0 * kRadiansPerDegree};
+  double turn_in_full_slip_radians{22.0 * kRadiansPerDegree};
+  double turn_in_min_alpha{0.08};
+  // The explicit turn-in sweep is separate from the countersteer rate. It has
+  // to reach the scaled stock target before the turn-in timer expires, even
+  // when the stock wheel animation was still ramping up at takeover.
+  double turn_in_rate_radians_per_second{300.0 * kRadiansPerDegree};
+  double turn_in_max_rate_radians_per_second{900.0 * kRadiansPerDegree};
   double turn_in_release_slip_radians{18.0 * kRadiansPerDegree};
   // After a real release, do not immediately re-enter on the next tick. This
   // is not a speed threshold; it prevents state chatter at the exit slip.
@@ -188,6 +199,10 @@ struct WheelSteerDriftState final {
   double hold_seconds{};
   double exit_hold_seconds{};
   double turn_in_seconds{};
+  // Captured at entry. Keeping the entry slip scale stable avoids the turn-in
+  // target moving around while the rear slip is still crossing the threshold.
+  double turn_in_duration{};
+  double turn_in_alpha{};
   double blend{};
   // Last countersteer target from a valid drift tick. The release phase keeps
   // using it while the blend returns to the stock angle; recomputing it from a
@@ -214,6 +229,11 @@ struct WheelSteerTarget final {
   // when entering, so this is the final visual blend.
   double angle_blend{};
   double blend{};
+  // Entry-slip scale captured by the state machine. The plugin uses it to
+  // blend between the measured stock pose and the raw stock target, and to
+  // choose how long the turn-in phase should last.
+  double turn_in_alpha{};
+  double turn_in_duration_seconds{};
   WheelSteerPhase phase{WheelSteerPhase::grip};
 };
 
@@ -328,6 +348,18 @@ struct WheelSteerTravel final {
 
   const double absolute_slip =
       finite_angles ? std::fabs(rear_travel_angle) : 0.0;
+  // The turn-in pose is only needed for a deliberate drift entry. Scale it by
+  // rear slip so a small slide does not show the same full-lock stock angle as
+  // a high-speed U-turn.
+  const double turn_in_start_slip =
+      (std::max)(0.0, config.turn_in_start_slip_radians);
+  const double turn_in_full_slip = (std::max)(
+      config.turn_in_full_slip_radians, turn_in_start_slip + 1e-6);
+  const double turn_in_alpha =
+      finite_angles
+          ? SmoothStep(turn_in_start_slip, turn_in_full_slip,
+                       absolute_slip)
+          : 0.0;
   const bool start_requested =
       entry_valid && absolute_slip >= config.enter_slip_radians;
   const bool below_exit =
@@ -374,6 +406,7 @@ struct WheelSteerTravel final {
   const auto enter_entering = [&]() {
     state.phase = WheelSteerPhase::entering;
     state.turn_in_seconds = 0.0;
+    state.turn_in_duration = 0.0;
   };
 
   switch (state.phase) {
@@ -382,13 +415,30 @@ struct WheelSteerTravel final {
       state.hold_seconds = 0.0;
       state.exit_hold_seconds = 0.0;
       state.turn_in_seconds = 0.0;
+      state.turn_in_duration = 0.0;
+      state.turn_in_alpha = 0.0;
       state.standstill_seconds = 0.0;
       if (start_requested && state.reentry_cooldown <= 0.0 &&
           has_authority) {
         const bool steering_into =
             steering_known && steering_input * raw_counter < 0.0;
-        state.phase = steering_into ? WheelSteerPhase::turn_in
-                                    : WheelSteerPhase::entering;
+        // If the driver is already countersteering there is nothing to turn
+        // into, so keep the entry scale at zero and blend straight to the
+        // countersteer target. For an into-corner entry, low slip skips the
+        // phase entirely and high slip gets the full stock sweep.
+        state.turn_in_alpha = steering_into ? turn_in_alpha : 0.0;
+        if (steering_into &&
+            state.turn_in_alpha >= config.turn_in_min_alpha) {
+          state.phase = WheelSteerPhase::turn_in;
+          const double scaled_duration =
+              config.turn_in_seconds * state.turn_in_alpha;
+          state.turn_in_duration = Clamp(
+              scaled_duration, config.turn_in_min_seconds,
+              config.turn_in_max_seconds);
+        } else {
+          state.phase = WheelSteerPhase::entering;
+          state.turn_in_duration = 0.0;
+        }
         state.hold_seconds = 0.0;
         state.exit_hold_seconds = 0.0;
         state.turn_in_seconds = 0.0;
@@ -423,7 +473,7 @@ struct WheelSteerTravel final {
             state.turn_in_seconds >= config.turn_in_min_seconds;
         if (!steering_into || slip_high ||
             state.turn_in_seconds >= config.turn_in_max_seconds ||
-            state.turn_in_seconds >= config.turn_in_seconds) {
+            state.turn_in_seconds >= state.turn_in_duration) {
           enter_entering();
         }
       }
@@ -465,6 +515,8 @@ struct WheelSteerTravel final {
         state.hold_seconds = 0.0;
         state.exit_hold_seconds = 0.0;
         state.turn_in_seconds = 0.0;
+        state.turn_in_duration = 0.0;
+        state.turn_in_alpha = 0.0;
         state.counter_angle = 0.0;
         state.standstill_seconds = 0.0;
         state.reentry_cooldown = config.reentry_cooldown_seconds;
@@ -480,6 +532,8 @@ struct WheelSteerTravel final {
       Lerp(result.stock_angle_radians, result.counter_angle_radians,
            result.angle_blend);
   result.blend = state.blend;
+  result.turn_in_alpha = state.turn_in_alpha;
+  result.turn_in_duration_seconds = state.turn_in_duration;
   result.phase = state.phase;
   // The authority gate is applied when entering. Once the state machine has
   // committed to a drift, keep the wheel override through release so the
@@ -489,6 +543,57 @@ struct WheelSteerTravel final {
                    state.phase == WheelSteerPhase::entering ||
                    state.phase == WheelSteerPhase::drifting;
   return result;
+}
+
+// The state machine's target is expressed against the raw steering input. The
+// plugin knows the wheel's actual pose at takeover, so it blends from that
+// measured pose to the scaled stock target before applying the countersteer
+// blend. Small drifts stay near the measured pose; a high-slip U-turn reaches
+// the full stock angle and then hands over to countersteer.
+[[nodiscard]] inline double ComposeWheelSteerStockAngle(
+    const double entry_stock_angle, const WheelSteerTarget& target) noexcept {
+  if (target.phase == WheelSteerPhase::grip ||
+      target.phase == WheelSteerPhase::releasing) {
+    return entry_stock_angle;
+  }
+  return Lerp(entry_stock_angle, target.stock_angle_radians,
+              target.turn_in_alpha);
+}
+
+[[nodiscard]] inline double ComposeWheelSteerTargetAngle(
+    const double entry_stock_angle, const WheelSteerTarget& target) noexcept {
+  const double stock =
+      ComposeWheelSteerStockAngle(entry_stock_angle, target);
+  if (target.phase == WheelSteerPhase::grip) {
+    return stock;
+  }
+  return Lerp(stock, target.counter_angle_radians, target.angle_blend);
+}
+
+// Advance the visual wheel angle for one tick. Keeping this rate calculation
+// here lets the turn-in sweep be tested without the game, and keeps the plugin
+// from accidentally using the slower countersteer rate during turn-in.
+[[nodiscard]] inline double AdvanceWheelSteerAppliedAngle(
+    const double current_angle, const WheelSteerTarget& target,
+    const double dt, const WheelSteerConfig& config) noexcept {
+  const double step = std::isfinite(dt) ? Clamp(dt, 0.0, 0.25) : 0.0;
+  double rate = config.rate_radians_per_second;
+  if (target.phase == WheelSteerPhase::turn_in) {
+    // A high-slip entry can leave turn_in after turn_in_min_seconds even when
+    // the scaled duration is longer. Use the earliest possible handoff time so
+    // the stock sweep is complete before the countersteer blend begins.
+    const double sweep_time = (std::max)(
+        1e-3, (std::min)(target.turn_in_duration_seconds,
+                         config.turn_in_min_seconds));
+    const double needed =
+        std::fabs(target.angle_radians - current_angle) / sweep_time;
+    rate = (std::max)(
+        rate,
+        (std::max)(config.turn_in_rate_radians_per_second,
+                   (std::min)(needed,
+                              config.turn_in_max_rate_radians_per_second)));
+  }
+  return MoveTowards(current_angle, target.angle_radians, rate * step);
 }
 
 // Return the wheel RelativeRotation that makes the wheel's axle perpendicular
