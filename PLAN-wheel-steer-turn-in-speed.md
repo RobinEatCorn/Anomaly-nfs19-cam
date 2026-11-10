@@ -12,7 +12,7 @@
 
 1. 高速手刹进入尖锐 U 型弯时，前轮没有先向弯内转，而是直接反打。
 2. 下坡 U 型弯中速度从 90 km/h 降到 48 km/h 以下再恢复到 80 km/h 时，前轮出现
-   “反打 → 不反打 → 再反打”的闪断。
+   “反打 → 不反打 → 再反打”的闪断；漂移角过大时前向速度接近 0，也会触发同样的闪断。
 3. 部分漂移中反打角偏大，前轮看起来打得过满。
 4. NTE 的车速整体低于 NFS 2015，30 mph（48 km/h）的准入门槛偏高。
 
@@ -51,7 +51,10 @@ angle = Lerp(stock, counter, smoothstep(blend) * counter_authority)
 - 当前 `valid` 把 **30 mph 准入速度**当成了**持续漂移条件**。
 - 速度低于 48 km/h 时 `valid = false`，状态机立即进入 `releasing`，目标回到原厂角；
   速度恢复且滑移仍在时又重新 `entering`，于是出现反打/不反打/再反打。
-- 退出逻辑没有把“进入速度”和“维持速度”分开。
+- 更严重的是 `valid` 还要求 `forward_speed > 0.1`。当漂移角接近 90° 时，车辆总速度
+  仍然很高，但前向分量可以接近 0；这会被误判为“没在移动”，同样触发释放。
+- 退出逻辑把“进入速度/前向速度门槛”和“漂移是否继续”混在了一起，不符合 NFS 2015
+  只在进入时看速度、退出时看滑移角的做法。
 
 ### 2.3 为什么反打角会偏大
 
@@ -116,10 +119,14 @@ Steering_amount_on_exit_drift            0.35
 - 腾空、倒车、碰撞、空挡/极低速、手刹、失去轮胎抓地；
 - 进入后至少锁定 **0.5s**；
 - 锁定结束后，平均后轮滑移角低于 `Drift_angle_to_exit_drift`（默认 3°）；
-- 退出时用 `Steering_amount_on_exit_drift`（0.35）缩回方向盘，而不是瞬间回正。
+- 退出时用 `Steering_amount_on_exit_drift`（0.35）缩回方向盘，而不是瞬间回正；
+- 空挡判断使用**总速度**：`isInNeutral = |speed| < 0.5 m/s && clutch < 0.5`。
+  它不会把“前向速度接近 0、但横向仍在高速滑动”的大角度漂移误判为停车。
 
-没有“速度低于 30 mph 就退出”这一条。NFS15Revival 的复刻代码另外用了约
-**13 mph（21 km/h）**的低速退出线，可作为“维持速度下限”的量级参考。
+没有“速度低于 30 mph 就退出”这一条。NFS15Revival 的复刻代码另有一个约
+**13 mph（21 km/h）**的低速退出线，但这不是我们这次要采用的通用维持门槛：按你的
+下坡 U 型弯场景，只要车辆还有实际运动、后轮还在滑，就应该继续反打。因此本方案
+**不设置维持速度下限**，退出只由滑移角和物理失效条件决定。
 
 ### 3.3 反打角：方向盘输入 + 滑移角重映射 + 有限速率
 
@@ -264,14 +271,14 @@ grip
 turn_in
   ├─ 保持时间到 / 后轴滑移继续增大 / 方向盘不再向弯内
   │     └─> entering
-  └─ 滑移低于退出阈值或速度低于维持下限
+  └─ 滑移低于退出阈值并持续退出确认时间
         └─> releasing
 
 entering
   └─ blend 到 1 ─> drifting
 
 drifting
-  └─ 滑移低于退出阈值持续 0.25s，或速度低于维持下限
+  └─ 滑移低于退出阈值持续 0.25s
         └─> releasing
 
 releasing
@@ -309,29 +316,36 @@ releasing
 0° 或直接右打
 ```
 
-### 5.3 速度条件拆成“进入”和“维持”
+### 5.3 速度只用于进入，不用于维持
 
 ```text
-entry_valid = enabled && speed >= entry_speed && forward_speed > 0.1
-stay_valid  = enabled && speed >= stay_speed  && forward_speed > 0.1
+entry_valid = enabled
+              && total_speed >= entry_speed
+              && forward_speed > 0.1
+
+engaged     = turn_in / entering / drifting / releasing
 ```
 
 - 只有 `grip` 状态使用 `entry_valid`；
-- `turn_in/entering/drifting/releasing` 使用 `stay_valid`；
-- 进入后不再因为速度低于 48 km/h 而退出；
-- 速度低于维持下限、倒车、极低速/空挡时才释放；
-- 释放后设置 0.5s 的再进入冷却，避免在阈值附近来回闪断。
+- **一旦进入 turn_in/entering/drifting，不再因为速度、前向速度下降而退出**；
+- 漂移角接近 90° 时 `forward_speed` 接近 0 是正常现象，不能作为退出条件；
+- 维持阶段只由后轴滑移角低于 `exit_slip` 并持续 `exit_hold` 决定退出；
+- 倒车、腾空、失去抓地/碰撞等物理失效仍然退出；
+- 释放后设置 0.5s 的再进入冷却，避免真正退出后在阈值附近来回闪断。
 
 推荐值：
 
 ```text
 entry_speed = 40 km/h (11.1 m/s)
-stay_speed  = 20 km/h (5.6 m/s)
 ```
 
-40 km/h 比 NFS 的 48 km/h 低约 17%，适合 NTE 的速度；20 km/h 接近 NFS15Revival
-的低速退出量级（约 13 mph / 21 km/h）。如果实机仍觉得 40 km/h 偏高，可以再降到
-35 km/h，但不建议低于 30 km/h，否则低速掉头会重新进入反打。
+40 km/h 比 NFS 的 48 km/h 低约 17%，适合 NTE 的速度。如果实机仍觉得 40 km/h 偏高，
+可以再降到 35 km/h，但不建议低于 30 km/h，否则低速掉头会重新进入反打。
+
+> **关于“总速度几乎为零”**：不再设置任何维持速度阈值。只有总速度矢量退化到无法
+> 定义方向（例如小于 0.5 m/s）时，才保留最后一次 counter 目标最多 `0.5s`；速度恢复后
+> 继续使用同一 drift 状态，超过 `0.5s` 仍无法定义方向才释放。这个 0.5 m/s / 0.5s
+> 是数值退化保护，不是“低于 20 km/h 就退出”的玩法门槛。
 
 ### 5.4 前轴目标角
 
@@ -439,7 +453,7 @@ SceneComponent ComponentToWorld translation: +0x210 (3×double, cm)
 | 参数 | 当前 | 方案 | 说明 |
 |---|---:|---:|---|
 | 进入速度 | 30 mph / 48 km/h | **40 km/h** | 降低 NTE 准入门槛 |
-| 维持速度 | 同进入速度（bug） | **20 km/h** | 避免 48 km/h 闪断 |
+| 维持速度 | 同进入速度 + 前向速度门槛（bug） | **无** | 进入后只由滑移角退出 |
 | 进入滑移 | 车身 6.5° | 后轴 6.5°，回退车身 | NFS 用后轮滑移 |
 | 退出滑移 | 车身 3° | 后轴 3°，回退车身 | 保持 NFS 量级 |
 | 入弯保持 | 无 | **0.18s**（0.12–0.25） | 只在本方向盘向弯内时 |
@@ -452,11 +466,12 @@ SceneComponent ComponentToWorld translation: +0x210 (3×double, cm)
 | 最大角范围 | 20–50° | 20–50°（默认 32°） | 保留用户可调 |
 | 退出确认 | 0.25s | 0.25s | 保持 |
 | 漂移锁定 | 0.5s | 0.5s | 保持 |
-| 再进入冷却 | 无 | **0.5s** | 防止阈值附近闪断 |
+| 再进入冷却 | 无 | **0.5s** | 防止真正退出后阈值附近闪断 |
+| 静止退化保持 | 无 | **0.5s** | 仅总速度 <0.5 m/s 时保留最后目标 |
 | 恢复容差 | 1.5° | 1.5° | 保持 |
 
-> `entry_speed` / `stay_speed` 先作为内部常量，不增加 UI 滑条；如果实机发现不同车辆
-> 差异明显，再考虑增加“漂移准入速度”高级选项。
+> `entry_speed` 先作为内部常量，不增加 UI 滑条；如果实机发现不同车辆差异明显，再考虑
+> 增加“漂移准入速度”高级选项。`stay_speed` 不实现。
 
 ---
 
@@ -467,11 +482,11 @@ SceneComponent ComponentToWorld translation: +0x210 (3×double, cm)
 1. 增加 `WheelSteerPhase::turn_in`。
 2. `WheelSteerConfig` 增加：
    - `entry_speed_mps`
-   - `stay_speed_mps`
    - `turn_in_seconds`
    - `turn_in_max_seconds`
    - `turn_in_release_slip_radians`
    - `reentry_cooldown_seconds`
+   - `standstill_grace_seconds`（默认 0.5s，仅用于速度矢量退化）
 3. `WheelSteerDriftState` 增加：
    - `turn_in_seconds`
    - `reentry_cooldown`
@@ -484,7 +499,7 @@ SceneComponent ComponentToWorld translation: +0x210 (3×double, cm)
    - `front_travel_angle`
    - `rear_travel_angle`
    - `steering_input`
-   - `entry_valid` / `stay_valid`
+   - `entry_valid`
    或者在函数内部接收速度/yaw/offset，保持纯函数可测。
 6. `grip` 状态分别判断：
    - `entry_valid && rear_slip >= enter`
@@ -497,11 +512,12 @@ SceneComponent ComponentToWorld translation: +0x210 (3×double, cm)
 
 1. 新增常量：
    - `kWheelSteerEntrySpeedMps = 40.0 / 3.6`
-   - `kWheelSteerStaySpeedMps = 20.0 / 3.6`
+   - 不再新增 `kWheelSteerStaySpeedMps`；维持阶段没有速度下限
    - `kWheelSteerTurnInSeconds = 0.18`
    - `kWheelSteerTurnInMaxSeconds = 0.30`
    - `kWheelSteerTurnInReleaseSlipDegrees = 18.0`
    - `kWheelSteerReentryCooldownSeconds = 0.5`
+   - `kWheelSteerStandstillGraceSeconds = 0.5`（仅用于总速度退化保护）
 2. 默认最大角 `40 → 32`；全滑移 `35 → 40`。
 3. 在 `WheelSteerState` 增加：
    - 前后轴中心位置/偏移
@@ -530,14 +546,16 @@ SceneComponent ComponentToWorld translation: +0x210 (3×double, cm)
    不是反打；0.2s 后开始向反打混合。
 2. **已反打**：同样滑移但方向盘已反打，跳过 turn_in，直接 entering。
 3. **速度回差**：48→45→80 km/h，滑移保持 10°，状态保持 `drifting`，counter 不重置。
-4. **低速退出**：速度降到 15 km/h，进入 releasing；恢复到 45 km/h 后需要 0.5s 冷却
-   才可重新进入。
-5. **前轴修正**：相同车身滑移下，加入正 yaw rate 和前轴偏移后，前轴目标角小于中心目标角；
+4. **大角度近零前向速度**：总速度仍高、`forward_speed ≈ 0`、后轴滑移 30°，状态必须
+   保持 `drifting`，counter 不归零；总速度恢复到正常值后继续同一 drift。
+5. **完全静止退化**：总速度降到 0.5 m/s 以下时保留最后一次 counter 短暂保持；不因
+   “低于某个 km/h”立即释放；速度恢复后仍可继续。
+6. **前轴修正**：相同车身滑移下，加入正 yaw rate 和前轴偏移后，前轴目标角小于中心目标角；
    yaw rate=0 时两者一致。
-6. **两轮同角**：左右前轮使用同一个 `target_forward`。
-7. **默认角**：默认最大角为 32°，60° 滑移仍被钳制。
-8. **NFS 值**：进入 6.5°、退出 3°、锁定 0.5s、速率 120°/s 保持。
-9. **普通高速转弯**：小 counter 目标不接管动画，保留原厂角。
+7. **两轮同角**：左右前轮使用同一个 `target_forward`。
+8. **默认角**：默认最大角为 32°，60° 滑移仍被钳制。
+9. **NFS 值**：进入 6.5°、退出 3°、锁定 0.5s、速率 120°/s 保持。
+10. **普通高速转弯**：小 counter 目标不接管动画，保留原厂角。
 
 ### 7.4 实机验证
 
@@ -545,6 +563,7 @@ SceneComponent ComponentToWorld translation: +0x210 (3×double, cm)
 
 1. 90 km/h 左 U 型弯，手刹进入：前轮先左打约 0.15–0.25s，再平滑反打。
 2. 下坡 U 型弯，速度 90→48 以下→80 km/h：状态保持 `drifting`，无反打/不反打/再反打。
+   同时测试漂移角接近 90°、前向速度接近 0 但总速度仍高的时刻，反打不能消失。
 3. 大角度漂移：反打目标不超过默认 32°，目视不再“打满”。
 4. 30–35 km/h 低速掉头/手刹掉头：不进入反打。
 5. 40 km/h 以下普通转弯：不接管动画。
@@ -573,7 +592,8 @@ grip -> entering -> drifting -> releasing -> grip -> entering ...
 ## 8. 验收标准
 
 - 高速手刹 U 型弯：入弯阶段至少有 0.12s 的向弯内前轮姿态，之后才反打。
-- 速度在 48 km/h 上下变化但仍在 20 km/h 以上、滑移未消失：状态不退出 drift。
+- 进入后速度在 48 km/h 上下变化、甚至前向速度接近 0，只要总速度有效且后轴滑移
+  未低于退出阈值：状态不退出 drift，反打不消失。
 - 默认反打角不超过 32°；大滑移下也不超过 UI 设定上限。
 - 30–35 km/h 低速掉头不进入反打；40 km/h 以上才可能进入。
 - 普通高速转弯不因为 6.5° 滑移而冻结原厂动画。
@@ -597,6 +617,9 @@ grip -> entering -> drifting -> releasing -> grip -> entering ...
 6. **默认 32° 是否够**：如果用户喜欢更大的视觉角，UI 仍可调到 50°；但默认值应保守。
 7. **NFS native 公式未静态还原**：若需要精确复刻，需要运行中进程 dump；当前方案以
    NFS 配置量级 + 正常车辆运动学为准。
+8. **取消维持速度后的低速边界**：车辆真正停住或总速度接近 0 时，速度矢量无法定义
+   反打方向。此时保留最后一次 counter 一小段时间，速度恢复则继续；如果长期停住，
+   再由滑移角/静止条件释放。不要为了处理这个边界重新引入 20 km/h 的维持门槛。
 
 ---
 
