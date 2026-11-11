@@ -139,7 +139,8 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── RELEASE-NOTES-2.0.0.md 2.7.0 适配与迁移说明
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
 ├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
-├── plugin.cpp            ABI 入口、生命周期、hooks、相机/渲染接线、UI
+├── plugin.cpp            薄入口：只填 AnomalyPluginDescriptorV1 的函数表
+├── src/                  插件的全部实现（见下节「源码布局」）
 ├── chase_cam.hpp         NFS 2015 相机模型（两个预设）
 ├── view_blend.hpp        渲染帧插值
 ├── localization.hpp      插件自己的本地化 helper（不依赖宿主内部头文件）
@@ -148,6 +149,35 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── LICENSE               AGPL-3.0-only
 └── README.md
 ```
+
+### 源码布局
+
+`plugin.cpp` 只保留 `AnomalyPluginEntryV1`：它把 `src/` 里的函数地址填进插件描述符，
+其余实现全部按职责拆在 `src/` 下。跨文件的函数声明集中在 `src/internal.hpp`，
+共享状态（`Context` 及其子状态）在 `src/state.hpp`，常量与 hook pattern 在 `src/constants.hpp`。
+
+| 文件 | 职责 |
+|---|---|
+| `src/constants.hpp` | 全部 `constexpr`：ID、默认值、hook pattern、引擎偏移、设置 schema |
+| `src/state.hpp` | `Context` 及各子状态结构；字段顺序即线程契约 |
+| `src/sdk.hpp` | 函数指针 typedef、SDK 支撑函数的声明、`g_*` 原子量外声明 |
+| `src/internal.hpp` | 模块间函数声明（跨 TU 用） |
+| `src/globals.cpp` | 8 个 `g_*` 原子量（detour 原始函数与活动实例） |
+| `src/sdk_support.cpp` | `Status`/`Bytes`/`Query`/`*Ready`/`Read`/`Write`/`Log`/`Note*` |
+| `src/lifecycle.cpp` | `Load`/`Start`/`Stop`/`Unload`/`Update` 五个 ABI 回调 |
+| `src/game_tick.cpp` | `QueryPlayer`、运动学积分、偏航来源选择 |
+| `src/presenter.cpp` | T2 presenter 的 seqlock 写入与 `UpdateCamera` |
+| `src/display.cpp` | `UpdateDisplay` 与三条诊断日志 |
+| `src/hooks.cpp` | 渲染侧四个 detour 与签名解析、安装、释放 |
+| `src/camera_detour.cpp` | 相机 `view point` 主 detour |
+| `src/routeb.cpp` | Route B 位姿构造与视图写入 |
+| `src/render_x_probe.cpp` | 渲染线程车辆 X 探查与版本保险 |
+| `src/vehicle.cpp` | 车辆存在性与速度读取 |
+| `src/wheel_steer.cpp` | 漂移前轮反打 |
+| `src/burnout.cpp` | 烧胎探查与镜头信号 |
+| `src/ahud_probe.cpp` | AHUD 帧探针 |
+| `src/settings.cpp` | 设置校验、持久化、默认值、热键 |
+| `src/ui.cpp` | `Draw`、设置窗口与诊断面板 |
 
 ## 构建
 
