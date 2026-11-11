@@ -43,8 +43,11 @@ usage() {
 
 选项
   -s DIR, --sdk DIR       AnomalySDK 安装前缀，或它的 lib/cmake/AnomalySDK 目录
-                          默认依次尝试 ../Anomaly/.build/windows-vs2022/package/sdk、
-                          ../build-ninja/package/sdk、../Anomaly/build/package/sdk
+                          默认在 ../Anomaly/.build/windows-vs2022/package/sdk、
+                          ../build-ninja/package/sdk、../Anomaly/build/package/sdk、
+                          ../Download/Anomaly-*-sdk 里挑版本号最高的那个（同一台机器
+                          上常同时躺着旧构建树快照和正式发布的 SDK，旧 SDK 缺少
+                          新版 API，按路径顺序取第一个会编不过）
   -b DIR, --build-dir DIR 构建树（默认 ./build.mingw）
   -c TYPE, --build-type   CMAKE_BUILD_TYPE（默认 RelWithDebInfo）
   -j N, --parallel N      并行度（默认 CPU 核数；-j 不带数字等于默认值）
@@ -159,17 +162,45 @@ sdk_from() {
     fi
 }
 
+# SDK 版本号取自安装时生成的版本文件，用来在多个候选里挑最新的那份。
+sdk_version_from() {
+    local cmake_dir
+    cmake_dir="$(sdk_from "$1")" || return 1
+    local version_file="$cmake_dir/AnomalySDKConfigVersion.cmake"
+    if [[ -f "$version_file" ]]; then
+        # CMake 在 Windows 上生成的文件是 CRLF，先去掉 \r 再按行尾锚定。
+        tr -d '\r' <"$version_file" |
+            sed -n 's/^set(PACKAGE_VERSION "\([^"]*\)")$/\1/p' | head -n 1
+    else
+        printf '0.0.0\n'
+    fi
+}
+
+# version_gt A B：A 严格大于 B 时返回 0。sort -V 做点号版本比较。
+version_gt() {
+    [[ "$1" != "$2" ]] &&
+        [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" == "$1" ]]
+}
+
 sdk_cmake_dir=""
+sdk_version=""
 if [[ -n "$SDK_ARG" ]]; then
     sdk_cmake_dir="$(sdk_from "$SDK_ARG")" ||
         die "--sdk $SDK_ARG 里没有 AnomalySDKConfig.cmake（需要已安装的 SDK 前缀）"
+    sdk_version="$(sdk_version_from "$SDK_ARG" || true)"
 else
     for candidate in \
         "$SOURCE_DIR/../Anomaly/.build/windows-vs2022/package/sdk" \
         "$SOURCE_DIR/../build-ninja/package/sdk" \
-        "$SOURCE_DIR/../Anomaly/build/package/sdk"; do
-        if sdk_cmake_dir="$(sdk_from "$candidate")"; then break; fi
-        sdk_cmake_dir=""
+        "$SOURCE_DIR/../Anomaly/build/package/sdk" \
+        "$SOURCE_DIR"/../Download/Anomaly-*-sdk; do
+        candidate_dir="$(sdk_from "$candidate")" || continue
+        candidate_version="$(sdk_version_from "$candidate" || true)"
+        candidate_version="${candidate_version:-0.0.0}"
+        if [[ -z "$sdk_cmake_dir" ]] || version_gt "$candidate_version" "$sdk_version"; then
+            sdk_cmake_dir="$candidate_dir"
+            sdk_version="$candidate_version"
+        fi
     done
     [[ -n "$sdk_cmake_dir" ]] || die "找不到 AnomalySDK：
   cmake --install <anomaly-build> --prefix <sdk> --component SDK
@@ -185,7 +216,7 @@ sdk_cmake_dir="$(cd -- "$sdk_cmake_dir" && pwd)"
 # ---------------------------------------------------------------- configure
 info "源码        $SOURCE_DIR"
 info "构建树      $BUILD_DIR"
-info "SDK         ${sdk_cmake_dir%/lib/cmake/AnomalySDK}"
+info "SDK         ${sdk_cmake_dir%/lib/cmake/AnomalySDK}${sdk_version:+（版本 $sdk_version）}"
 info "工具链      $cxx"
 info "构建类型    $BUILD_TYPE（$PARALLEL 路并行）"
 
