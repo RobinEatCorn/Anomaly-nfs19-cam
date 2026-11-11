@@ -113,4 +113,50 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
 UpdateBurnoutDetection(Context &context, bool on_ground, double speed_mps,
                        double forward_speed, double dt) noexcept;
 
+// --- render_x_probe.cpp ---------------------------------------------------
+void TryResolveRenderX(Context &context) noexcept;
+void EvaluateAnchorInsurance(Context &context) noexcept;
+void UpdateRenderXProbe(Context &context, const double base_cm[3],
+                        bool player_valid) noexcept;
+void SampleRenderXPhase(Context &context) noexcept;
+
+// --- hooks.cpp ------------------------------------------------------------
+[[nodiscard]] bool ResolveSignature(Context &context,
+                                    std::string_view pattern,
+                                    std::uintptr_t &address) noexcept;
+[[nodiscard]] bool ResolveCameraPov(Context &context) noexcept;
+AnomalyStatusV1 ResolveSignatureStatus(const Context &context,
+                                       std::string_view pattern,
+                                       std::uintptr_t &address) noexcept;
+[[nodiscard]] bool EnsurePrepareViewStateHook(Context &context) noexcept;
+[[nodiscard]] bool EnsureViewUniformHook(Context &context) noexcept;
+[[nodiscard]] bool EnsureTransformHook(Context &context) noexcept;
+[[nodiscard]] bool EnsureHook(Context &context) noexcept;
+void ReleaseHook(Context &context) noexcept;
+
+// --- routeb.cpp -----------------------------------------------------------
+[[nodiscard]] double UpdateRenderPitch(Context &context) noexcept;
+[[nodiscard]] bool ReadRouteBDirectCar(const RenderXProbe &probe,
+                                       double car_cm[3],
+                                       double forward[3]) noexcept;
+[[nodiscard]] bool ApplyRouteBEarly(Context &context, void *renderer) noexcept;
+void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
+                                  const double forward[3]) noexcept;
+
+// --- presenter.cpp --------------------------------------------------------
+[[nodiscard]] bool AdvancePresenter(Context &context, std::int64_t now_ns,
+                                    const double *game_eye_cm,
+                                    double location[3], double rotation[3],
+                                    float *lens, bool *fov_enabled,
+                                    bool *advanced) noexcept;
+void RequestPresenterReset(Context &context) noexcept;
+[[nodiscard]] bool ReadPresenterPose(const Context &context,
+                                     double location[3], double rotation[3],
+                                     float *lens, bool *fov_enabled,
+                                     double car_cm[3] = nullptr) noexcept;
+
+// --- camera_detour.cpp ----------------------------------------------------
+void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
+                                        double *rotation) noexcept;
+
 }  // namespace nfs2015_chase_cam::detail
