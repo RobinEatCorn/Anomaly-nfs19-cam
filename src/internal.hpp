@@ -159,4 +159,50 @@ void RequestPresenterReset(Context &context) noexcept;
 void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
                                         double *rotation) noexcept;
 
+// --- game_tick.cpp --------------------------------------------------------
+[[nodiscard]] bool QueryPlayer(Context &context, double origin_cm[3],
+                               double base_cm[3], std::uint64_t &sequence,
+                               AnomalyGenerationHandleV1 &handle) noexcept;
+double WrappedAngle(double angle) noexcept;
+void ResetRenderPitch(Context &context) noexcept;
+[[nodiscard]] bool WorldChanged(Context &context) noexcept;
+void ResetMotion(Context &context) noexcept;
+void UpdateBrakeInput(Context &context, bool speed_valid, bool speed_fresh,
+                      bool derived, double speed_kmh, double dt) noexcept;
+void UpdateMotion(Context &context, const double origin_cm[3],
+                  std::uint64_t sequence) noexcept;
+double SelectCarYaw(Context &context, double velocity_yaw, double velocity_mps,
+                    bool have_velocity, bool exact_speed,
+                    double signed_speed_kmh) noexcept;
+void PublishInactive(Context &context) noexcept;
+
+// --- presenter.cpp --------------------------------------------------------
+[[nodiscard]] bool TryLockPresenter(Context &context) noexcept;
+void UnlockPresenter(Context &context) noexcept;
+void LockPresenter(Context &context) noexcept;
+void PublishPresenterPose(Context &context, const double location[3],
+                          const double rotation[3], const double car_cm[3],
+                          float lens, bool fov_enabled) noexcept;
+void PublishRouteBModelPose(Context &context,
+                            const nfs2015_chase::CarSample &sample,
+                            const nfs2015_chase::CameraState &view,
+                            std::int64_t now_ns) noexcept;
+void UpdateCamera(Context &context, double dt) noexcept;
+
+// --- display.cpp ----------------------------------------------------------
+void UpdateDisplay(Context &context) noexcept;
+void RetryHookIfNeeded(Context &context) noexcept;
+void LogViewUniformHookDiagnostics(Context &context) noexcept;
+void LogRouteBDiagnostics(Context &context) noexcept;
+void LogRouteBTiming(Context &context) noexcept;
+
+// --- lifecycle.cpp (the ABI v1 surface, called through the descriptor) -----
+AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
+                                  void **plugin_context);
+AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context);
+AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
+                                  std::uint32_t deadline_milliseconds);
+void ANOMALY_CALL Unload(void *plugin_context);
+void ANOMALY_CALL Update(void *plugin_context, double delta_seconds);
+
 }  // namespace nfs2015_chase_cam::detail
