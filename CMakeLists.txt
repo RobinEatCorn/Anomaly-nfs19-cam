@@ -25,6 +25,12 @@ anomaly_add_plugin(nfs2015_chase_cam
     SOURCES plugin.cpp
             src/globals.cpp
             src/sdk_support.cpp
+            src/burnout.cpp
+            src/wheel_steer.cpp
+            src/vehicle.cpp
+            src/ahud_probe.cpp
+            src/settings.cpp
+            src/ui.cpp
     MANIFEST manifest.json
     PACKAGE_NAME robineatcorn.nfs2015-chase-cam)
 

@@ -2,9 +2,13 @@
 // header grows as modules are moved out of plugin.cpp.
 #pragma once
 
+#include "sdk.hpp"
+
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace nfs2015_chase_cam::detail {
 
@@ -46,5 +50,67 @@ inline bool BodyPitchFromForward(const double forward[3],
   pitch = std::atan2(forward[2], std::sqrt(horizontal_squared));
   return std::isfinite(pitch);
 }
+
+// --- ui.cpp ---------------------------------------------------------------
+void ANOMALY_CALL Draw(void *plugin_context,
+                       const AnomalyUiServiceV1 *ui_v1);
+
+// --- settings.cpp ---------------------------------------------------------
+void MarkSettingsDirty(Context &context) noexcept;
+void SetDefaults(Context &context) noexcept;
+void RestoreDefaults(Context &context) noexcept;
+[[nodiscard]] bool PersistSettings(Context &context) noexcept;
+[[nodiscard]] bool LoadSettings(Context &context) noexcept;
+void ReleaseSettingsSchema(Context &context) noexcept;
+[[nodiscard]] bool RegisterToggleHotkey(Context &context) noexcept;
+void ReleaseToggleHotkey(Context &context) noexcept;
+
+// --- ahud_probe.cpp -------------------------------------------------------
+[[nodiscard]] bool ProbeAhudReady(
+    const AnomalyUe5AhudServiceV1 *service) noexcept;
+void ResetResidual(std::atomic<std::uint64_t> &peak,
+                   std::atomic<std::uint64_t> &sum,
+                   std::atomic<std::uint64_t> &count) noexcept;
+void RunProbe(Context &context, double dt) noexcept;
+void ReleaseProbeSubscription(Context &context) noexcept;
+
+// --- vehicle.cpp ----------------------------------------------------------
+// Shared with burnout.cpp and the tick: what the 20 Hz presence poll knows.
+struct VehiclePresence {
+  bool known{};
+  bool present{};
+  std::uintptr_t object{};
+  bool speed_known{};
+  bool speed_fresh{};
+  double speed_kmh{};
+};
+
+[[nodiscard]] bool ObjectHandleFromPointer(
+    Context &context, std::uintptr_t object,
+    AnomalyGenerationHandleV1 &handle) noexcept;
+[[nodiscard]] bool VehicleIsWheeled(Context &context,
+                                    std::uintptr_t vehicle) noexcept;
+void QueryVehicleSpeed(Context &context, std::uintptr_t vehicle,
+                       VehiclePresence &presence) noexcept;
+[[nodiscard]] std::uint64_t ObjectRegistryGeneration(Context &context) noexcept;
+void ResetVehicleObjectCaches(Context &context) noexcept;
+[[nodiscard]] bool RefreshVehicleObjectGeneration(Context &context) noexcept;
+[[nodiscard]] VehiclePresence QueryVehiclePresence(Context &context) noexcept;
+
+// --- wheel_steer.cpp ------------------------------------------------------
+void RestoreWheelPose(Context &context) noexcept;
+void ReleaseWheelSteer(Context &context) noexcept;
+void UpdateWheelSteer(Context &context, std::uintptr_t vehicle,
+                      nfs2015_chase::Vec3 world_velocity,
+                      double forward_speed_mps, double speed_mps,
+                      double steering_input, bool steering_known,
+                      bool reversing, double dt) noexcept;
+
+// --- burnout.cpp ----------------------------------------------------------
+void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
+                        double speed_mps, double forward_speed) noexcept;
+[[nodiscard]] nfs2015_chase::BurnoutSample
+UpdateBurnoutDetection(Context &context, bool on_ground, double speed_mps,
+                       double forward_speed, double dt) noexcept;
 
 }  // namespace nfs2015_chase_cam::detail

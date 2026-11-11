@@ -562,4 +562,8 @@ constexpr std::string_view kSettingsSchema = R"json(
 }
 )json";
 
+// The 2.6 vehicle getters may be missing on a cold world; retry at this rate
+// instead of every tick. Shared by the presence poll and the wheel-steer take.
+constexpr double kVehicleGetterRetrySeconds = 2.0;
+
 }  // namespace nfs2015_chase_cam::detail
