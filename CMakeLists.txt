@@ -23,8 +23,16 @@ find_package(AnomalySDK CONFIG REQUIRED)
 
 anomaly_add_plugin(nfs2015_chase_cam
     SOURCES plugin.cpp
+            src/globals.cpp
+            src/sdk_support.cpp
     MANIFEST manifest.json
     PACKAGE_NAME robineatcorn.nfs2015-chase-cam)
+
+# Internal headers live in src/; the model headers stay in the source root
+# because tests include them by relative path.
+target_include_directories(nfs2015_chase_cam PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # The package directory must only hold what the Runtime ships: the DLL, the
 # manifest and the localized catalogs. Import libraries and PDBs are build

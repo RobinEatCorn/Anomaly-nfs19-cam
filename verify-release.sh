@@ -196,15 +196,21 @@ fi
 
 # ---------------------------------------------------------------- source constants
 info "源码常量"
-if grep -q "\"$PACKAGE_ID\"" plugin.cpp; then
-    ok "plugin.cpp 使用新插件 ID"
+# The sources are split across plugin.cpp and src/: the plugin ID lives in
+# src/constants.hpp, the version string still sits in the entry point.
+source_files=(plugin.cpp)
+shopt -s nullglob
+source_files+=(src/*.hpp src/*.cpp)
+shopt -u nullglob
+if grep -q "\"$PACKAGE_ID\"" "${source_files[@]}"; then
+    ok "源码使用新插件 ID"
 else
-    fail "plugin.cpp 未使用 $PACKAGE_ID"
+    fail "源码未使用 $PACKAGE_ID"
 fi
-if grep -q "\"$version\"" plugin.cpp; then
-    ok "plugin.cpp 版本常量与 $version 一致"
+if grep -q "\"$version\"" "${source_files[@]}"; then
+    ok "源码版本常量与 $version 一致"
 else
-    fail "plugin.cpp 版本常量不是 $version"
+    fail "源码版本常量不是 $version"
 fi
 if grep -q 'anomaly\.nte\.vehicle\|nte-vehicle' manifest.json; then
     fail "manifest.json 仍包含已删除的 vehicle 服务/capability"
