@@ -1022,6 +1022,7 @@ void UpdateCamera(Context &context, const double dt) noexcept {
         context.wheel_steer_enabled.load(std::memory_order_relaxed);
     context.display.wheel_steer_active = context.wheel_steer.active;
     context.display.wheel_steer_engaged = context.wheel_steer.engaged;
+    context.display.wheel_steer_force_turn = context.wheel_steer.force_turn;
     context.display.wheel_steer_wheels =
         static_cast<std::uint32_t>(context.wheel_steer.wheel_count);
     context.display.wheel_steer_angle_degrees =
@@ -1039,6 +1040,9 @@ void UpdateCamera(Context &context, const double dt) noexcept {
             std::memory_order_relaxed);
     context.display.wheel_steer_rate_degrees_per_second =
         context.wheel_steer_rate_degrees_per_second.load(
+            std::memory_order_relaxed);
+    context.display.wheel_steer_force_turn_delay_seconds =
+        context.wheel_steer_force_turn_delay_seconds.load(
             std::memory_order_relaxed);
     context.display.wheel_steer_sample_percent =
         context.wheel_steer_sample_percent.load(std::memory_order_relaxed);

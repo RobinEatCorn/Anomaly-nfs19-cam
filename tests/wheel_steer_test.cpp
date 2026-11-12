@@ -693,6 +693,133 @@ int main() {
           "the release phase must leave the right quick-turn bit unused");
   }
 
+  // force_turn is a visual overlay, not a new phase. After the one-shot quick
+  // turn for a side is spent, a fresh held press starts a 0.4 second timer;
+  // once it expires the wheel is forced to the same drift-side limit. The
+  // underlying state and its timers keep running.
+  {
+    WheelSteerConfig force_config = config;
+    force_config.drift_key_threshold = 0.1;
+    force_config.force_turn_delay_seconds = 0.4;
+    WheelSteerDriftState state;
+    auto target =
+        Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    Check(target.quick_turn,
+          "the force-turn test must start with a quick turn");
+    for (int tick = 0; tick < 4; ++tick) {
+      target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    }
+    Check(target.quick_turn && !target.force_turn,
+          "quick turn must win while force_turn is still counting");
+
+    target = Step(state, force_config, 20.0, 20.0, 0.0, true, 0.1);
+    Check(!target.quick_turn && !target.force_turn,
+          "releasing the drift-side key must clear the force-turn hold");
+
+    target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    Check(!target.quick_turn,
+          "the spent quick-turn side must not fire again");
+    Check(!target.force_turn,
+          "force turn must wait for the configured hold time");
+    for (int tick = 0; tick < 2; ++tick) {
+      target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    }
+    Check(!target.force_turn,
+          "force turn must not fire before the configured hold time");
+    target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    Check(target.force_turn,
+          "holding the spent side for 0.4 seconds must engage force turn");
+    Check(std::fabs(WrappedDegrees(target.angle_radians) + 40.0) < 0.01,
+          "force turn must target the drift-side limit");
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerTargetAngle(
+                        -5.0 * kRadiansPerDegree, target)) + 40.0) < 0.01,
+          "the composed force-turn target must override countersteer");
+
+    target = Step(state, force_config, 20.0, 20.0, 0.0, true, 0.1);
+    Check(!target.force_turn,
+          "releasing the force-turn key must return to the underlying state");
+  }
+
+  // The force-turn timer keeps counting under quick_turn. If the one-shot ends
+  // while the key is still held, force_turn takes over without a visual gap;
+  // it stays visible through releasing and ends only at grip.
+  {
+    WheelSteerConfig force_config = config;
+    force_config.drift_key_threshold = 0.1;
+    force_config.force_turn_delay_seconds = 0.4;
+    WheelSteerDriftState state;
+    auto target =
+        Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    for (int tick = 0; tick < 4; ++tick) {
+      target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    }
+    Check(target.quick_turn && !target.force_turn,
+          "quick turn must own the wheel before force turn takes over");
+
+    target = Step(state, force_config, 1.0, 20.0, -1.0, true, 0.1);
+    Check(!target.quick_turn,
+          "dropping below the exit slip must end the quick turn");
+    Check(target.force_turn,
+          "an already-expired hold must take over seamlessly");
+
+    WheelSteerTarget releasing = target;
+    for (int tick = 0; tick < 20 &&
+                        releasing.phase != WheelSteerPhase::releasing;
+         ++tick) {
+      releasing = Step(state, force_config, 1.0, 20.0, -1.0, true, 0.1);
+    }
+    Check(releasing.phase == WheelSteerPhase::releasing,
+          "the force-turn test must reach releasing");
+    Check(releasing.force_turn,
+          "force turn must remain visible through releasing");
+
+    WheelSteerTarget grip = releasing;
+    for (int tick = 0; tick < 20 && grip.phase != WheelSteerPhase::grip;
+         ++tick) {
+      grip = Step(state, force_config, 1.0, 20.0, -1.0, true, 0.1);
+    }
+    Check(grip.phase == WheelSteerPhase::grip,
+          "the force-turn test must return to grip");
+    Check(!grip.force_turn,
+          "force turn must end when the underlying state returns to grip");
+  }
+
+  // A direction change makes the held key countersteer; the force-turn hold
+  // must reset instead of carrying the old side into the new drift.
+  {
+    WheelSteerConfig force_config = config;
+    force_config.drift_key_threshold = 0.1;
+    force_config.force_turn_delay_seconds = 0.4;
+    WheelSteerDriftState state;
+    WheelSteerTarget target{};
+    for (int tick = 0; tick < 5; ++tick) {
+      target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    }
+    Check(target.quick_turn,
+          "the direction-change test must start with a quick turn");
+    target = Step(state, force_config, 20.0, 20.0, 0.0, true, 0.1);
+    for (int tick = 0; tick < 4; ++tick) {
+      target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    }
+    Check(target.force_turn,
+          "the direction-change test must start with force turn active");
+
+    target = Step(state, force_config, -20.0, 20.0, -1.0, true, 0.1);
+    Check(!target.force_turn,
+          "the held key must stop forcing when it becomes countersteer");
+    Check(state.force_turn_hold_seconds == 0.0,
+          "a direction change must clear the force-turn hold");
+
+    target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    Check(!target.force_turn,
+          "returning to the old side must restart the force-turn hold");
+    for (int tick = 0; tick < 3; ++tick) {
+      target = Step(state, force_config, 20.0, 20.0, -1.0, true, 0.1);
+    }
+    Check(target.force_turn,
+          "the old side must force again only after a fresh hold");
+  }
+
   // The drift cannot exit during the 0.5 second lock even if the slip drops.
   {
     WheelSteerDriftState state;

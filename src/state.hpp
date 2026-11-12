@@ -887,6 +887,7 @@ struct DisplayState final {
   bool wheel_steer_enabled{kDefaultWheelSteerEnabled};
   bool wheel_steer_active{};
   bool wheel_steer_engaged{};
+  bool wheel_steer_force_turn{};
   std::uint32_t wheel_steer_wheels{};
   double wheel_steer_angle_degrees{};
   double wheel_steer_target_degrees{};
@@ -896,6 +897,8 @@ struct DisplayState final {
   double wheel_steer_full_slip_degrees{kDefaultWheelSteerFullSlipDegrees};
   double wheel_steer_rate_degrees_per_second{
       kDefaultWheelSteerRateDegreesPerSecond};
+  double wheel_steer_force_turn_delay_seconds{
+      kDefaultWheelSteerForceTurnDelaySeconds};
   double wheel_steer_sample_percent{kDefaultWheelSteerSamplePercent};
   double slip_degrees{};
   double drift{};
@@ -1164,6 +1167,7 @@ struct WheelSteerState final {
   bool engaged{};
   bool active{};
   bool quick_turn{};
+  bool force_turn{};
   bool resolved{};
   bool failure_logged{};
   bool geometry_logged{};
@@ -1306,6 +1310,8 @@ struct Context final {
       kDefaultWheelSteerFullSlipDegrees};
   std::atomic<double> wheel_steer_rate_degrees_per_second{
       kDefaultWheelSteerRateDegreesPerSecond};
+  std::atomic<double> wheel_steer_force_turn_delay_seconds{
+      kDefaultWheelSteerForceTurnDelaySeconds};
   std::atomic<double> wheel_steer_sample_percent{
       kDefaultWheelSteerSamplePercent};
   std::atomic_bool burnout_enabled{kDefaultBurnoutEnabled};

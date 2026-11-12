@@ -136,6 +136,12 @@ constexpr double kMaximumWheelSteerFullSlipDegrees = 60.0;
 constexpr double kDefaultWheelSteerRateDegreesPerSecond = 150.0;
 constexpr double kMinimumWheelSteerRateDegreesPerSecond = 60.0;
 constexpr double kMaximumWheelSteerRateDegreesPerSecond = 1200.0;
+// When the drift-side key is held this long without quick_turn owning the
+// wheel, force_turn takes over the visual target until the key is released or
+// the underlying state returns to grip. Unlike quick_turn it is not one-shot.
+constexpr double kDefaultWheelSteerForceTurnDelaySeconds = 0.4;
+constexpr double kMinimumWheelSteerForceTurnDelaySeconds = 0.1;
+constexpr double kMaximumWheelSteerForceTurnDelaySeconds = 2.0;
 // Where along the front axle the countersteer travel angle is sampled, as a
 // percentage of half the front track. Positive is the inside of the drift and
 // negative the outside; the sign mirrors with the drift direction, so the same
@@ -620,6 +626,7 @@ constexpr std::string_view kSettingsSchema = R"json(
     "wheelSteerGain":{"type":"number","minimum":0.5,"maximum":1.5},
     "wheelSteerFullSlipDegrees":{"type":"number","minimum":10.0,"maximum":60.0},
     "wheelSteerRateDegreesPerSecond":{"type":"number","minimum":60.0,"maximum":1200.0},
+    "wheelSteerForceTurnDelay":{"type":"number","minimum":0.1,"maximum":2.0},
     "wheelSteerSamplePercent":{"type":"number","minimum":-100.0,"maximum":100.0}
   }
 }

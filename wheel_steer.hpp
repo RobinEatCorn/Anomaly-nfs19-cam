@@ -144,6 +144,10 @@ struct WheelSteerConfig final {
   double exit_slip_radians{3.0 * kRadiansPerDegree};
   double full_slip_radians{40.0 * kRadiansPerDegree};
   double rate_radians_per_second{150.0 * kRadiansPerDegree};
+  // Hold the drift-side key this long to force the wheel toward the drift even
+  // after quick_turn has been spent. The overlay never changes the underlying
+  // phase or its timers.
+  double force_turn_delay_seconds{0.4};
   // Ignore analog stick noise when deciding whether the driver is pressing
   // into the drift. The first real press after the drift starts is a one-shot
   // quick turn toward the drift direction.
@@ -230,6 +234,15 @@ struct WheelSteerDriftState final {
   // Countdown after releasing to grip. It keeps the per-side bits alive across
   // a brief handbrake lift; zero means the next grip tick clears the mask.
   double quick_turn_memory_seconds{};
+  // Force-turn overlay. This counts consecutive drift-side key hold while the
+  // underlying state is out of grip. It deliberately keeps counting while
+  // quick_turn is active so a long hold can take over seamlessly when the
+  // one-shot quick turn ends. Releasing the key, pointing it the other way, or
+  // returning to grip clears the count. `force_turn_active` is the visible
+  // overlay; quick_turn always wins while it is latched.
+  double force_turn_hold_seconds{};
+  int force_turn_direction_sign{};
+  bool force_turn_active{};
   // Sign of the rear slip angle for diagnostics: +1 for a positive rear angle
   // (left-hand drift), -1 for a negative one. It is cleared in grip. This no
   // is diagnostic only; the per-side mask is the one-shot gate.
@@ -260,6 +273,10 @@ struct WheelSteerTarget final {
   // angle.
   bool quick_turn{};
   double quick_turn_angle_radians{};
+  // Force-turn overlay target. It uses the same drift-side limit as the quick
+  // turn, but is re-evaluated every tick until the key is released.
+  bool force_turn{};
+  double force_turn_angle_radians{};
   WheelSteerPhase phase{WheelSteerPhase::grip};
 };
 
@@ -670,6 +687,40 @@ struct WheelSteerTravel final {
     result.quick_turn_angle_radians =
         (quick_turn_steering >= 0.0 ? 1.0 : -1.0) * config.max_angle_radians;
   }
+
+  // Force-turn overlay. The hold timer starts only once the underlying state
+  // is already in a drift and the actual key points into the current drift
+  // direction; it does not preload from normal grip driving. It keeps running
+  // while quick_turn is latched, so a hold that began before quick_turn can
+  // take over as soon as the one-shot ends. Releasing the key, pointing it the
+  // other way, changing drift direction, or returning to grip clears it.
+  const bool force_turn_key_into =
+      steering_input_active && steering_input_into &&
+      state.phase != WheelSteerPhase::grip;
+  const int force_turn_sign =
+      force_turn_key_into ? (steering_input >= 0.0 ? 1 : -1) : 0;
+  if (!force_turn_key_into) {
+    state.force_turn_hold_seconds = 0.0;
+    state.force_turn_direction_sign = 0;
+    state.force_turn_active = false;
+  } else {
+    if (state.force_turn_direction_sign != 0 &&
+        state.force_turn_direction_sign != force_turn_sign) {
+      state.force_turn_hold_seconds = 0.0;
+    }
+    state.force_turn_direction_sign = force_turn_sign;
+    state.force_turn_hold_seconds += step;
+    state.force_turn_active =
+        !quick_turn &&
+        state.force_turn_hold_seconds >= config.force_turn_delay_seconds;
+  }
+  const bool force_turn =
+      state.force_turn_active && force_turn_key_into && !quick_turn;
+  result.force_turn = force_turn;
+  if (force_turn_key_into) {
+    result.force_turn_angle_radians =
+        (steering_input >= 0.0 ? 1.0 : -1.0) * config.max_angle_radians;
+  }
   result.counter_angle_radians = state.counter_angle;
   const double smooth_blend =
       state.blend * state.blend * (3.0 - 2.0 * state.blend);
@@ -678,11 +729,15 @@ struct WheelSteerTravel final {
   // in grip, where the applied-angle rate limit keeps it continuous.
   result.angle_blend =
       state.phase == WheelSteerPhase::releasing ? 1.0 : smooth_blend;
-  result.angle_radians =
-      quick_turn
-          ? result.quick_turn_angle_radians
-          : Lerp(result.stock_angle_radians, result.counter_angle_radians,
-                 result.angle_blend);
+  if (quick_turn) {
+    result.angle_radians = result.quick_turn_angle_radians;
+  } else if (force_turn) {
+    result.angle_radians = result.force_turn_angle_radians;
+  } else {
+    result.angle_radians =
+        Lerp(result.stock_angle_radians, result.counter_angle_radians,
+             result.angle_blend);
+  }
   result.blend = state.blend;
   result.entry_stock_alpha = state.entry_stock_alpha;
   result.phase = state.phase;
@@ -716,6 +771,9 @@ struct WheelSteerTravel final {
     const double entry_stock_angle, const WheelSteerTarget& target) noexcept {
   if (target.quick_turn) {
     return target.quick_turn_angle_radians;
+  }
+  if (target.force_turn) {
+    return target.force_turn_angle_radians;
   }
   const double stock =
       ComposeWheelSteerStockAngle(entry_stock_angle, target);

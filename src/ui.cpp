@@ -865,7 +865,11 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
             "direction change needs the opposite rear slip to reach 10 "
             "degrees before a new-side key already held at the change "
             "triggers. A brief return to grip for up to 1.5 seconds keeps the "
-            "spent side; a longer grip gap resets the one-shot.");
+            "spent side; a longer grip gap resets the one-shot. If quick turn "
+            "is unavailable, holding the drift-side key for the force-turn "
+            "delay (0.4 s by default) keeps the wheel at the same drift-side "
+            "limit until released; the force turn also stays visible through "
+            "the release phase and ends at grip.");
         ui->text(ui->user, StringView(wheel_hint));
         const auto wheel_slider =
             [&](const char *key, const char *fallback,
@@ -922,6 +926,12 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                      kMinimumWheelSteerRateDegreesPerSecond,
                      kMaximumWheelSteerRateDegreesPerSecond,
                      context->wheel_steer_rate_degrees_per_second);
+        wheel_slider("setting.wheel_steer_force_turn",
+                     "Force-turn hold (s)", "chase-wheel-steer-force-turn",
+                     display.wheel_steer_force_turn_delay_seconds,
+                     kMinimumWheelSteerForceTurnDelaySeconds,
+                     kMaximumWheelSteerForceTurnDelaySeconds,
+                     context->wheel_steer_force_turn_delay_seconds);
       }
 
       const std::string distance_label = context->localizer.Label(
@@ -1295,11 +1305,12 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
           char wheel_line[192]{};
           std::snprintf(
               wheel_line, sizeof(wheel_line),
-              "%+.1f° / %+.1f°  (%u %s, %s)  sample %+.0f%%",
+              "%+.1f° / %+.1f°  (%u %s, %s%s)  sample %+.0f%%",
               display.wheel_steer_angle_degrees,
               display.wheel_steer_target_degrees,
               display.wheel_steer_wheels, "wheels",
               display.wheel_steer_active ? "active" : "stock",
+              display.wheel_steer_force_turn ? ", force" : "",
               display.wheel_steer_sample_percent);
           DrawStatusLine(ui, context->localizer, "status.wheel_steer",
                          "Front wheel steer", wheel_line);
