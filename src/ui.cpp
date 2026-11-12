@@ -852,10 +852,13 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
             "low speed does not release the countersteer. The countersteer "
             "sample point moves along the front axle and mirrors with the "
             "drift direction: 0 is the axle centre, +100% the inside front "
-            "wheel, -100% the outside wheel. The first drift-side press "
-            "(including a key already held when the drift starts) turns the "
-            "wheels toward the drift at 120 deg/s until released; releasing "
-            "returns to the countersteer target.");
+            "wheel, -100% the outside wheel. The first drift-side press in "
+            "each drift direction (including a key already held when the "
+            "drift starts) turns the wheels toward the drift at 120 deg/s "
+            "until released; releasing returns to the countersteer target. A "
+            "continuous drift that changes direction re-arms after the "
+            "opposite rear slip reaches 6.5 degrees, and a new-side key "
+            "already held at the change triggers immediately.");
         ui->text(ui->user, StringView(wheel_hint));
         const auto wheel_slider =
             [&](const char *key, const char *fallback,

@@ -738,6 +738,7 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   state.front_travel_angle = travel.front_angle_radians;
   state.rear_travel_angle = travel.rear_angle_radians;
   const nfs2015_chase::WheelSteerPhase previous_phase = state.phase;
+  const int previous_drift_direction = state.drift.drift_direction_sign;
   nfs2015_chase::WheelSteerTarget target =
       nfs2015_chase::AdvanceWheelSteerTarget(
           state.drift, travel.front_angle_radians, travel.rear_angle_radians,
@@ -811,6 +812,20 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
         target.quick_turn ? "engaged" : "released",
         steering_known ? steering_input : 0.0,
         state.applied_angle * kRadiansToDegrees);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+  }
+
+  if (previous_drift_direction != 0 &&
+      state.drift.drift_direction_sign != previous_drift_direction &&
+      state.drift.drift_direction_sign != 0) {
+    char message[224]{};
+    std::snprintf(
+        message, sizeof(message),
+        "nfs2015 chase cam: drift direction %s, quick turn re-armed "
+        "(rear=%.1f, steer=%.2f)",
+        state.drift.drift_direction_sign > 0 ? "left" : "right",
+        state.rear_travel_angle * kRadiansToDegrees,
+        steering_known ? steering_input : 0.0);
     Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
   }
 

@@ -488,6 +488,149 @@ int main() {
           "a new drift must re-arm the quick turn");
   }
 
+  // A continuous drift can change direction without returning to grip. A new
+  // direction segment gets its own one-shot quick turn, including when the new
+  // side key is already held through the change.
+  {
+    WheelSteerConfig quick_config = config;
+    quick_config.drift_key_threshold = 0.1;
+    WheelSteerDriftState state;
+    for (int tick = 0; tick < 30; ++tick) {
+      static_cast<void>(Step(state, quick_config, 20.0, 20.0, -1.0, true,
+                             1.0 / 60.0));
+    }
+    Check(state.phase == WheelSteerPhase::drifting,
+          "continuous-drift test must reach drifting");
+    Check(state.quick_turn_active,
+          "the left drift must engage the quick turn");
+    Check(state.drift_direction_sign == 1,
+          "positive rear slip must record a left drift");
+
+    const auto flipped = Step(state, quick_config, -20.0, 20.0, 1.0, true,
+                              1.0 / 60.0);
+    Check(flipped.phase == WheelSteerPhase::drifting,
+          "a direction flip must stay in the same continuous drift");
+    Check(state.drift_direction_sign == -1,
+          "the drift direction sign must follow the opposite rear slip");
+    Check(flipped.quick_turn,
+          "a key held through the direction change must trigger the new "
+          "quick turn");
+    Check(std::fabs(WrappedDegrees(flipped.quick_turn_angle_radians) - 40.0) <
+              0.01,
+          "the new quick turn must target the opposite full angle");
+
+    const double previous_applied = -40.0 * kRadiansPerDegree;
+    const double applied = AdvanceWheelSteerAppliedAngle(
+        previous_applied, flipped, 1.0 / 60.0, quick_config);
+    Check(std::fabs(WrappedDegrees(applied) + 38.0) < 1e-6,
+          "a direction flip must sweep at 120 deg/s, not jump");
+
+    const auto released = Step(state, quick_config, -20.0, 20.0, 0.0, true,
+                               1.0 / 60.0);
+    Check(!released.quick_turn,
+          "releasing after the direction change must drop the quick turn");
+    const auto again = Step(state, quick_config, -20.0, 20.0, 1.0, true,
+                            1.0 / 60.0);
+    Check(!again.quick_turn,
+          "a second press in the new direction segment must not re-trigger");
+
+    const auto back = Step(state, quick_config, 20.0, 20.0, -1.0, true,
+                           1.0 / 60.0);
+    Check(back.quick_turn,
+          "a second direction change must re-arm the quick turn again");
+    Check(state.drift_direction_sign == 1,
+          "the drift direction sign must follow the return flip");
+  }
+
+  // A sign flip below the entry slip threshold is noise, not a new segment.
+  {
+    WheelSteerConfig quick_config = config;
+    quick_config.drift_key_threshold = 0.1;
+    WheelSteerDriftState state;
+    for (int tick = 0; tick < 30; ++tick) {
+      static_cast<void>(Step(state, quick_config, 20.0, 20.0, -1.0, true,
+                             1.0 / 60.0));
+    }
+    static_cast<void>(Step(state, quick_config, 20.0, 20.0, 0.0, true,
+                           1.0 / 60.0));
+    const auto shallow = Step(state, quick_config, -5.0, 20.0, 0.0, true,
+                              1.0 / 60.0);
+    Check(!shallow.quick_turn,
+          "a shallow sign flip must not trigger the quick turn");
+    Check(state.drift_direction_sign == 1,
+          "a shallow sign flip must not change the drift direction");
+    const auto shallow_press =
+        Step(state, quick_config, -5.0, 20.0, 1.0, true, 1.0 / 60.0);
+    Check(!shallow_press.quick_turn,
+          "a shallow opposite key must not re-arm the quick turn");
+    const auto deep = Step(state, quick_config, -7.0, 20.0, 1.0, true,
+                           1.0 / 60.0);
+    Check(deep.quick_turn,
+          "the opposite drift must re-arm once it reaches the entry "
+          "threshold");
+    Check(state.drift_direction_sign == -1,
+          "the drift direction sign must follow the established flip");
+  }
+
+  // A new direction is not armed until it reaches the entry threshold, even
+  // when the previous direction never spent its quick turn. This keeps the
+  // one-shot latch tied to the established direction segment.
+  {
+    WheelSteerConfig quick_config = config;
+    quick_config.drift_key_threshold = 0.1;
+    WheelSteerDriftState state;
+    // Enter a left drift by countersteering, so the left segment never uses
+    // its quick turn.
+    for (int tick = 0; tick < 30; ++tick) {
+      static_cast<void>(Step(state, quick_config, 20.0, 20.0, 1.0, true,
+                             1.0 / 60.0));
+    }
+    Check(state.phase == WheelSteerPhase::drifting,
+          "the unused-latch test must reach drifting");
+    Check(!state.quick_turn_used,
+          "a countersteering entry must leave the quick-turn latch unused");
+    const auto early = Step(state, quick_config, -5.0, 20.0, 1.0, true,
+                            1.0 / 60.0);
+    Check(!early.quick_turn,
+          "a new direction below 6.5 degrees must not trigger the quick "
+          "turn");
+    const auto established = Step(state, quick_config, -7.0, 20.0, 1.0,
+                                  true, 1.0 / 60.0);
+    Check(established.quick_turn,
+          "the held key must trigger once the new direction reaches 6.5 "
+          "degrees");
+  }
+
+  // A brief dip through releasing still counts as the same continuous drift:
+  // an opposite direction established there re-arms the latch for the new
+  // segment, even though the release phase itself never quick-turns.
+  {
+    WheelSteerConfig quick_config = config;
+    quick_config.drift_key_threshold = 0.1;
+    WheelSteerDriftState state;
+    for (int tick = 0; tick < 30; ++tick) {
+      static_cast<void>(Step(state, quick_config, 20.0, 20.0, -1.0, true,
+                             1.0 / 60.0));
+    }
+    for (int tick = 0; tick < 20 && state.phase != WheelSteerPhase::releasing;
+         ++tick) {
+      static_cast<void>(Step(state, quick_config, 1.0, 20.0, 0.0, true, 0.1));
+    }
+    Check(state.phase == WheelSteerPhase::releasing,
+          "the test drift must reach the releasing phase");
+    Check(state.quick_turn_used,
+          "the release phase must keep the spent quick-turn latch");
+    const auto flip = Step(state, quick_config, -20.0, 20.0, 0.0, true, 0.1);
+    Check(!flip.quick_turn,
+          "the release phase itself must not engage a quick turn");
+    Check(state.drift_direction_sign == -1,
+          "an opposite drift established during release must change the "
+          "sign");
+    Check(!state.quick_turn_used,
+          "an opposite drift established during release must re-arm the "
+          "latch");
+  }
+
   // The drift cannot exit during the 0.5 second lock even if the slip drops.
   {
     WheelSteerDriftState state;

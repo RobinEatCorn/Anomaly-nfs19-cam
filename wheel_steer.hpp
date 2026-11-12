@@ -222,11 +222,18 @@ struct WheelSteerDriftState final {
   double reentry_cooldown{};
   double standstill_seconds{};
   // One-shot "steer into the drift" latch. The first press of the drift-side
-  // input after the drift starts turns the wheel toward the drift; releasing
+  // input in a drift direction turns the wheel toward the drift; releasing
   // the input returns to the countersteer target. `used` keeps it to one press
-  // per drift.
+  // per drift direction segment. A continuous drift can change direction
+  // without returning to grip; the sign change re-arms the latch.
   bool quick_turn_active{};
   bool quick_turn_used{};
+  // Sign of the rear slip angle for the current drift segment: +1 for a
+  // positive rear angle (left-hand drift), -1 for a negative one. It stays set
+  // through a continuous direction change and is cleared in grip. Once the
+  // opposite sign reaches the entry slip threshold, this is a new segment and
+  // the quick-turn latch is re-armed for the new side.
+  int drift_direction_sign{};
 };
 
 struct WheelSteerTarget final {
@@ -614,15 +621,36 @@ struct WheelSteerTravel final {
       break;
   }
 
-  // One-shot quick turn: the first drift-side press (including a key already
-  // held when the drift starts) owns the wheel toward the drift until the
-  // driver releases it. Later presses in the same drift are ordinary
-  // countersteer input; the latch resets when the drift ends.
+  // A continuous drift can change direction without returning to grip (a
+  // flick or an S-bend). Track the rear-slip sign; once the opposite direction
+  // reaches the entry slip threshold, this is a new drift segment and the
+  // one-shot quick turn is armed again for the new side. The sign is cleared
+  // only in grip, so a brief release-phase dip does not lose the change.
+  if (state.phase == WheelSteerPhase::grip) {
+    state.drift_direction_sign = 0;
+  } else if (motion_valid && finite_angles &&
+             absolute_slip >= config.enter_slip_radians) {
+    const int direction_sign = rear_travel_angle >= 0.0 ? 1 : -1;
+    if (state.drift_direction_sign == 0) {
+      state.drift_direction_sign = direction_sign;
+    } else if (state.drift_direction_sign != direction_sign) {
+      state.drift_direction_sign = direction_sign;
+      state.quick_turn_used = false;
+      state.quick_turn_active = false;
+    }
+  }
+
+  // One-shot quick turn: the first drift-side press in each drift direction
+  // (including a key already held at the start or through a direction change)
+  // owns the wheel toward the drift until the driver releases it. Later presses
+  // in the same direction segment are ordinary countersteer input; the latch
+  // resets in grip and whenever the drift establishes the opposite direction.
   const bool quick_turn_phase =
       state.phase == WheelSteerPhase::turn_in ||
       state.phase == WheelSteerPhase::entering ||
       state.phase == WheelSteerPhase::drifting;
   if (quick_turn_phase && into_drift_key && !below_exit &&
+      absolute_slip >= config.enter_slip_radians &&
       !state.quick_turn_used) {
     state.quick_turn_used = true;
     state.quick_turn_active = true;
