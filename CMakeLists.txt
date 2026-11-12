@@ -36,6 +36,7 @@ anomaly_add_plugin(nfs2015_chase_cam
             src/burnout.cpp
             src/wheel_steer.cpp
             src/vehicle.cpp
+            src/view_mode_cycle.cpp
             src/ahud_probe.cpp
             src/settings.cpp
             src/ui.cpp

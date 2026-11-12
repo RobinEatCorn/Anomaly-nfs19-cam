@@ -6,6 +6,8 @@ namespace nfs2015_chase_cam::detail {
 
 std::atomic<Context *> g_active{};
 std::atomic<CameraViewPointFn> g_original{};
+std::atomic<ToggleViewModeFn> g_toggle_view_mode_original{};
+std::atomic<Context *> g_view_mode_context{};
 std::atomic<OnTransformChangedFn> g_on_transform_changed_original{};
 std::atomic<SetupUniformBufferFn> g_setup_uniform_buffer_original{};
 std::atomic<ViewMatricesCtorFn> g_view_matrices_ctor{};

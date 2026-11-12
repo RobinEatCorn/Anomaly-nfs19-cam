@@ -70,6 +70,13 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
   context->build = Query<AnomalyUe5BuildServiceV1>(
       host, ANOMALY_UE5_BUILD_SERVICE_V1_ID,
       ANOMALY_UE5_BUILD_SERVICE_V1_VERSION);
+  // Optional name pool access. The Z cycle names its two view modes by text at
+  // runtime instead of carrying FName ids, which the game reassigns per run.
+  // Only `resolve_utf8` (the v1 entry, an id -> text lookup) is used; the v2
+  // `find_utf8` does not find gameplay tags registered at startup, so asking
+  // for v2 would exclude hosts for a function the plugin does not need.
+  context->names = Query<AnomalyUe5NamesServiceV1>(
+      host, ANOMALY_UE5_NAMES_SERVICE_V1_ID, 1);
   // The entities/actors services are deliberately not leased. Every one of
   // their reflection calls (`component_bounds`, `frame`, `page`) runs a
   // name-keyed walk inside the host on every call, and the camera needs none
@@ -222,6 +229,7 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   // Lifecycle domain where signature learning is allowed. The Game tick
   // retries a failed pattern scan, but never bypasses the hash gate.
   context->render_x.Reset();
+  ResetViewModeRecon(*context);
   EvaluateAnchorInsurance(*context);
   context->detour_hz = 0.0;
   context->brake_last_target = 0.0;
@@ -263,6 +271,7 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   ReleaseProbeSubscription(*context);
   ReleaseSettingsWindow(*context);
   ReleaseHook(*context);
+  ReleaseToggleViewModeHook(*context);
   if (context->settings_revision.load(std::memory_order_acquire) !=
       context->persisted_settings_revision.load(std::memory_order_acquire)) {
     static_cast<void>(PersistSettings(*context));
@@ -393,6 +402,7 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->update_rate_frames = 0;
       }
     }
+    UpdateViewModeRecon(*context);
     RetryHookIfNeeded(*context);
     LogViewUniformHookDiagnostics(*context);
     LogRouteBDiagnostics(*context);

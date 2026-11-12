@@ -477,6 +477,12 @@ void PublishInactive(Context &context) noexcept {
   context.last_fov_enabled = false;
 }
 
+void ActivateView(Context &context, const bool fov_enabled) noexcept {
+  context.last_view_active = true;
+  context.last_fov_enabled = fov_enabled;
+  context.view_active.store(true, std::memory_order_release);
+}
+
 [[nodiscard]] bool ViewHistoryJumped(
     const std::array<double, 3> &old_location,
     const std::array<double, 3> &old_rotation,

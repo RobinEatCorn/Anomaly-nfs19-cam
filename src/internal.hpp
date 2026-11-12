@@ -176,6 +176,44 @@ double SelectCarYaw(Context &context, double velocity_yaw, double velocity_mps,
                     double signed_speed_kmh) noexcept;
 void PublishInactive(Context &context) noexcept;
 
+// TG-1: the other half of PublishInactive. The chase slot is entered from two
+// places (the presenter tick and the toggle detour, which must not show a frame
+// of the game camera after FP -> third person), so the flags it sets live here.
+void ActivateView(Context &context, bool fov_enabled) noexcept;
+
+// Reads the live view-mode tag out of the controller the watcher resolved.
+// Returns false when the controller is unknown or the read failed; callers must
+// treat that as "unknown", never as "not ThirdPerson".
+[[nodiscard]] bool ReadLiveViewModeTag(Context &context,
+                                      std::uint64_t &tag) noexcept;
+
+// Game-thread gate for the chase slot: the player wants it and the game is in
+// ThirdPerson. Unknown tag fails open, so a host without `anomaly.ue5.names`
+// keeps the 2.0.3 behaviour instead of losing the camera.
+[[nodiscard]] bool ChaseSlotAllowed(Context &context) noexcept;
+
+// Text label for a view-mode tag id ("TP" / "FP" / "Fixed" / "Seat" / hex).
+// Only for the diagnostics the presenter prints; comparisons never use text.
+[[nodiscard]] const char *ViewModeTagLabel(Context &context,
+                                          std::uint64_t tag) noexcept;
+
+// Render-thread guard (plan SS2.4). Reads the tag live, falls back to the
+// published copy, and fails open when neither is available.
+[[nodiscard]] bool ChaseCameraGuardAllows(Context &context) noexcept;
+
+// TG-2 (plan SS2.3.2 / SS2.3.3). `NoteVehicleExit` is the one place that says
+// "no vehicle any more, or the plugin is off": it drops both the chase wish and
+// any pending `entryView`. The caller still lowers the overlay itself.
+void NoteVehicleExit(Context &context) noexcept;
+
+// The fixed entry rule (plan SS2.3.2) for a vehicle that was just entered, or
+// for the plugin being enabled while already driving: Third -> chase camera,
+// First -> leave it alone, cutscene -> retry later. Idempotent while
+// `pending_entry` is set: it either applies now or leaves the flag for the
+// next tick.
+void ApplyEntryView(Context &context) noexcept;
+
+
 // --- presenter.cpp --------------------------------------------------------
 [[nodiscard]] bool TryLockPresenter(Context &context) noexcept;
 void UnlockPresenter(Context &context) noexcept;
@@ -188,6 +226,19 @@ void PublishRouteBModelPose(Context &context,
                             const nfs2015_chase::CameraState &view,
                             std::int64_t now_ns) noexcept;
 void UpdateCamera(Context &context, double dt) noexcept;
+
+// --- view_mode_cycle.cpp --------------------------------------------------
+// Task group 0 of PLAN-zkey-phase2-h1.md: one log-only detour on
+// HTPlayerController::ToggleSwitchCameraViewMode. Every entry point here is
+// fail-open: when a name, a pattern, a vtable slot or the controller is
+// missing, the hook is not installed and Z stays native.
+[[nodiscard]] bool EnsureViewModeTags(Context &context) noexcept;
+[[nodiscard]] bool EnsureToggleViewModeHook(Context &context) noexcept;
+void ReleaseToggleViewModeHook(Context &context) noexcept;
+void ResetViewModeRecon(Context &context) noexcept;
+void UpdateViewModeRecon(Context &context) noexcept;
+std::uint8_t ANOMALY_CALL ToggleViewModeDetour(
+    void *self, std::uint8_t b_forward_raw) noexcept;
 
 // --- display.cpp ----------------------------------------------------------
 void UpdateDisplay(Context &context) noexcept;

@@ -109,6 +109,15 @@ bool Ue5ObjectsReady(const AnomalyUe5ObjectsServiceV1 *service) noexcept {
          service->find_exact != nullptr;
 }
 
+bool Ue5NamesFindReady(const AnomalyUe5NamesServiceV1 *service) noexcept {
+  // The struct is size-versioned: a v1 host stops after resolve_ftext_utf8, so
+  // the tail has to be checked before it is read.
+  return HasField<AnomalyUe5NamesServiceV1,
+                  decltype(AnomalyUe5NamesServiceV1::find_utf8)>(
+             service, offsetof(AnomalyUe5NamesServiceV1, find_utf8)) &&
+         service->find_utf8 != nullptr;
+}
+
 bool Ue5ProcessEventInvokeReady(
     const AnomalyUe5ProcessEventServiceV1 *service) noexcept {
   return HasField<AnomalyUe5ProcessEventServiceV1,

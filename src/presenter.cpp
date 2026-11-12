@@ -689,6 +689,15 @@ void UpdateCamera(Context &context, const double dt) noexcept {
 
   if (!enabled || !player_valid) {
     ReleaseWheelSteer(context);
+    if (!enabled) {
+      // Plan SS2.3.3 "plugin disabled": the chase wish and any pending
+      // entryView die with it, and the detour passes Z straight through.
+      NoteVehicleExit(context);
+      // Plan SS2.3.3: enabling while driving counts as a fresh entry, so the
+      // gap saturates here. `+= dt` would make a quick off/on (F7 twice within
+      // the threshold) silently leave the chase camera off.
+      context.view_off_seconds = kChaseEntryGapSeconds;
+    }
     PublishInactive(context);
     ResetMotion(context);
     std::scoped_lock lock(context.display_mutex);
@@ -722,6 +731,9 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   const bool driving = vehicle_now || (speed_plausible && !presence_known);
   if (!driving) {
     ReleaseWheelSteer(context);
+    // Plan SS2.3.3 "left the vehicle": overlay off, chase wish off.
+    NoteVehicleExit(context);
+    context.view_off_seconds += dt;
     const bool was_active = context.last_view_active;
     PublishInactive(context);
     if (was_active) {
@@ -740,6 +752,24 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.speed_kmh = 0.0;
     return;
   }
+
+  // The chase slot. `in_vehicle` is the answer the toggle detour gates on.
+  //
+  // Entering is debounced (`kChaseEntryGapSeconds`): the vehicle getter and the
+  // pawn chain both drop out for a tick now and then, and a gap must not look
+  // like "got out and back in" - that would re-apply `entryView` and bring the
+  // chase camera back seconds after the player dismissed it with Z. Losing the
+  // vehicle for long enough re-arms it, which is also what makes enabling the
+  // plugin while driving behave like a fresh entry (plan SS2.3.3).
+  context.view_mode.in_vehicle.store(true, std::memory_order_release);
+  if (context.view_off_seconds >= kChaseEntryGapSeconds) {
+    ApplyEntryView(context);
+  } else if (context.view_mode.pending_entry) {
+    // A cutscene (Fixed / Seat) held the camera when the vehicle was entered;
+    // retry every tick until the game reports Third or First again.
+    ApplyEntryView(context);
+  }
+  context.view_off_seconds = 0.0;
 
   // The exact forward speed is the 2.6 signal: use it for magnitude and
   // reverse, and keep the position direction only for the lateral component
@@ -946,10 +976,35 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     }
     context.sample_last_ns = sample.time_ns;
     context.car_ring.Write(sample);
-    // The detour gates on this: without it the game camera shows through.
-    context.last_view_active = true;
-    context.last_fov_enabled = fov_enabled;
-    context.view_active.store(true, std::memory_order_release);
+    // The sample above is published in every slot, not only the chase one: the
+    // spring model has to be warm when FP -> chase flips this flag inside the
+    // toggle call, or the pose would start from a stale anchor.
+    //
+    // `view_active` is the whole difference between "chase camera" and "plain
+    // third person", because both have the same game tag. It is true only while
+    // the game really is in ThirdPerson (plan SS2.4).
+    const bool chase_slot = ChaseSlotAllowed(context);
+    if (chase_slot) {
+      // Without this the game camera shows through.
+      ActivateView(context, fov_enabled);
+    } else if (context.last_view_active) {
+      // Restores the game lens, notes the snap and bumps the view sequence, so
+      // the pose is rebuilt from the car rather than blended from the old one.
+      PublishInactive(context);
+    }
+    if (chase_slot != context.view_slot_chase_last) {
+      context.view_slot_chase_last = chase_slot;
+      char message[192]{};
+      std::snprintf(message, sizeof(message),
+                    "viewmode slot: chase=%d tag=%s wanted=%d veh=1 en=%d",
+                    chase_slot ? 1 : 0,
+                    ViewModeTagLabel(
+                        context,
+                        context.view_mode.published_tag.load(
+                            std::memory_order_relaxed)),
+                    context.view_mode.chase_wanted ? 1 : 0, enabled ? 1 : 0);
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, std::string_view(message));
+    }
   }
   {
     std::scoped_lock lock(context.display_mutex);

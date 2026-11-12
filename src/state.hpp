@@ -244,6 +244,10 @@ struct Diagnostics final {
   std::atomic<std::uint64_t> detour_calls_window{};
   // Active view but no published pose: the frame the game camera shows through.
   std::atomic<std::uint64_t> detour_no_publish{};
+  // TG-1: frames the chase pose was withheld because the game's live view-mode
+  // tag was not ThirdPerson. This is the belt-and-suspenders counter for plan
+  // SS2.4: a non-zero value means the presenter's flag lagged the game.
+  std::atomic<std::uint64_t> tag_veto_frames{};
   // Q1: which threads call the hooked getter.
   std::atomic<std::uint32_t> detour_threads[kDiagnosticThreadSlots]{};
   std::atomic<std::uint32_t> detour_thread_count{};
@@ -1165,6 +1169,72 @@ struct WheelSteerState final {
   double next_resolve{};
 };
 
+// Z-key view-mode recon (PLAN-zkey-phase2-h1.md task group 0).
+//
+// Task group 0 is log-only: the detour below is installed, every call is
+// recorded, and every call is forwarded to the game unchanged. Nothing here
+// influences the view mode yet, so a wrong offset can only cost log lines.
+//
+// The tag ids are resolved by text at the start of the session; the game
+// assigns FName ids as names are registered, so a recorded id is not portable
+// across runs and must never be hardcoded.
+struct ViewModeState final {
+  std::atomic<std::uintptr_t> pc{};
+  std::atomic<std::uintptr_t> world_slot{};
+  std::atomic<std::uint32_t> tag_third_person{};
+  std::atomic<std::uint32_t> tag_first_person{};
+  std::atomic<std::uint32_t> tag_fixed{};
+  std::atomic<std::uint32_t> tag_seat{};
+  std::atomic<std::uint32_t> tag_driving{};
+  std::atomic_bool names_ready{};
+  std::atomic<std::uint64_t> hook_id{};
+  std::atomic<std::uint64_t> hook_generation{};
+  std::atomic<std::uintptr_t> hook_target{};
+  // Detour-side diagnostics. Atomics because the toggle is only assumed to run
+  // on the Game thread, not guaranteed to.
+  std::atomic<std::uint64_t> calls{};
+  std::atomic<std::uint64_t> logged{};
+  std::atomic<std::uintptr_t> last_site{};
+  std::atomic<std::uint32_t> forwarded{};
+  // Game-thread latches: each failure is reported once, then the retry timer
+  // decides whether asking again can change the answer.
+  bool names_failure_logged{};
+  bool hook_failure_logged{};
+  bool vtable_failure_logged{};
+  bool shape_logged{};
+  bool pattern_unavailable{};
+  bool vtable_mismatch{};
+  double next_retry{};
+  double next_tags_retry{};
+  // Per-tick watch: the game changes the view mode on its own (a teleport or a
+  // transition resets it), so the plugin has to notice rather than infer. Plain
+  // fields: the Game tick is the only writer.
+  std::uint64_t last_tag{};
+  std::int32_t last_limit{};
+  std::int32_t last_count{};
+  bool have_tag{};
+  // TG-1: the chase slot. The plugin still never keeps its own "which mode am
+  // I in" counter - the tag below is a copy of the game's, refreshed every tick
+  // by the watcher and read by the presenter and the render-thread guard.
+  std::atomic<std::uint64_t> published_tag{};
+  std::atomic_bool published_tag_known{};
+  // Set by the presenter: the same `driving` answer the chase model uses. The
+  // detour only takes over while it is true (plan SS2.2 / TG-1).
+  std::atomic_bool in_vehicle{};
+  // Game-thread only. "The player wants the chase camera": latched when a
+  // vehicle is entered (entryView=chase) and dropped when the player presses Z
+  // out of it or leaves the vehicle.
+  bool chase_wanted{};
+  // Game-thread only (TG-2, plan SS2.3.2). A vehicle was entered while the game
+  // was not in a view the plugin can classify (Fixed / Seat / unreadable), so
+  // `entryView` has not been applied yet. Consumed once the game reports Third
+  // or First again; cleared when the vehicle is left.
+  bool pending_entry{};
+  // Game-thread only: the "waiting for a readable tag" line is printed once per
+  // entry, not once per tick.
+  bool entry_pending_logged{};
+};
+
 struct Context final {
   nfs2015_chase_cam::Localizer localizer;
   const AnomalyCoreServiceV1 *core{};
@@ -1189,6 +1259,10 @@ struct Context final {
   // Optional build identity. It gates the hardcoded offset table used by the X
   // anchor; a host without it simply leaves the X path disabled.
   const AnomalyUe5BuildServiceV1 *build{};
+  // Optional name pool access. `find_utf8` (names service v2) is the only way
+  // to turn "CameraViewMode.ThirdPerson" into the id this process assigned it;
+  // without it the Z cycle stays disabled and Z remains native.
+  const AnomalyUe5NamesServiceV1 *names{};
 
   AnomalyGenerationHandleV1 settings_schema{};
   AnomalyGenerationHandleV1 toggle_hotkey{};
@@ -1461,6 +1535,13 @@ struct Context final {
   bool have_last_slip{};
   bool last_view_active{};
   bool last_fov_enabled{};
+  // TG-1: latches for the chase slot. `view_off_seconds` is how long the plugin
+  // has not seen a vehicle; a value above the threshold is what makes the next
+  // driving tick count as "got in", which is the only thing that re-arms the
+  // chase camera. Debounced because the vehicle getter and the pawn chain both
+  // drop out for a tick now and then, and a gap must not look like an exit.
+  double view_off_seconds{1.0};
+  bool view_slot_chase_last{};
   // T3.1: game-camera yaw from the player ESP snapshot, i.e. sampled by the
   // host on this Game tick instead of observed on the render thread.
   double camera_yaw_radians{};
@@ -1482,6 +1563,8 @@ struct Context final {
   BurnoutDetectionState burnout_detection{};
   // Visual front-wheel override. Game-thread only.
   WheelSteerState wheel_steer{};
+  // Z-key view-mode recon (task group 0: log only).
+  ViewModeState view_mode{};
   // Probe input: the world XY offset of the bounds centre from the Pawn root,
   // captured by QueryPlayer on this Game tick. A fixed vector in the car's own
   // frame, so its direction is a body-yaw candidate that never involves the

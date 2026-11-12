@@ -15,6 +15,12 @@ namespace nfs2015_chase_cam::detail {
 using anomaly::sdk::StringView;
 
 using CameraViewPointFn = void(ANOMALY_CALL *)(void *, double *, double *);
+// `HTPlayerController::ToggleSwitchCameraViewMode(bool bForward)`. Both the
+// argument and the result are carried as raw bytes on purpose: the game's own
+// body only ever tests the flag for zero, and taking it as `bool` would let the
+// compiler canonicalise a value the game did not produce. The detour forwards
+// and returns exactly the byte it received.
+using ToggleViewModeFn = std::uint8_t(ANOMALY_CALL *)(void *, std::uint8_t);
 // The virtual transform notification. The second argument is the scene/command
 // context SetTransform forwards; it is passed through unchanged.
 using OnTransformChangedFn = void(ANOMALY_CALL *)(void *, void *);
@@ -60,6 +66,10 @@ bool WindowReady(const AnomalyWindowServiceV1 *service) noexcept;
 bool PlayerReady(const AnomalyNtePlayerServiceV1 *service) noexcept;
 bool PlayerHandlesReady(const AnomalyNtePlayerServiceV1 *service) noexcept;
 bool Ue5ObjectsReady(const AnomalyUe5ObjectsServiceV1 *service) noexcept;
+// The names service shipped `find_utf8` in v2. A v1 host (or none at all)
+// answers false here, and every consumer must treat that as "cannot name
+// anything in this process" rather than as an empty pool.
+bool Ue5NamesFindReady(const AnomalyUe5NamesServiceV1 *service) noexcept;
 bool Ue5ProcessEventInvokeReady(
     const AnomalyUe5ProcessEventServiceV1 *service) noexcept;
 bool Ue5ObjectSnapshotReady(const AnomalyUe5ObjectsServiceV1 *service) noexcept;
@@ -126,6 +136,11 @@ void NoteDetourThread(Context &context) noexcept;
 // hook is installed and read on the hook's own thread afterwards.
 extern std::atomic<Context *> g_active;
 extern std::atomic<CameraViewPointFn> g_original;
+extern std::atomic<ToggleViewModeFn> g_toggle_view_mode_original;
+// The toggle detour publishes its own context instead of sharing `g_active`:
+// releasing any one camera hook clears `g_active`, and a toggle that silently
+// stopped being observed would look exactly like a Z key that does nothing.
+extern std::atomic<Context *> g_view_mode_context;
 extern std::atomic<OnTransformChangedFn> g_on_transform_changed_original;
 extern std::atomic<SetupUniformBufferFn> g_setup_uniform_buffer_original;
 extern std::atomic<ViewMatricesCtorFn> g_view_matrices_ctor;

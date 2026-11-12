@@ -85,6 +85,11 @@
       "optional": true
     },
     {
+      "id": "anomaly.ue5.names",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
       "id": "anomaly.ue5.process-event",
       "minVersion": 1,
       "optional": true
@@ -105,6 +110,7 @@
     "ue5-ahud",
     "ue5-build",
     "ue5-objects",
+    "ue5-names",
     "game-events"
   ]
 }

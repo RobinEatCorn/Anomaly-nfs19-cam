@@ -88,8 +88,19 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
 
       const std::uint64_t sequence =
           context->view_sequence.load(std::memory_order_acquire);
-      const bool active = (sequence & 1U) == 0 &&
-                          context->view_active.load(std::memory_order_relaxed);
+      bool active = (sequence & 1U) == 0 &&
+                    context->view_active.load(std::memory_order_relaxed);
+      if (active) {
+        // Plan SS2.4: the game's own tag always wins over the plugin's flag.
+        // `view_active` is only cleared on the next Game tick, and a tick is a
+        // frame of the chase pose over a first-person (or cutscene) camera. The
+        // read is live and happens here, on the thread that is about to draw.
+        if (!ChaseCameraGuardAllows(*context)) {
+          context->diag.tag_veto_frames.fetch_add(1,
+                                                 std::memory_order_relaxed);
+          active = false;
+        }
+      }
       if (active && !leased) {
         // The game camera shows through for this call. Counted separately from
         // the torn read below: this one is the lease, not the snapshot.

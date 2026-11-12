@@ -189,6 +189,13 @@ constexpr double kMinimumVehicleSpeedMps = 6.0;
 // covers one missed poll while entering/exiting or while the renderer is
 // streaming. Speed is used only when neither signal can answer.
 constexpr double kVehiclePresenceGraceSeconds = 0.20;
+// TG-1: how long the plugin has to have been *out* of a vehicle before the next
+// driving tick counts as "got in". Above the presence grace on purpose: the
+// 0.20 s grace already absorbs one missed 20 Hz poll, and this one decides
+// whether the chase camera comes back on its own. A gap shorter than this (a
+// pawn-chain hiccup, a paused tick) must not resurrect a camera the player
+// dismissed with Z.
+constexpr double kChaseEntryGapSeconds = 0.75;
 constexpr std::int64_t kVehiclePresenceFreshNs = 250'000'000;
 // The 2.6 vehicle service also returned GetForwardSpeedKmH. 2.7 removed the
 // service, not the reflected function: the movement component sits at the
@@ -282,6 +289,43 @@ constexpr std::string_view kCameraViewPointPattern =
     "28 F2 0F 11 4F 10 48 83 C4 20 5F C3";
 constexpr std::uint32_t kCameraPovAccessorVtableOffset = 0x7A0;
 constexpr std::uint32_t kCameraPovFovOffset = 0x30;
+
+// ---------------------------------------------------------------------------
+// Z-key view-mode recon (PLAN-zkey-phase2-h1.md task group 0).
+//
+// `HTPlayerController::ToggleSwitchCameraViewMode(bool bForward)`, the single
+// point the game's own Z key ends up in. The prologue compares the view-mode
+// instance count (`cmp [rcx+0x1E90],0`) before it reads the argument, so those
+// 22 bytes are unique in this build's .text. Resolving it gives the function,
+// not an instruction inside it; the vtable slot below is the second witness.
+constexpr std::string_view kToggleSwitchCameraViewModePattern =
+    "40 53 55 57 48 83 EC 30 83 B9 90 1E 00 00 00 0F B6 FA 48 8B D9";
+// `PC->vtable[kToggleVtableOffset]` must equal the resolved target. A plugin
+// (or a game update) that moves the entry point invalidates the hook even when
+// the pattern still matches.
+constexpr std::uint32_t kToggleVtableOffset = 0x15C8;
+// The view-mode block on the PlayerController. `tag` is an FGameplayTag (an
+// FName: 8 bytes, Number always 0); the array holds `{FGameplayTag; UObject*}`
+// entries with a 16-byte stride. Every field is only meaningful for the
+// profile the plugin was verified against, which is why the same hash gate that
+// guards the render hooks guards this one.
+constexpr std::uint32_t kPcViewModeTagOffset = 0x1E80;
+constexpr std::uint32_t kPcViewModeArrayOffset = 0x1E88;
+constexpr std::uint32_t kPcViewModeCountOffset = 0x1E90;
+constexpr std::uint32_t kPcViewModeCapacityOffset = 0x1E94;
+constexpr std::uint32_t kPcLimitManualToggleOffset = 0x1E98;
+constexpr std::uint32_t kPcToggleCooldownOffset = 0x1E9C;
+constexpr std::uint32_t kPcToggleGraceOffset = 0x1EA0;
+constexpr std::uint32_t kPcToggleCooldownClockOffset = 0x1EA8;
+constexpr std::uint32_t kPcToggleGraceUsedOffset = 0x1EB0;
+// One read covers tag..graceUsed inclusive (0x1E80..0x1EB0).
+constexpr std::uint32_t kPcViewModeStateSpan = 0x38;
+constexpr std::uint32_t kViewModeEntryStride = 0x10;
+constexpr std::size_t kMaximumLoggedViewModes = 8;
+// TG-0 only records; a scripted path can call the toggle every frame, so the
+// log stops being interesting long before the session does.
+constexpr std::uint64_t kToggleLogAllCalls = 400;
+constexpr std::uint64_t kToggleLogStrideAfter = 10;
 
 // Render-thread car position probe (PLAN-render-thread-hook.md task group 0).
 // The profile's `ue5.GWorld` entry: `mov rbx,[rip+disp32]` is the first
@@ -481,6 +525,7 @@ constexpr std::uint32_t kAnchorSourceModel = 2;
 // the character is not in a vehicle.
 constexpr std::uint32_t kAnchorSourceVehicle = 3;
 constexpr std::uint32_t kAnchorSourceDefault = kAnchorSourceVehicle;
+
 // What the panel reports. These are also what the detour publishes as the
 // anchor it actually used this frame.
 constexpr std::uint8_t kAnchorStateX = 0;
