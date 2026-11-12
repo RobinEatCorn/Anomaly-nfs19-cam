@@ -140,6 +140,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── RELEASE-NOTES-2.0.2.md 弹簧滑块与默认看向值说明
 ├── RELEASE-NOTES-2.0.1.md 闪屏/重影修复说明
 ├── RELEASE-NOTES-2.0.0.md 2.7.0 适配与迁移说明
+├── REPORT-phase2-h1.md   Z 键三档循环：实现、验收矩阵与已知限制
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
 ├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
 ├── plugin.cpp            薄入口：只填 AnomalyPluginDescriptorV1 的函数表
@@ -173,13 +174,14 @@ rotation  = NFS 模型的 pitch / yaw / roll
 | `src/display.cpp` | `UpdateDisplay` 与三条诊断日志 |
 | `src/hooks.cpp` | 渲染侧四个 detour 与签名解析、安装、释放 |
 | `src/camera_detour.cpp` | 相机 `view point` 主 detour |
+| `src/view_mode_cycle.cpp` | Z 三档循环：档位监视、切档去抖、相机守卫、进车/下车规则 |
 | `src/routeb.cpp` | Route B 位姿构造与视图写入 |
 | `src/render_x_probe.cpp` | 渲染线程车辆 X 探查与版本保险 |
 | `src/vehicle.cpp` | 车辆存在性与速度读取 |
 | `src/wheel_steer.cpp` | 漂移前轮反打 |
 | `src/burnout.cpp` | 烧胎探查与镜头信号 |
 | `src/ahud_probe.cpp` | AHUD 帧探针 |
-| `src/settings.cpp` | 设置校验、持久化、默认值、热键 |
+| `src/settings.cpp` | 设置校验、持久化、默认值 |
 | `src/ui.cpp` | `Draw`、设置窗口与诊断面板 |
 
 ## 构建
@@ -536,7 +538,8 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 
 发布门禁、离线/实机测试矩阵、产物哈希和回滚步骤记录在
 [RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。完整发布前至少完成两个不同地图、
-两次完整重启的实机验收；当前代码和离线包已准备好，Windows 宿主工具与剩余实机项仍需补跑。
+两次完整重启的实机验收；2.0.4 的 Z 循环与抓拍修复已做过实机逐帧验收（见
+[REPORT-phase2-h1.md](REPORT-phase2-h1.md)），仍未覆盖的只有剧情过场目视一次与 30 分钟长跑。
 
 1. 同步升版本：`manifest.json` 的 `version`、`pluginmaster.json` 的 `Version` 和 ZIP 文件名。
 2. 构建 Release 包，跑 `ctest`、`anomaly-plugin validate` 和 `anomaly-test-host`（见上一节）。
@@ -555,7 +558,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
    ```sh
    gh release create v2.0.4 dist/Nfs2015ChaseCam-2.0.4.zip \
      --title "NFS 2015 Chase Cam 2.0.4" \
-     --notes "新增镜头弹簧滑块；漂移看向弹簧默认值改为 15"
+     --notes "驾驶时 Z 键循环 追车 / 第三人称 / 第一人称；移除 F7 快捷键；抓拍模式交还相机"
    ```
 
 5. 最后更新 `pluginmaster.json` 的 `Version` 与 `DownloadLinkInstall` / `DownloadLinkUpdate`，
