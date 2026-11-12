@@ -133,7 +133,7 @@ constexpr double kMaximumWheelSteerGain = 1.5;
 constexpr double kDefaultWheelSteerFullSlipDegrees = 40.0;
 constexpr double kMinimumWheelSteerFullSlipDegrees = 10.0;
 constexpr double kMaximumWheelSteerFullSlipDegrees = 60.0;
-constexpr double kDefaultWheelSteerRateDegreesPerSecond = 120.0;
+constexpr double kDefaultWheelSteerRateDegreesPerSecond = 150.0;
 constexpr double kMinimumWheelSteerRateDegreesPerSecond = 60.0;
 constexpr double kMaximumWheelSteerRateDegreesPerSecond = 1200.0;
 // Where along the front axle the countersteer travel angle is sampled, as a
@@ -145,7 +145,7 @@ constexpr double kDefaultWheelSteerSamplePercent = 0.0;
 constexpr double kMinimumWheelSteerSamplePercent = -100.0;
 constexpr double kMaximumWheelSteerSamplePercent = 100.0;
 // 2.0.2 shipped these three values together. 2.0.3 changes the scale (front
-// axle target, 40 degree full slip, 32 degree cap, 120 deg/s). Only an
+// axle target, 40 degree full slip, 32 degree cap, 150 deg/s). Only an
 // untouched old trio is migrated; a user who deliberately changed one field
 // keeps their saved values.
 constexpr double kLegacyWheelSteerMaxDegrees = 40.0;
@@ -159,6 +159,7 @@ constexpr double kDefaultWheelSteerEntrySpeedKmh = 54.0;
 constexpr double kMinimumWheelSteerEntrySpeedKmh = 20.0;
 constexpr double kMaximumWheelSteerEntrySpeedKmh = 160.0;
 constexpr double kWheelSteerEnterSlipDegrees = 6.5;
+constexpr double kWheelSteerDirectionChangeSlipDegrees = 10.0;
 constexpr double kWheelSteerExitSlipDegrees = 3.0;
 constexpr double kWheelSteerHoldSeconds = 0.5;
 constexpr double kWheelSteerExitHoldSeconds = 0.25;
@@ -167,16 +168,10 @@ constexpr double kWheelSteerBlendOutSeconds = 0.30;
 constexpr double kWheelSteerStockMaxDegrees = 35.0;
 constexpr double kWheelSteerCounterAuthorityDegrees = 5.0;
 constexpr double kWheelSteerRestoreToleranceDegrees = 1.5;
-constexpr double kWheelSteerTurnInSeconds = 0.18;
-constexpr double kWheelSteerTurnInMinSeconds = 0.10;
-constexpr double kWheelSteerTurnInMaxSeconds = 0.30;
-constexpr double kWheelSteerTurnInStartSlipDegrees = 8.0;
-constexpr double kWheelSteerTurnInFullSlipDegrees = 22.0;
-constexpr double kWheelSteerMinimumTurnInAlpha = 0.08;
-constexpr double kWheelSteerTurnInRateDegreesPerSecond = 300.0;
-constexpr double kWheelSteerTurnInMaxRateDegreesPerSecond = 900.0;
-constexpr double kWheelSteerTurnInReleaseSlipDegrees = 18.0;
+constexpr double kWheelSteerEntryStockStartSlipDegrees = 8.0;
+constexpr double kWheelSteerEntryStockFullSlipDegrees = 22.0;
 constexpr double kWheelSteerReentryCooldownSeconds = 0.5;
+constexpr double kWheelSteerQuickTurnMemorySeconds = 1.5;
 constexpr double kWheelSteerStandstillSpeedMps = 0.5;
 constexpr double kWheelSteerStandstillGraceSeconds = 0.5;
 // Braking pitch needs a speed-based signal, not the position-derived

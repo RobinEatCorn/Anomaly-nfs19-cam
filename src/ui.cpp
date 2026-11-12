@@ -853,12 +853,19 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
             "sample point moves along the front axle and mirrors with the "
             "drift direction: 0 is the axle centre, +100% the inside front "
             "wheel, -100% the outside wheel. The first drift-side press in "
-            "each drift direction (including a key already held when the "
-            "drift starts) turns the wheels toward the drift at 120 deg/s "
-            "until released; releasing returns to the countersteer target. A "
-            "continuous drift that changes direction re-arms after the "
-            "opposite rear slip reaches 6.5 degrees, and a new-side key "
-            "already held at the change triggers immediately.");
+            "each direction of a drift (including a key already held when the "
+            "drift starts) uses the measured stock wheel angle as the entry "
+            "intent if the reflected steering sample is stale, so the quick "
+            "turn owns the initial movement instead of the slow stock "
+            "animation. It turns the wheels toward the drift at 150 deg/s "
+            "until released; releasing returns to the countersteer target, and the "
+            "release phase keeps that target until the grip handoff. "
+            "Each side can trigger at most once per drift. The first quick "
+            "turn of a drift uses the 6.5-degree entry gate; a later "
+            "direction change needs the opposite rear slip to reach 10 "
+            "degrees before a new-side key already held at the change "
+            "triggers. A brief return to grip for up to 1.5 seconds keeps the "
+            "spent side; a longer grip gap resets the one-shot.");
         ui->text(ui->user, StringView(wheel_hint));
         const auto wheel_slider =
             [&](const char *key, const char *fallback,

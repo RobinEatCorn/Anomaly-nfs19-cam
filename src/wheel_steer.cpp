@@ -236,12 +236,21 @@ void RestoreWheelPose(Context &context) noexcept {
   state.axle_offsets_valid = false;
   state.last_mesh = {};
   state.have_last_mesh = false;
-  // Preserve the re-entry cooldown across a normal pose restore. The pure
-  // state machine sets it when releasing into grip; clearing it here would let
-  // the plugin re-enter on the very next tick.
+  // Preserve the re-entry cooldown and the quick-turn memory across a normal
+  // pose restore. The pure state machine sets the cooldown and the memory when
+  // releasing into grip; clearing them here would let the plugin re-enter on
+  // the very next tick or quick-turn the same side again inside the memory
+  // window. `quick_turn_has_fired` is intentionally not preserved: the next
+  // entry starts a fresh drift and re-arms the first-side threshold.
   const double reentry_cooldown = state.drift.reentry_cooldown;
+  const std::uint8_t quick_turn_used_mask =
+      state.drift.quick_turn_used_mask;
+  const double quick_turn_memory_seconds =
+      state.drift.quick_turn_memory_seconds;
   state.drift = {};
   state.drift.reentry_cooldown = reentry_cooldown;
+  state.drift.quick_turn_used_mask = quick_turn_used_mask;
+  state.drift.quick_turn_memory_seconds = quick_turn_memory_seconds;
   state.phase = nfs2015_chase::WheelSteerPhase::grip;
   state.engaged = false;
   state.active = false;
@@ -359,8 +368,6 @@ const char *WheelSteerPhaseName(
   switch (phase) {
     case nfs2015_chase::WheelSteerPhase::grip:
       return "grip";
-    case nfs2015_chase::WheelSteerPhase::turn_in:
-      return "turn_in";
     case nfs2015_chase::WheelSteerPhase::entering:
       return "entering";
     case nfs2015_chase::WheelSteerPhase::drifting:
@@ -667,6 +674,9 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
       full_slip_degrees * nfs2015_chase::kRadiansPerDegree;
   config.enter_slip_radians =
       kWheelSteerEnterSlipDegrees * nfs2015_chase::kRadiansPerDegree;
+  config.direction_change_slip_radians =
+      kWheelSteerDirectionChangeSlipDegrees *
+      nfs2015_chase::kRadiansPerDegree;
   config.exit_slip_radians =
       kWheelSteerExitSlipDegrees * nfs2015_chase::kRadiansPerDegree;
   config.rate_radians_per_second =
@@ -683,26 +693,14 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   config.restore_tolerance_radians =
       kWheelSteerRestoreToleranceDegrees * nfs2015_chase::kRadiansPerDegree;
   config.counter_sample_fraction = sample_percent / 100.0;
-  config.turn_in_seconds = kWheelSteerTurnInSeconds;
-  config.turn_in_min_seconds = kWheelSteerTurnInMinSeconds;
-  config.turn_in_max_seconds = kWheelSteerTurnInMaxSeconds;
-  config.turn_in_start_slip_radians =
-      kWheelSteerTurnInStartSlipDegrees *
+  config.entry_stock_start_slip_radians =
+      kWheelSteerEntryStockStartSlipDegrees *
       nfs2015_chase::kRadiansPerDegree;
-  config.turn_in_full_slip_radians =
-      kWheelSteerTurnInFullSlipDegrees *
-      nfs2015_chase::kRadiansPerDegree;
-  config.turn_in_min_alpha = kWheelSteerMinimumTurnInAlpha;
-  config.turn_in_rate_radians_per_second =
-      kWheelSteerTurnInRateDegreesPerSecond *
-      nfs2015_chase::kRadiansPerDegree;
-  config.turn_in_max_rate_radians_per_second =
-      kWheelSteerTurnInMaxRateDegreesPerSecond *
-      nfs2015_chase::kRadiansPerDegree;
-  config.turn_in_release_slip_radians =
-      kWheelSteerTurnInReleaseSlipDegrees *
+  config.entry_stock_full_slip_radians =
+      kWheelSteerEntryStockFullSlipDegrees *
       nfs2015_chase::kRadiansPerDegree;
   config.reentry_cooldown_seconds = kWheelSteerReentryCooldownSeconds;
+  config.quick_turn_memory_seconds = kWheelSteerQuickTurnMemorySeconds;
   config.standstill_speed_mps = kWheelSteerStandstillSpeedMps;
   config.standstill_grace_seconds = kWheelSteerStandstillGraceSeconds;
 
@@ -737,25 +735,45 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
           config.counter_sample_fraction, front_half_track);
   state.front_travel_angle = travel.front_angle_radians;
   state.rear_travel_angle = travel.rear_angle_radians;
+  // Measure the stock wheel before the state machine advances. At entry the
+  // reflected steering sample may still be stale, while the game has already
+  // started turning the front wheels. Passing that measured angle as an entry
+  // hint lets the quick turn own the first visible movement instead of the slow
+  // stock animation.
+  double entry_stock_hint = 0.0;
+  bool entry_stock_hint_valid = false;
+  if (state.phase == nfs2015_chase::WheelSteerPhase::grip &&
+      !state.animation_disabled && !reversing &&
+      speed_mps >= config.entry_speed_mps && wheel_forward_speed > 0.1 &&
+      std::fabs(travel.rear_angle_radians) >= config.enter_slip_radians) {
+    entry_stock_hint_valid = MeasureStockWheelSteer(
+        context, state, car_forward, car_up, entry_stock_hint);
+    if (entry_stock_hint_valid) {
+      entry_stock_hint = nfs2015_chase::Clamp(
+          entry_stock_hint, -config.max_angle_radians,
+          config.max_angle_radians);
+    }
+  }
   const nfs2015_chase::WheelSteerPhase previous_phase = state.phase;
   const int previous_drift_direction = state.drift.drift_direction_sign;
   nfs2015_chase::WheelSteerTarget target =
       nfs2015_chase::AdvanceWheelSteerTarget(
           state.drift, travel.front_angle_radians, travel.rear_angle_radians,
           speed_mps, wheel_forward_speed, steering_input, steering_known,
-          reversing, dt, config);
+          reversing, dt, config, entry_stock_hint, entry_stock_hint_valid);
 
   // A new drift takes over from the stock pose at the stock angle. Starting
   // from zero is what produced the old "wheel snaps straight, then turns"
   // entry jump. Read the real wheel heading while the stock animation is still
-  // running and keep it only as the visual starting pose; the state machine's
-  // raw stock target remains the sweep target. Overwriting the target with the
-  // measured pose is what used to freeze turn_in at a few degrees while NTE's
-  // stock animation was still ramping up.
+  // running and keep it as the visual starting pose; the state machine's stock
+  // blend then moves from this measured pose toward the raw stock target.
   if (target.active && !state.animation_disabled) {
-    double measured_stock = 0.0;
-    const bool measured = MeasureStockWheelSteer(
-        context, state, car_forward, car_up, measured_stock);
+    double measured_stock = entry_stock_hint;
+    bool measured = entry_stock_hint_valid;
+    if (!measured) {
+      measured = MeasureStockWheelSteer(
+          context, state, car_forward, car_up, measured_stock);
+    }
     state.entry_stock_angle = nfs2015_chase::Clamp(
         measured ? measured_stock : target.stock_angle_radians,
         -config.max_angle_radians, config.max_angle_radians);
@@ -764,7 +782,7 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   }
 
   // Compose the final visual target. The entry stock pose is only the start;
-  // turn_in_alpha decides how much of the raw stock angle the turn-in phase
+  // entry_stock_alpha decides how much of the raw stock angle the entry blend
   // should show. The release phase deliberately returns to the entry pose so
   // the handoff to the stock animation does not jump to the raw steering angle.
   const double entry_stock = state.entry_stock_valid
@@ -808,9 +826,10 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
     char message[224]{};
     std::snprintf(
         message, sizeof(message),
-        "nfs2015 chase cam: drift quick turn %s (steer %.2f, applied %.1f deg)",
+        "nfs2015 chase cam: drift quick turn %s (steer %.2f, known=%d, "
+        "applied %.1f deg)",
         target.quick_turn ? "engaged" : "released",
-        steering_known ? steering_input : 0.0,
+        steering_known ? steering_input : 0.0, steering_known ? 1 : 0,
         state.applied_angle * kRadiansToDegrees);
     Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
   }
@@ -821,7 +840,7 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
     char message[224]{};
     std::snprintf(
         message, sizeof(message),
-        "nfs2015 chase cam: drift direction %s, quick turn re-armed "
+        "nfs2015 chase cam: drift direction %s changed "
         "(rear=%.1f, steer=%.2f)",
         state.drift.drift_direction_sign > 0 ? "left" : "right",
         state.rear_travel_angle * kRadiansToDegrees,
@@ -844,9 +863,9 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
     }
   }
 
-  // turn_in is a visible sweep, not a hold. It uses its own rate and is
-  // guaranteed to finish before the earliest possible handoff; countersteer
-  // keeps the existing user-configurable rate.
+  // Both the quick turn and the countersteer use the configured front-wheel
+  // rate; the applied angle is always rate-limited, so a target change cannot
+  // jump.
   state.applied_angle = nfs2015_chase::AdvanceWheelSteerAppliedAngle(
       state.applied_angle, target, dt, config);
 
