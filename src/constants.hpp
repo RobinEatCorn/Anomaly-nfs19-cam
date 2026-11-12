@@ -506,15 +506,22 @@ constexpr std::uint8_t kRenderXFailed = 2;
 // The offset table above was verified against these Anomaly NTE profiles;
 // `anomaly-cli --pid <pid> ue` reports the same value as `profileHash`. The
 // profile is hashed as its raw JSON text, so any edit - even whitespace or line
-// endings - moves this value and disables the X path instead of reading a
-// layout that moved. Both known 2.7.0 spellings are accepted: the installed
-// CRLF profile and the repository's LF profile. On a mismatch the camera keeps
-// working through the borrow estimate, and the panel says why.
+// endings - moves this value and disables the camera hooks instead of reading a
+// layout that moved. Known 2.7.0 and 3.0.0 spellings are accepted: for each
+// release, the installed CRLF profile and the repository's LF profile. The
+// 3.0.0 profile is the same HTGame.exe (same layout keys and GWorld RVA), so
+// the offsets above stay valid. On a mismatch no camera hook is installed, the
+// game camera stays native, and the panel says `hash mismatch`.
 constexpr std::string_view kAcceptedProfileHashes[] = {
     // Anomaly 2.7.0 installed runtime (CRLF JSON).
     "c6d97fd2e506e75a7da060096a1614b80ff1a3a6a3e1eaf185e25eb5b55c1f52",
     // Anomaly 2.7.0 repository profile (LF JSON).
     "c37a7b3d1802c74927797675c1723da01afaf637028315e5e265599d5119db2a",
+    // Anomaly 3.0.0 installed runtime (CRLF JSON). Same layout as 2.7.0:
+    // same HTGame.exe, same ue5.GWorld RVA, all plugin patterns still unique.
+    "93eefb64683fe66d202cd405079e15540fe1ee0d6f5b40b7eacf3889c6eff1ff",
+    // Anomaly 3.0.0 repository profile (LF JSON).
+    "ddba763c22f45a2354b48cc123eef217717637088046ea5353afa0380bd22a20",
 };
 constexpr std::uint8_t kAnchorInsuranceWaiting = 0;
 constexpr std::uint8_t kAnchorInsuranceReady = 1;

@@ -297,7 +297,7 @@ void EvaluateAnchorInsurance(Context &context) noexcept {
     } else if (next == kAnchorInsuranceHashMismatch) {
       std::snprintf(message, sizeof(message),
                     "anchor gate: profile hash mismatch (got %.*s, want one of "
-                    "%zu accepted 2.7.0 profiles); camera hooks disabled until "
+                    "%zu accepted runtime profiles); camera hooks disabled until "
                     "the plugin is updated",
                     static_cast<int>(hash_size > 0 ? hash_size - 1 : 0),
                     hash.data(),
