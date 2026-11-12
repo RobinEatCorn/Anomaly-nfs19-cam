@@ -1,6 +1,6 @@
 # NFS 2015 Chase Cam 2.0.4
 
-适用：Anomaly 2.7.0+ Runtime，NTE。
+适用：Anomaly 2.7.0 / 3.0.0 Runtime，NTE。
 
 ## 变更
 
@@ -36,6 +36,19 @@
 
 - 每次 `Z` 都会在日志里留一行判定结果（`viewmode call ... dec=...`），进车与档位自变也
   各有日志（`viewmode entry:` / `viewmode watch:`）。窗口里**没有**新增任何设置项或诊断行。
+
+## Anomaly 3.0.0 适配
+
+- profile 门禁新增两个 3.0.0 hash：安装包 CRLF `93eefb64683fe66d202cd405079e15540fe1ee0d6f5b40b7eacf3889c6eff1ff`、
+  仓库 LF `ddba763c22f45a2354b48cc123eef217717637088046ea5353afa0380bd22a20`；
+  两个 2.7.0 hash 保留。同一个 2.0.4 包同时支持 2.7.0 与 3.0.0。
+- 3.0.0 的 profile 与 2.7.0 是同一份 HTGame.exe：插件依赖的 layout 字段
+  （`world.gameInstance=560`、`controller.pawn=776`、`sceneComponent.location=280` 等）与
+  `ue5.GWorld` RVA（273961992）完全一致；插件自己的 8 个 pattern 在运行中的 3.0.0 进程里
+  全部唯一命中。没有改任何偏移、pattern 或 hook 写入点，门禁仍是 fail-closed。
+- 未采纳 3.0.0 新增的 Pak mod groups、telemetry、`FName.FromEName`、CMake
+  `RESOURCE_DIRECTORIES/BUNDLED_TARGETS` 等能力；相机与驾驶行为与 2.7.0 下一致。
+- 门禁失败日志的措辞从 “accepted 2.7.0 profiles” 改为 “accepted runtime profiles”。
 
 ## 边界行为
 
@@ -91,6 +104,22 @@
 **未实测**：剧情过场的 `Fixed`/`Seat` 路径（`pending_entry` 的挂起重试、过场结束自动追车）
 ——本次会话没有可用过场。抓拍模式用的那条判据（控制器上是否有游戏自己的电影相机）对
 过场大概率同样成立，但需要下一次完整回归补测。
+
+### Anomaly 3.0.0 实机验收（2026-11-13）
+
+环境：NTE + Anomaly 3.0.0，pid 21628，`tickHookReady=true`，`ntePlayerPublished=true`，
+插件热重载到 generation 7。
+
+- `anchor gate: ready (profile 93eefb64...eff1ff)`；`resources.hooks=5`
+  （view-point / route B / render transform / render view / viewmode toggle）；
+  无 warning/error、无 hook 冲突、`callback_faults=0`。
+- 用户逐条验收 1–7 全部正常：车内直接追车；`Z` 三档循环无闪屏/重影；漂移推近/下压/侧倾
+  与前轮反打正常；`F8` 抓拍让位并在退出后恢复；下车/步行回到游戏原生、再上车恢复；
+  设置窗口与旧配置正常。
+- `burnoutEnabled=false`，烧胎特写**未实测**（不是失败）。
+- 离线：3.0.0 SDK 全新构建通过；`ctest` 3/3；`anomaly-plugin validate` 通过；
+  `anomaly-test-host --reload 10 --ticks 60` 通过（`resource_leases_after_stop=0`、
+  `hotkeys_after_stop=0`）。
 
 ## 验证建议
 

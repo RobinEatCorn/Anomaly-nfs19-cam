@@ -34,9 +34,10 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 `Nfs2015ChaseCam-<version>.zip`，把 ZIP **里面的内容**解压到该目录
 （`manifest.json` 必须直接在目录根部，不能多套一层文件夹）。
 
-## Anomaly 2.7.0 兼容性
+## Anomaly 2.7.0 / 3.0.0 兼容性
 
-- **仅支持 Anomaly 2.7.0+**。1.1.1 及更早版本使用旧插件 ID，在 2.7.0 下无法加载。
+- **支持 Anomaly 2.7.0 与 3.0.0（同一个包）**。1.1.1 及更早版本使用旧插件 ID，
+  在 2.7.0/3.0.0 下无法加载。
 - 2.7.0 删除了 `anomaly.nte.vehicle` 服务和 `nte-vehicle` capability；本版本已同步删除。
   旧版服务里的带符号车速通过 `HTVehicleMovementComponent:GetForwardSpeedKmH` 反射调用恢复：
   轮式载具的 `GetForwardSpeedKmH` 可用时，倒车、刹车俯仰和纵向加速度都使用这个精确值；
@@ -50,9 +51,13 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
   轮询它们。getter 成功返回空表示确实不在载具上，此时不会再被冲刺速度误触发。
   玩家胶囊 `AttachParent` 仍用于车辆锚点，并在 getter 服务不可用时作为存在性后备。
   诊断面板会显示“载具存在”“速度来源”“速度符号”和“倒车”。
-- profile 门禁接受两个已验证的 2.7.0 hash：安装包 CRLF 版本
-  `c6d97f...1f52` 和仓库 LF 版本 `c37a7b...db2a`。未知 hash 仍然 fail-closed；
+- profile 门禁接受 2.7.0 与 3.0.0 的四个已验证 hash：2.7.0 安装包 CRLF
+  `c6d97fd2...1f52`、2.7.0 仓库 LF `c37a7b3d...db2a`、3.0.0 安装包 CRLF
+  `93eefb64...f1ff`、3.0.0 仓库 LF `ddba763c...2a20`。未知 hash 仍然 fail-closed；
   如果面板显示 `hash mismatch`，请把日志里的 `got ...` 发到 issue。
+- 3.0.0 的 profile 与 2.7.0 在插件依赖的 layout 字段、`ue5.GWorld` RVA 上完全一致
+  （同一份 HTGame.exe），所以偏移与 pattern 未改；3.0.0 新增的 Pak、telemetry 等能力
+  与本插件无关，未采纳。
 - route B 只在全屏 view 上应用，并且只在 `PrepareViewStateForVisibility` 之前写一次；
   面板的 `w N` 是历史 advisory witness 计数，早段路径不会因它跳过帧。route B 必须确定性
   应用，否则会重新引入车辆抖动；读取撕裂时用 `held` 短暂保持上一帧机位，而不是晚段补写。
