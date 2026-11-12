@@ -225,8 +225,10 @@ int main() {
     Check(first.phase == WheelSteerPhase::turn_in,
           "steering into the slide should start turn_in");
     Check(first.active, "turn_in must own the wheel immediately");
-    Check(std::fabs(WrappedDegrees(first.angle_radians) + 17.5) < 0.01,
-          "turn_in must hold the inside steering angle, not countersteer");
+    Check(first.quick_turn,
+          "holding into the slide at entry must trigger the quick turn");
+    Check(std::fabs(WrappedDegrees(first.angle_radians) + 40.0) < 0.01,
+          "the quick turn must target the drift-side limit, not countersteer");
 
     WheelSteerTarget later = first;
     for (int tick = 0; tick < 5; ++tick) {
@@ -235,9 +237,10 @@ int main() {
     Check(later.phase == WheelSteerPhase::entering ||
               later.phase == WheelSteerPhase::drifting,
           "turn_in should hand over to the countersteer blend");
-    Check(WrappedDegrees(later.angle_radians) >
-              WrappedDegrees(first.angle_radians),
-          "the wheel must move toward countersteer after turn_in");
+    Check(later.quick_turn,
+          "the quick turn must stay latched while the key is held");
+    Check(std::fabs(WrappedDegrees(later.angle_radians) + 40.0) < 0.01,
+          "the held quick turn must stay at the drift-side limit");
 
   }
 
@@ -257,11 +260,11 @@ int main() {
           "high-slip turn_in should hand over after its minimum hold");
   }
 
-  // The into-corner pose scales with rear slip: a small slide skips the
-  // full turn-in, a medium slide gets a partial stock angle, and a high-slip
-  // U-turn gets the full stock angle. The plugin composes these with the
-  // measured entry pose, so the pure state machine only needs to expose the
-  // scale and duration.
+  // The stock turn-in pose still scales with rear slip: a small slide skips
+  // the full turn-in, a medium slide gets a partial stock angle, and a
+  // high-slip U-turn gets the full stock angle. When the drift-side key is
+  // held, the one-shot quick turn overrides the visual target with the
+  // drift-side limit.
   {
     WheelSteerConfig scaled = config;
     scaled.counter_authority_radians = 0.5 * kRadiansPerDegree;
@@ -273,10 +276,12 @@ int main() {
           "small rear slip should skip the full turn_in phase");
     Check(small.turn_in_alpha < scaled.turn_in_min_alpha,
           "small rear slip should keep turn_in_alpha below the threshold");
-    const double small_visual = WrappedDegrees(
-        ComposeWheelSteerTargetAngle(-5.0 * kRadiansPerDegree, small));
-    Check(std::fabs(small_visual + 5.2) < 1.0,
-          "small drift should stay near the measured entry pose");
+    const double small_stock = WrappedDegrees(
+        ComposeWheelSteerStockAngle(-5.0 * kRadiansPerDegree, small));
+    Check(std::fabs(small_stock + 5.2) < 1.0,
+          "small drift should keep the measured entry stock pose");
+    Check(small.quick_turn,
+          "a held drift-side key must quick-turn even on a small drift");
 
     WheelSteerDriftState medium_state;
     const auto medium = StepTravel(medium_state, scaled, 40.0, 15.0, 20.0,
@@ -288,10 +293,12 @@ int main() {
           "medium rear slip should produce a partial turn-in scale");
     Check(std::fabs(medium.turn_in_duration_seconds - 0.10) < 1e-9,
           "medium turn-in should use the minimum visible duration");
-    const double medium_visual = WrappedDegrees(
-        ComposeWheelSteerTargetAngle(-5.0 * kRadiansPerDegree, medium));
-    Check(medium_visual < -15.0 && medium_visual > -25.0,
-          "medium drift should show a partial stock angle, not full lock");
+    const double medium_stock = WrappedDegrees(
+        ComposeWheelSteerStockAngle(-5.0 * kRadiansPerDegree, medium));
+    Check(medium_stock < -15.0 && medium_stock > -25.0,
+          "medium drift should keep a partial stock angle");
+    Check(medium.quick_turn,
+          "a held drift-side key must quick-turn on a medium drift");
 
     WheelSteerDriftState high_state;
     const auto high = StepTravel(high_state, scaled, 30.0, 25.0, 20.0,
@@ -302,10 +309,12 @@ int main() {
           "high rear slip should use the full turn-in scale");
     Check(std::fabs(high.turn_in_duration_seconds - 0.18) < 1e-9,
           "high-slip turn-in should use the full duration");
-    const double high_visual = WrappedDegrees(
-        ComposeWheelSteerTargetAngle(-5.0 * kRadiansPerDegree, high));
-    Check(std::fabs(high_visual + 35.0) < 0.1,
-          "high-slip U-turn should reach the full stock angle");
+    const double high_stock = WrappedDegrees(
+        ComposeWheelSteerStockAngle(-5.0 * kRadiansPerDegree, high));
+    Check(std::fabs(high_stock + 35.0) < 0.1,
+          "high-slip U-turn should keep the full stock angle");
+    Check(high.quick_turn,
+          "a held drift-side key must quick-turn on a high-slip U-turn");
   }
 
   // The composition helper is the visual contract between the state machine
@@ -388,6 +397,95 @@ int main() {
         Step(state, config, 20.0, 20.0, 0.5, true, 0.05);
     Check(target.phase == WheelSteerPhase::entering,
           "already-countersteering input should skip turn_in");
+  }
+
+  // The first drift-side press (including a key already held when the drift
+  // starts) turns the wheel toward the drift at the fast turn-in rate.
+  // Releasing the key returns to the countersteer target; later presses in the
+  // same drift are ordinary countersteer input.
+  {
+    WheelSteerConfig quick_config = config;
+    quick_config.drift_key_threshold = 0.1;
+
+    WheelSteerDriftState state;
+    // Positive rear slip is a left-hand drift; a negative input presses into
+    // the drift (the countersteer target is positive).
+    const auto first = Step(state, quick_config, 20.0, 20.0, -1.0, true,
+                            1.0 / 60.0);
+    Check(first.phase == WheelSteerPhase::turn_in,
+          "an into-drift entry must start turn_in");
+    Check(first.quick_turn,
+          "a key already held at drift entry must trigger the quick turn");
+    Check(std::fabs(WrappedDegrees(ComposeWheelSteerTargetAngle(
+                        -5.0 * kRadiansPerDegree, first)) + 40.0) < 0.01,
+          "the quick turn must target the full angle into the drift");
+
+    // Keep holding: the latch owns the wheel.
+    auto held = first;
+    for (int tick = 0; tick < 10; ++tick) {
+      held = Step(state, quick_config, 20.0, 20.0, -1.0, true,
+                  1.0 / 60.0);
+    }
+    Check(held.quick_turn,
+          "holding the drift-side key must keep the quick turn active");
+
+    // Release: back to the normal target; the applied angle stays rate-limited.
+    const auto released =
+        Step(state, quick_config, 20.0, 20.0, 0.0, true, 1.0 / 60.0);
+    Check(!released.quick_turn,
+          "releasing the drift-side key must drop the quick turn");
+
+    // A second press in the same drift is ordinary countersteer input.
+    const auto again =
+        Step(state, quick_config, 20.0, 20.0, -1.0, true, 1.0 / 60.0);
+    Check(!again.quick_turn,
+          "a second drift-side press in the same drift must not re-trigger");
+
+    // The visual sweep is rate-limited: 120 deg/s is 2 deg per 60 Hz tick.
+    WheelSteerTarget quick_target{};
+    quick_target.phase = WheelSteerPhase::turn_in;
+    quick_target.turn_in_duration_seconds = 0.18;
+    quick_target.quick_turn = true;
+    quick_target.quick_turn_angle_radians = -40.0 * kRadiansPerDegree;
+    quick_target.angle_radians = quick_target.quick_turn_angle_radians;
+    double applied = 0.0;
+    applied = AdvanceWheelSteerAppliedAngle(
+        applied, quick_target, 1.0 / 60.0, quick_config);
+    Check(std::fabs(WrappedDegrees(applied) + 2.0) < 1e-6,
+          "the quick turn must move at the 120 deg/s front-wheel rate");
+
+    // Entering while countersteering does not arm the latch; the first
+    // drift-side press after entry does.
+    WheelSteerDriftState late_state;
+    const auto counter_entry =
+        Step(late_state, quick_config, 20.0, 20.0, 1.0, true, 1.0 / 60.0);
+    Check(!counter_entry.quick_turn,
+          "countersteering entry must not trigger the quick turn");
+    const auto pressed =
+        Step(late_state, quick_config, 20.0, 20.0, -1.0, true,
+             1.0 / 60.0);
+    Check(pressed.quick_turn,
+          "the first drift-side press after entry must trigger the quick turn");
+
+    // Stick noise below the threshold is not a press.
+    WheelSteerDriftState small_state;
+    const auto small = Step(small_state, quick_config, 20.0, 20.0, -0.05,
+                            true, 1.0 / 60.0);
+    Check(!small.quick_turn,
+          "analog input below the drift-key threshold must not trigger");
+
+    // The next drift re-arms the one-shot.
+    for (int tick = 0; tick < 12; ++tick) {
+      static_cast<void>(Step(late_state, quick_config, 1.0, 20.0, 0.0,
+                             true, 0.3));
+    }
+    Check(late_state.phase == WheelSteerPhase::grip,
+          "the test drift must release before the next entry");
+    const auto next =
+        Step(late_state, quick_config, 20.0, 20.0, -1.0, true,
+             1.0 / 60.0);
+    Check(next.quick_turn,
+          "a new drift must re-arm the quick turn");
   }
 
   // The drift cannot exit during the 0.5 second lock even if the slip drops.

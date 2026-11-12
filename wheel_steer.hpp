@@ -140,6 +140,10 @@ struct WheelSteerConfig final {
   double exit_slip_radians{3.0 * kRadiansPerDegree};
   double full_slip_radians{40.0 * kRadiansPerDegree};
   double rate_radians_per_second{120.0 * kRadiansPerDegree};
+  // Ignore analog stick noise when deciding whether the driver is pressing
+  // into the drift. The first real press after the drift starts is a one-shot
+  // quick turn toward the drift direction.
+  double drift_key_threshold{0.1};
   // NFS 2015 only checks this speed when entering a drift. Once the state
   // machine is engaged, speed is not an exit condition; a large drift angle
   // can make forward speed approach zero while the car is still sliding fast.
@@ -217,6 +221,12 @@ struct WheelSteerDriftState final {
   double counter_angle{};
   double reentry_cooldown{};
   double standstill_seconds{};
+  // One-shot "steer into the drift" latch. The first press of the drift-side
+  // input after the drift starts turns the wheel toward the drift; releasing
+  // the input returns to the countersteer target. `used` keeps it to one press
+  // per drift.
+  bool quick_turn_active{};
+  bool quick_turn_used{};
 };
 
 struct WheelSteerTarget final {
@@ -240,6 +250,11 @@ struct WheelSteerTarget final {
   // choose how long the turn-in phase should last.
   double turn_in_alpha{};
   double turn_in_duration_seconds{};
+  // True while the one-shot drift-side press owns the wheel. The visual target
+  // is then the maximum angle in the drift direction, not the countersteer
+  // angle.
+  bool quick_turn{};
+  double quick_turn_angle_radians{};
   WheelSteerPhase phase{WheelSteerPhase::grip};
 };
 
@@ -432,6 +447,15 @@ struct WheelSteerTravel final {
       motion_valid && finite_angles &&
       absolute_slip < config.exit_slip_radians;
 
+  // The drift-side input is the steering input on the same side as the drift,
+  // not the countersteer side. The rear slip sign defines the drift direction:
+  // a left-hand drift has a positive rear angle, so a negative steering input
+  // points into it. Ignore stick noise below the threshold.
+  const bool into_drift_key =
+      steering_known && std::isfinite(steering_input) &&
+      std::fabs(steering_input) >= config.drift_key_threshold &&
+      finite_angles && steering_input * rear_travel_angle < 0.0;
+
   const double full_slip = (std::max)(
       config.full_slip_radians, config.enter_slip_radians + 1e-6);
   const double normalized_slip =
@@ -590,13 +614,41 @@ struct WheelSteerTravel final {
       break;
   }
 
+  // One-shot quick turn: the first drift-side press (including a key already
+  // held when the drift starts) owns the wheel toward the drift until the
+  // driver releases it. Later presses in the same drift are ordinary
+  // countersteer input; the latch resets when the drift ends.
+  const bool quick_turn_phase =
+      state.phase == WheelSteerPhase::turn_in ||
+      state.phase == WheelSteerPhase::entering ||
+      state.phase == WheelSteerPhase::drifting;
+  if (quick_turn_phase && into_drift_key && !below_exit &&
+      !state.quick_turn_used) {
+    state.quick_turn_used = true;
+    state.quick_turn_active = true;
+  }
+  if (!quick_turn_phase || !into_drift_key || below_exit) {
+    state.quick_turn_active = false;
+  }
+  if (state.phase == WheelSteerPhase::grip) {
+    state.quick_turn_used = false;
+  }
+  const bool quick_turn =
+      state.quick_turn_active && into_drift_key && !below_exit;
+  result.quick_turn = quick_turn;
+  if (into_drift_key) {
+    result.quick_turn_angle_radians =
+        (steering_input >= 0.0 ? 1.0 : -1.0) * config.max_angle_radians;
+  }
   result.counter_angle_radians = state.counter_angle;
   const double smooth_blend =
       state.blend * state.blend * (3.0 - 2.0 * state.blend);
   result.angle_blend = smooth_blend;
   result.angle_radians =
-      Lerp(result.stock_angle_radians, result.counter_angle_radians,
-           result.angle_blend);
+      quick_turn
+          ? result.quick_turn_angle_radians
+          : Lerp(result.stock_angle_radians, result.counter_angle_radians,
+                 result.angle_blend);
   result.blend = state.blend;
   result.turn_in_alpha = state.turn_in_alpha;
   result.turn_in_duration_seconds = state.turn_in_duration;
@@ -628,6 +680,9 @@ struct WheelSteerTravel final {
 
 [[nodiscard]] inline double ComposeWheelSteerTargetAngle(
     const double entry_stock_angle, const WheelSteerTarget& target) noexcept {
+  if (target.quick_turn) {
+    return target.quick_turn_angle_radians;
+  }
   const double stock =
       ComposeWheelSteerStockAngle(entry_stock_angle, target);
   if (target.phase == WheelSteerPhase::grip) {
@@ -644,6 +699,14 @@ struct WheelSteerTravel final {
     const double dt, const WheelSteerConfig& config) noexcept {
   const double step = std::isfinite(dt) ? Clamp(dt, 0.0, 0.25) : 0.0;
   double rate = config.rate_radians_per_second;
+  if (target.quick_turn) {
+    // The one-shot drift-side sweep uses the normal front-wheel steer rate
+    // (120 deg/s by default) even after the phase has moved on to
+    // entering/drifting. The applied angle is still rate-limited, so the
+    // target can never jump.
+    return MoveTowards(current_angle, target.angle_radians,
+                       config.rate_radians_per_second * step);
+  }
   if (target.phase == WheelSteerPhase::turn_in) {
     // A high-slip entry can leave turn_in after turn_in_min_seconds even when
     // the scaled duration is longer. Use the earliest possible handoff time so

@@ -1163,6 +1163,7 @@ struct WheelSteerState final {
       nfs2015_chase::WheelSteerPhase::grip};
   bool engaged{};
   bool active{};
+  bool quick_turn{};
   bool resolved{};
   bool failure_logged{};
   bool geometry_logged{};

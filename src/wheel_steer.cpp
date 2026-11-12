@@ -245,6 +245,7 @@ void RestoreWheelPose(Context &context) noexcept {
   state.phase = nfs2015_chase::WheelSteerPhase::grip;
   state.engaged = false;
   state.active = false;
+  state.quick_turn = false;
 }
 
 void ReleaseWheelSteer(Context &context) noexcept {
@@ -777,10 +778,12 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
     state.stock_angle = target.stock_angle_radians;
   }
 
+  const bool quick_turn_changed = state.quick_turn != target.quick_turn;
   state.target_angle = target.angle_radians;
   state.target_blend = target.blend;
   state.engaged = target.engaged;
   state.phase = target.phase;
+  state.quick_turn = target.quick_turn;
 
   if (target.phase != previous_phase) {
     char message[320]{};
@@ -788,7 +791,7 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
         message, sizeof(message),
         "nfs2015 chase cam: wheel drift %s -> %s speed=%.2f "
         "steer=%.2f front=%.1f rear=%.1f yaw=%.1f stock=%.1f "
-        "counter=%.1f blend=%.2f sample=%.0f%%",
+        "counter=%.1f blend=%.2f quick=%d sample=%.0f%%",
         WheelSteerPhaseName(previous_phase), WheelSteerPhaseName(target.phase),
         speed_mps, steering_known ? steering_input : 0.0,
         state.front_travel_angle * kRadiansToDegrees,
@@ -796,7 +799,18 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
         state.yaw_rate * kRadiansToDegrees,
         state.stock_angle * kRadiansToDegrees,
         target.counter_angle_radians * kRadiansToDegrees, target.blend,
-        sample_percent);
+        target.quick_turn ? 1 : 0, sample_percent);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+  }
+
+  if (quick_turn_changed) {
+    char message[224]{};
+    std::snprintf(
+        message, sizeof(message),
+        "nfs2015 chase cam: drift quick turn %s (steer %.2f, applied %.1f deg)",
+        target.quick_turn ? "engaged" : "released",
+        steering_known ? steering_input : 0.0,
+        state.applied_angle * kRadiansToDegrees);
     Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
   }
 
@@ -893,7 +907,7 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
           "(front=%zu rear=%zu phase=%s target=%.1f deg applied=%.1f deg "
           "stock=%.1f deg counter=%.1f deg blend=%.2f front_slip=%.1f "
           "front_center=%.1f rear_slip=%.1f offsets=%d max=%.1f "
-          "sample=%.0f%% point=%.2fm)",
+          "quick=%d sample=%.0f%% point=%.2fm)",
           state.front_count, state.rear_count,
           WheelSteerPhaseName(target.phase),
           state.target_angle * kRadiansToDegrees,
@@ -903,8 +917,9 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
           state.front_travel_angle * kRadiansToDegrees,
           travel.front_center_angle_radians * kRadiansToDegrees,
           state.rear_travel_angle * kRadiansToDegrees,
-          state.axle_offsets_valid ? 1 : 0, max_degrees, sample_percent,
-          travel.front_sample_offset_meters);
+          state.axle_offsets_valid ? 1 : 0, max_degrees,
+          target.quick_turn ? 1 : 0,
+          sample_percent, travel.front_sample_offset_meters);
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
     }
     state.active = true;
