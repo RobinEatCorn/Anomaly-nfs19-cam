@@ -694,8 +694,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
       // entryView die with it, and the detour passes Z straight through.
       NoteVehicleExit(context);
       // Plan SS2.3.3: enabling while driving counts as a fresh entry, so the
-      // gap saturates here. `+= dt` would make a quick off/on (F7 twice within
-      // the threshold) silently leave the chase camera off.
+      // gap saturates here. `+= dt` would make a quick off/on (the switch
+      // flipped twice inside the threshold) silently leave the chase off.
       context.view_off_seconds = kChaseEntryGapSeconds;
     }
     PublishInactive(context);

@@ -58,7 +58,6 @@ AnomalyByteSpanV1 Bytes(std::string_view value) noexcept;
 bool CoreReady(const AnomalyCoreServiceV1 *service) noexcept;
 bool ConfigReady(const AnomalyConfigServiceV1 *service) noexcept;
 bool JsonReady(const AnomalyJsonServiceV1 *service) noexcept;
-bool InputReady(const AnomalyInputServiceV1 *service) noexcept;
 bool UiReady(const AnomalyUiServiceV1 *service) noexcept;
 bool SignatureReady(const AnomalySignatureServiceV1 *service) noexcept;
 bool HookReady(const AnomalyHookServiceV1 *service) noexcept;

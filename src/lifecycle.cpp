@@ -32,8 +32,6 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
       host, ANOMALY_CONFIG_SERVICE_V1_ID, ANOMALY_CONFIG_SERVICE_V1_VERSION);
   context->json = Query<AnomalyJsonServiceV1>(
       host, ANOMALY_JSON_SERVICE_V1_ID, ANOMALY_JSON_SERVICE_V1_VERSION);
-  context->input = Query<AnomalyInputServiceV1>(
-      host, ANOMALY_INPUT_SERVICE_V1_ID, ANOMALY_INPUT_SERVICE_V1_VERSION);
   context->ui = Query<AnomalyUiServiceV1>(
       host, ANOMALY_UI_SERVICE_V1_ID, ANOMALY_UI_SERVICE_V1_VERSION);
   // 2.6.0 managed windows. Optional: 2.5.0 has no `anomaly.window`, in which
@@ -233,7 +231,6 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   EvaluateAnchorInsurance(*context);
   context->detour_hz = 0.0;
   context->brake_last_target = 0.0;
-  static_cast<void>(RegisterToggleHotkey(*context));
   RegisterSettingsWindow(*context);
   // Install the hook from the Game tick, not from this lifecycle callback: the
   // target function is called on the Game thread, so create/enable cannot
@@ -267,7 +264,6 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   context->game_offset_last_ns = 0;
   context->car_ring.Clear();
   PublishInactive(*context);
-  ReleaseToggleHotkey(*context);
   ReleaseProbeSubscription(*context);
   ReleaseSettingsWindow(*context);
   ReleaseHook(*context);

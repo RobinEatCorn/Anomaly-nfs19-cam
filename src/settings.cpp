@@ -894,46 +894,4 @@ void ReleaseSettingsSchema(Context &context) noexcept {
   context.settings_schema = {};
 }
 
-void ANOMALY_CALL ToggleHotkey(void *user, AnomalyGenerationHandleV1,
-                               const AnomalyInputSnapshotV1 *) noexcept {
-  auto *context = static_cast<Context *>(user);
-  if (context == nullptr) {
-    return;
-  }
-  const bool enabled = !context->enabled.load(std::memory_order_acquire);
-  context->enabled.store(enabled, std::memory_order_release);
-  MarkSettingsDirty(*context);
-}
-
-bool RegisterToggleHotkey(Context &context) noexcept {
-  if (!InputReady(context.input)) {
-    return false;
-  }
-  try {
-    AnomalyHotkeySpecV1 spec{sizeof(spec)};
-    spec.virtual_key = kToggleKey;
-    spec.flags = ANOMALY_HOTKEY_V1_ALLOW_EXTRA_MODIFIERS |
-                 ANOMALY_HOTKEY_V1_ALLOW_WHILE_UI_CAPTURED;
-    spec.id = StringView("nfs2015-chase-cam-toggle");
-    AnomalyGenerationHandleV1 handle{};
-    const auto status = context.input->register_hotkey(
-        context.input->user, &spec, ToggleHotkey, &context, &handle);
-    if (status.code == ANOMALY_STATUS_V1_OK && handle.id != 0) {
-      context.toggle_hotkey = handle;
-      return true;
-    }
-  } catch (...) {
-  }
-  return false;
-}
-
-void ReleaseToggleHotkey(Context &context) noexcept {
-  if (context.toggle_hotkey.id != 0 && InputReady(context.input)) {
-    static_cast<void>(
-        context.input->release_hotkey(context.input->user,
-                                      context.toggle_hotkey));
-  }
-  context.toggle_hotkey = {};
-}
-
 }  // namespace nfs2015_chase_cam::detail

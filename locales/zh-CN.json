@@ -74,7 +74,7 @@
     "hint.hook_conflict": "视点函数可能被其他相机插件占用。请先停用 Camera Tools，或关闭 BetterPose 的相机 Hook，再重试。",
     "hint.player_unavailable": "玩家快照不可用，相机保持空闲。",
     "hint.reset_done": "镜头已回正到车辆。",
-    "hint.toggle": "F7 开关相机。只有检测到载具时才会接管视角。",
+    "hint.toggle": "驾驶时 Z 键循环追车 / 第三人称 / 第一人称。关闭后 Z 完全交还游戏。",
     "action.retry_hook": "重试 Hook",
     "action.reset": "重置相机",
     "status.speed_distance": "速度距离倍率",

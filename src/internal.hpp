@@ -62,8 +62,6 @@ void RestoreDefaults(Context &context) noexcept;
 [[nodiscard]] bool PersistSettings(Context &context) noexcept;
 [[nodiscard]] bool LoadSettings(Context &context) noexcept;
 void ReleaseSettingsSchema(Context &context) noexcept;
-[[nodiscard]] bool RegisterToggleHotkey(Context &context) noexcept;
-void ReleaseToggleHotkey(Context &context) noexcept;
 
 // --- ahud_probe.cpp -------------------------------------------------------
 [[nodiscard]] bool ProbeAhudReady(

@@ -52,14 +52,6 @@ bool JsonReady(const AnomalyJsonServiceV1 *service) noexcept {
          service->object_size != nullptr;
 }
 
-bool InputReady(const AnomalyInputServiceV1 *service) noexcept {
-  return HasField<AnomalyInputServiceV1,
-                  decltype(AnomalyInputServiceV1::release_hotkey)>(
-             service, offsetof(AnomalyInputServiceV1, release_hotkey)) &&
-         service->register_hotkey != nullptr &&
-         service->release_hotkey != nullptr;
-}
-
 bool UiReady(const AnomalyUiServiceV1 *service) noexcept {
   return HasField<AnomalyUiServiceV1,
                   decltype(AnomalyUiServiceV1::slider_float)>(

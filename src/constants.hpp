@@ -17,7 +17,6 @@ constexpr std::string_view kSettingsWindowId = "nfs2015-chase-cam-settings-v1";
 constexpr std::uint32_t kSettingsSchemaVersion = 1;
 constexpr std::size_t kMaximumSettingsBytes = 4096;
 constexpr std::uint64_t kSettingsSaveDelayMilliseconds = 500;
-constexpr std::uint32_t kToggleKey = VK_F7;
 
 constexpr double kDegreesToRadians =
     3.14159265358979323846 / 180.0;

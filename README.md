@@ -89,7 +89,9 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 - `anomaly.core` 的 `read_memory` 读取 `ue5.GWorld` 链和车辆/相机对象；
 - `anomaly.ue5.build`（可选）用 `profile_hash` 给 route B / FOV 的硬编码偏移做版本门禁；
 - `anomaly.config` + `anomaly.json` 持久化并解析设置（不依赖第三方 JSON 库）；
-- `anomaly.ui` / `anomaly.localization` / `anomaly.input` 提供窗口、翻译和 F7 快捷键；
+- `anomaly.ui` / `anomaly.localization` 提供窗口和翻译；
+- `anomaly.ue5.names`（可选）把 `CameraViewMode.ThirdPerson` 之类的中段名字换成进程内的
+  `FName` id，Z 键循环靠它判断当前档位；没有该服务时 Z 完全原生；
 - `anomaly.window`（可选）使用 2.6+ 的托管窗口；没有时退回直接 UI。
 
 ### 相机与渲染路径
@@ -133,6 +135,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
+├── RELEASE-NOTES-2.0.4.md Z 键三档视角循环（追车/第三人称/第一人称）
 ├── RELEASE-NOTES-2.0.3.md NFS 漂移前轮反打（低速门槛/平滑交接）
 ├── RELEASE-NOTES-2.0.2.md 弹簧滑块与默认看向值说明
 ├── RELEASE-NOTES-2.0.1.md 闪屏/重影修复说明
@@ -277,7 +280,8 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 
 ## 使用
 
-- `F7` 开关相机。插件只在检测到当前驾驶载具时接管视角；未驾驶时保持游戏原相机。
+- 驾驶时 `Z` 在**追车 / 普通第三人称 / 第一人称**之间循环；未驾驶时 `Z` 保持游戏原生的
+  第一/第三人称切换。插件只在检测到当前驾驶载具时接管视角。
 - 默认预设是 **NFS 2015（实机数据）**：车后约 5.10 m、高 1.49 m，look-at 高度 1.225 m，
   FOV 43.0–63.1°（垂直；16:9 下约 70–95° 水平），速度位移在 0–50 mph 内后拉 1.3 m，
   roll 上限 4.7°。
@@ -294,6 +298,30 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 - 窗口中的 **坡度跟随（车身俯仰）** 是总开关，**坡度构图强度** 控制次级微调的倍率（0–2；
   0 只保留基础车身跟随）。总开关关闭后回到旧的 yaw-only 机架；`position and yaw only`
   诊断开关也会强制关闭坡度。
+
+### Z 键视角循环
+
+驾驶时 `Z` 由插件接管，变成三档循环：
+
+```text
+追车（NFS 模型） --Z--> 普通第三人称 --Z--> 第一人称 --Z--> 追车
+```
+
+- **追车与普通第三人称在游戏里是同一个 tag**（`CameraViewMode.ThirdPerson`），区别只在插件
+  是否输出机位：追车 = 插件想追车 + tag 命中；普通第三人称 = 插件完全不碰相机。
+- 每一次切档最终都走游戏自己的切档函数，插件只在 `orig` 返回成功后记账。游戏拒绝时
+  （0.5 秒手动冷却、过场的 `limit > 0` 窗口）插件**原样接受**，不猜、不补、不卡死。
+- **上车规则是固定的，没有设置项**：
+  - 第三人称上车 → 直接进追车；
+  - 第一人称上车 → 保持第一人称（你刚才在用它），第一次 `Z` 才进追车；
+  - 上车时游戏正处在过场（`Fixed`/`Seat`）→ 请求挂起，等回到第三人称/第一人称再应用一次。
+- 你按 `Z` 主动退出追车后，插件不会自作主张再接管；下车、过场、传送都会先交还相机，
+  回到第三人称后只在"仍然想要追车"时才重新覆盖。
+- 关闭总开关或未驾驶时，`Z` 完全原生。
+- 覆盖要求**每一帧**从控制器读到的 tag 就是 `ThirdPerson`：读数不可用、换控制器、快照失败
+  都会立刻停止覆盖（退回游戏原相机），不会因为状态过期把追车画面盖在第一人称或过场上。
+- 该功能需要 `anomaly.ue5.names` 才能把 tag 文本换成 id；没有这个服务时 Z 保持原生，
+  相机部分的功能不受影响。
 
 ### 坡度跟随设置
 
@@ -403,6 +431,19 @@ hook lease。
 `C px` 是定位渲染相位、帧长和锚点问题的常驻探针。它们只读取计数和样本，不参与相机计算；
 排查结束后可以忽略，不需要为了正常使用关闭。
 
+Z 键循环的状态只写日志、不占窗口（计划要求本功能不新增设置/诊断项）：
+
+```text
+viewmode call #12 dir=fwd clock=... gused=0 en=1 veh=1 active=1 tag=FP ... ret=1 after=TP dec=first-to-chase
+viewmode watch: 0x3B1BE(FP) -> 0x3B1A1(TP) count=2 limit=0 veh=1 en=1 active=1 calls=3
+viewmode entry: tag=TP wanted=1 pending=0
+```
+
+- `dec` 是这次 `Z` 的判定：`chase-to-third` / `third-to-first` / `first-to-chase` /
+  对应的 `*-refused`（游戏拒绝）、`on-foot`、`blocked-limit`、`external-pass` 等；
+- `viewmode watch` 只在游戏档位真的变化时打印，用来排查"没按 Z 档位自己变了"；
+- `viewmode entry` 是进车（或车内重新启用插件）时应用的规则。
+
 诊断开关（`Diagnostic: ...`）会刻意关闭某些通道，仅用于二分问题：
 
 - `position and yaw only`：关闭 pitch/roll/镜头写入；
@@ -425,6 +466,11 @@ hook lease。
 - 渲染路径再次检查 render thread、全屏 view、view state、generation/新鲜度、有限值和
   proxy 所有权；
 - hook 回调使用宿主 generation lease；热重载时先撤 callback 再释放 hook。
+
+Z 键 detour 单独走**自己的**门禁，任何一条不成立就整条透传给游戏：pattern 唯一命中、
+vtable 槽双校验、`anomaly.ue5.names` 能按文本反查到 tag id、当前控制器快照可读、正在驾驶、
+本次调用来自本控制器、总开关打开。tag 读不出来时按"第三人称"处理（fail-open），这样没有
+names 服务的宿主仍然保留 2.0.3 的追车行为，只是 Z 不再循环。
 
 **2.5 兼容**：2.5 没有可选的 build service，route B 和 `FViewInfo` FOV 写入关闭，只保留旧的
 基础视点 hook（它仍按旧路径写 CameraManager 的镜头）；2.6+ 如果 build service 存在但 hash
@@ -479,7 +525,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 ## 发布
 
 `manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
-`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.2`。ID 一旦发布就不应再变。
+`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.4`。ID 一旦发布就不应再变。
 
 发布门禁、离线/实机测试矩阵、产物哈希和回滚步骤记录在
 [RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。完整发布前至少完成两个不同地图、
@@ -491,7 +537,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 
    ```powershell
    Compress-Archive -Path .\build\package\robineatcorn.nfs2015-chase-cam\* `
-     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.2.zip -Force
+     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.4.zip -Force
    ```
 
    WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`；
@@ -500,8 +546,8 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
 
    ```sh
-   gh release create v2.0.2 dist/Nfs2015ChaseCam-2.0.2.zip \
-     --title "NFS 2015 Chase Cam 2.0.2" \
+   gh release create v2.0.4 dist/Nfs2015ChaseCam-2.0.4.zip \
+     --title "NFS 2015 Chase Cam 2.0.4" \
      --notes "新增镜头弹簧滑块；漂移看向弹簧默认值改为 15"
    ```
 

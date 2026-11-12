@@ -1240,7 +1240,6 @@ struct Context final {
   const AnomalyCoreServiceV1 *core{};
   const AnomalyConfigServiceV1 *config{};
   const AnomalyJsonServiceV1 *json{};
-  const AnomalyInputServiceV1 *input{};
   const AnomalyUiServiceV1 *ui{};
   const AnomalyWindowServiceV1 *window{};
   AnomalyGenerationHandleV1 window_handle{};
@@ -1265,7 +1264,6 @@ struct Context final {
   const AnomalyUe5NamesServiceV1 *names{};
 
   AnomalyGenerationHandleV1 settings_schema{};
-  AnomalyGenerationHandleV1 toggle_hotkey{};
   std::atomic<std::uint64_t> view_hook_id{};
   std::atomic<std::uint64_t> view_hook_generation{};
   std::atomic<std::uint64_t> transform_hook_id{};

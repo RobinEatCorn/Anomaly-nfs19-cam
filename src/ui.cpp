@@ -1328,8 +1328,8 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
       ui->text(ui->user,
                StringView(context->localizer.Text(
                    "hint.toggle",
-                   "F7 toggles this camera. The plugin only drives the view "
-                   "while a vehicle is active.")));
+                   "While driving, Z cycles chase, third person and first "
+                   "person. Turning this camera off hands Z back to the game.")));
     }
   } catch (...) {
   }
