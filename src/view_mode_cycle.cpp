@@ -698,6 +698,22 @@ bool EnsureViewModeTags(Context &context) noexcept {
   return true;
 }
 
+// The game's own photo/cine camera. `PC+0x1760` holds a CineCameraComponent
+// owned by the controller while the game shows a camera of its own; it is null
+// during normal driving. The read failing means "not there": the plugin keeps
+// the pre-fix behaviour instead of dropping the chase camera.
+[[nodiscard]] static bool PcCineCameraPresent(Context &context) noexcept {
+  const std::uintptr_t pc =
+      context.view_mode.pc.load(std::memory_order_acquire);
+  if (pc == 0) {
+    return false;
+  }
+  std::uintptr_t address{};
+  std::uintptr_t component = 0;
+  return AddAddress(pc, kPcCineCameraOffset, address) &&
+         Read(context.core, address, component) && component != 0;
+}
+
 // Watch the controller's view-mode block on every Game tick and report the
 // moments the game changes it by itself. Two things in the first TG-0 session
 // made this necessary:
@@ -734,6 +750,31 @@ void MonitorViewMode(Context &context) noexcept {
   // read this copy, and it must be this tick's value, not the last edge's.
   state.published_tag.store(tag, std::memory_order_relaxed);
   state.published_tag_known.store(true, std::memory_order_release);
+
+#if defined(NFS2015_VIEWMODE_TRACE)
+  // Acceptance-only trace (plan TG-4 SS7: "record tag / view_active / view_mode_tag
+  // for the frames around a transition"). Compiled in only with
+  // -DNFS2015_VIEWMODE_TRACE=ON; the shipped package does not contain it, so it
+  // adds neither a setting nor a runtime cost.
+  {
+    char line[224]{};
+    std::snprintf(line, sizeof(line),
+                  "viewmode trace: tag=0x%llX(%s) count=%d limit=%d veh=%d "
+                  "wanted=%d active=%d pending=%d veto=%llu cine=%d",
+                  static_cast<unsigned long long>(tag), TagLabel(ReadNames(state), tag),
+                  static_cast<int>(count), static_cast<int>(limit),
+                  context.vehicle_query_known
+                      ? (context.vehicle_query_present ? 1 : 0)
+                      : -1,
+                  state.chase_wanted ? 1 : 0,
+                  context.view_active.load(std::memory_order_relaxed) ? 1 : 0,
+                  state.pending_entry ? 1 : 0,
+                  static_cast<unsigned long long>(
+                      context.diag.tag_veto_frames.load(std::memory_order_relaxed)),
+                  PcCineCameraPresent(context) ? 1 : 0);
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, std::string_view(line));
+  }
+#endif
 
   const bool first = !state.have_tag;
   if (!first && tag == state.last_tag && count == state.last_count &&
@@ -819,6 +860,9 @@ const char *ViewModeTagLabel(Context &context,
 bool ChaseSlotAllowed(Context &context) noexcept {
   const ViewModeState &state = context.view_mode;
   if (!state.chase_wanted) {
+    return false;
+  }
+  if (PcCineCameraPresent(context)) {
     return false;
   }
   return TagIsThirdPerson(
@@ -924,6 +968,12 @@ void NoteVehicleExit(Context &context) noexcept {
 
 bool ChaseCameraGuardAllows(Context &context) noexcept {
   const ViewModeState &state = context.view_mode;
+  // The game's own camera (photo mode / cinematic) wins over everything below.
+  // Same live read as the tag: the presenter's answer is a tick behind, and one
+  // tick is a visible frame of the chase pose on top of the photo camera.
+  if (PcCineCameraPresent(context)) {
+    return false;
+  }
   std::uint64_t tag = 0;
   // Live read first: the presenter's copy is up to one Game tick behind, and a
   // tick is a visible frame of the wrong camera.

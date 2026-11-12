@@ -56,8 +56,17 @@ set_target_properties(nfs2015_chase_cam PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
     PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/symbols")
 
+# Acceptance-only: `-DNFS2015_VIEWMODE_TRACE=ON` adds one log line per game tick
+# with the controller tag, `view_active`, `chase_wanted` and the camera-guard veto
+# counter. It exists so a transition can be checked frame by frame (plan TG-4);
+# release packages are built without it.
+option(NFS2015_VIEWMODE_TRACE "Log the view-mode state on every game tick" OFF)
+
 target_compile_definitions(nfs2015_chase_cam PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+if(NFS2015_VIEWMODE_TRACE)
+    target_compile_definitions(nfs2015_chase_cam PRIVATE NFS2015_VIEWMODE_TRACE)
+endif()
 
 if(MSVC)
     # The sources are UTF-8 without a BOM; without /utf-8 MSVC decodes them

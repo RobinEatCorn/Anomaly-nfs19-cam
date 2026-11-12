@@ -273,6 +273,10 @@ cmake --install build --config RelWithDebInfo --prefix C:\path\to\game --compone
 
 两种方式都会得到 `<game>\Anomaly\plugins\robineatcorn.nfs2015-chase-cam`，然后在游戏内
 **Plugins > 已安装** 里启用。
+验收逐帧证据可以用 `cmake -S . -B build.trace -DNFS2015_VIEWMODE_TRACE=ON` 单独构建：
+它每个 Game tick 多打一行 `viewmode trace:`（档位、`view_active`、`chase_wanted`、
+相机守卫否决次数、抓拍相机标志）。正式包不带这个开关。
+
 WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目录。发布 ZIP 的流程见
 下面的[发布](#发布)一节：ZIP 根目录必须直接包含 `manifest.json`。发布前可以运行
 `./verify-release.sh --allow-missing-host-tools` 检查 manifest、包内容、ZIP 根目录和 DLL
@@ -317,6 +321,9 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
   - 上车时游戏正处在过场（`Fixed`/`Seat`）→ 请求挂起，等回到第三人称/第一人称再应用一次。
 - 你按 `Z` 主动退出追车后，插件不会自作主张再接管；下车、过场、传送都会先交还相机，
   回到第三人称后只在"仍然想要追车"时才重新覆盖。
+- **游戏自己的相机优先**：进入 F8 抓拍（`CineCameraComponent` 挂在控制器上）或任何游戏
+  自己开镜的模式时，插件立刻停止覆盖，退出后自动接回追车。判定读的是控制器上那个"游戏
+  自己的电影相机"指针（正常驾驶时为空），读数失败按"没有"处理。
 - 关闭总开关或未驾驶时，`Z` 完全原生。
 - 覆盖要求**每一帧**从控制器读到的 tag 就是 `ThirdPerson`：读数不可用、换控制器、快照失败
   都会立刻停止覆盖（退回游戏原相机），不会因为状态过期把追车画面盖在第一人称或过场上。

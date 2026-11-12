@@ -4,7 +4,10 @@
 // own, no service call: the detour only copies what Update already published.
 #include "internal.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <string_view>
 
 namespace nfs2015_chase_cam::detail {
 
@@ -63,6 +66,22 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         object != nullptr) {
       const std::uintptr_t manager = reinterpret_cast<std::uintptr_t>(object);
       context->observed_manager.store(manager, std::memory_order_release);
+#if defined(NFS2015_VIEWMODE_TRACE)
+      {
+        // Acceptance probe (plan TG-4): log the manager address once so the
+        // view-target offset can be located from outside without guessing.
+        static std::atomic_bool manager_logged{false};
+        if (!manager_logged.load(std::memory_order_relaxed)) {
+          manager_logged.store(true, std::memory_order_relaxed);
+          char manager_line[96]{};
+          std::snprintf(manager_line, sizeof(manager_line),
+                        "camera manager: 0x%llX",
+                        static_cast<unsigned long long>(manager));
+          Log(*context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+              std::string_view(manager_line));
+        }
+      }
+#endif
       // Task group 0 probe: the render thread's own read of the host's player
       // chain. Deliberately before the camera work, and independent of it.
       SampleRenderXPhase(*context);

@@ -318,6 +318,14 @@ constexpr std::uint32_t kPcToggleGraceOffset = 0x1EA0;
 constexpr std::uint32_t kPcToggleCooldownClockOffset = 0x1EA8;
 constexpr std::uint32_t kPcToggleGraceUsedOffset = 0x1EB0;
 // One read covers tag..graceUsed inclusive (0x1E80..0x1EB0).
+//
+// Photo ("抓拍", F8) and any other game-owned cine camera. While the player
+// controller shows its own camera, the game attaches a `CineCameraComponent`
+// to the controller and stores it here; the member is null the rest of the
+// time. The game does NOT change the view-mode tag for this (measured: tag,
+// count and limit all stay put), so the tag guard cannot see it and the chase
+// pose would keep covering the photo camera.
+constexpr std::uint32_t kPcCineCameraOffset = 0x1760;
 constexpr std::uint32_t kPcViewModeStateSpan = 0x38;
 constexpr std::uint32_t kViewModeEntryStride = 0x10;
 constexpr std::size_t kMaximumLoggedViewModes = 8;
