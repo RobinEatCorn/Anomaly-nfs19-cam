@@ -33,6 +33,8 @@ void UpdateDisplay(Context &context) noexcept {
   context.display.wheel_steer_rate_degrees_per_second =
       context.wheel_steer_rate_degrees_per_second.load(
           std::memory_order_acquire);
+  context.display.wheel_steer_sample_percent =
+      context.wheel_steer_sample_percent.load(std::memory_order_acquire);
   context.display.speed_distance_scale =
       context.speed_distance_scale.load(std::memory_order_acquire);
   context.display.hook_ready =

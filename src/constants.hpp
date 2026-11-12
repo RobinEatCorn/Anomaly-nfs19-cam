@@ -136,6 +136,14 @@ constexpr double kMaximumWheelSteerFullSlipDegrees = 60.0;
 constexpr double kDefaultWheelSteerRateDegreesPerSecond = 120.0;
 constexpr double kMinimumWheelSteerRateDegreesPerSecond = 60.0;
 constexpr double kMaximumWheelSteerRateDegreesPerSecond = 1200.0;
+// Where along the front axle the countersteer travel angle is sampled, as a
+// percentage of half the front track. Positive is the inside of the drift and
+// negative the outside; the sign mirrors with the drift direction, so the same
+// value produces the same visual result for left and right drifts. Zero keeps
+// the historical front-axle-centre behaviour.
+constexpr double kDefaultWheelSteerSamplePercent = 0.0;
+constexpr double kMinimumWheelSteerSamplePercent = -100.0;
+constexpr double kMaximumWheelSteerSamplePercent = 100.0;
 // 2.0.2 shipped these three values together. 2.0.3 changes the scale (front
 // axle target, 40 degree full slip, 32 degree cap, 120 deg/s). Only an
 // untouched old trio is migrated; a user who deliberately changed one field
@@ -616,7 +624,8 @@ constexpr std::string_view kSettingsSchema = R"json(
     "wheelSteerMaxDegrees":{"type":"number","minimum":20.0,"maximum":50.0},
     "wheelSteerGain":{"type":"number","minimum":0.5,"maximum":1.5},
     "wheelSteerFullSlipDegrees":{"type":"number","minimum":10.0,"maximum":60.0},
-    "wheelSteerRateDegreesPerSecond":{"type":"number","minimum":60.0,"maximum":1200.0}
+    "wheelSteerRateDegreesPerSecond":{"type":"number","minimum":60.0,"maximum":1200.0},
+    "wheelSteerSamplePercent":{"type":"number","minimum":-100.0,"maximum":100.0}
   }
 }
 )json";

@@ -849,7 +849,10 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
             "setting.wheel_steer_hint",
             "During a drift the front wheels follow the actual travel "
             "direction. Entry speed only gates entering; once engaged, "
-            "low speed does not release the countersteer.");
+            "low speed does not release the countersteer. The countersteer "
+            "sample point moves along the front axle and mirrors with the "
+            "drift direction: 0 is the axle centre, +100% the inside front "
+            "wheel, -100% the outside wheel.");
         ui->text(ui->user, StringView(wheel_hint));
         const auto wheel_slider =
             [&](const char *key, const char *fallback,
@@ -887,6 +890,13 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                      "chase-wheel-steer-gain", display.wheel_steer_gain,
                      kMinimumWheelSteerGain, kMaximumWheelSteerGain,
                      context->wheel_steer_gain);
+        wheel_slider("setting.wheel_steer_sample",
+                     "Countersteer sample point (% half track, -out/+in)",
+                     "chase-wheel-steer-sample",
+                     display.wheel_steer_sample_percent,
+                     kMinimumWheelSteerSamplePercent,
+                     kMaximumWheelSteerSamplePercent,
+                     context->wheel_steer_sample_percent);
         wheel_slider("setting.wheel_steer_full_slip",
                      "Full-angle slip (deg)", "chase-wheel-steer-full-slip",
                      display.wheel_steer_full_slip_degrees,
@@ -1269,13 +1279,15 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
         DrawStatusLine(ui, context->localizer, "status.speed_distance",
                        "Speed distance scale", speed_distance_line);
         if (display.wheel_steer_enabled) {
-          char wheel_line[160]{};
+          char wheel_line[192]{};
           std::snprintf(
-              wheel_line, sizeof(wheel_line), "%+.1f° / %+.1f°  (%u %s, %s)",
+              wheel_line, sizeof(wheel_line),
+              "%+.1f° / %+.1f°  (%u %s, %s)  sample %+.0f%%",
               display.wheel_steer_angle_degrees,
               display.wheel_steer_target_degrees,
               display.wheel_steer_wheels, "wheels",
-              display.wheel_steer_active ? "active" : "stock");
+              display.wheel_steer_active ? "active" : "stock",
+              display.wheel_steer_sample_percent);
           DrawStatusLine(ui, context->localizer, "status.wheel_steer",
                          "Front wheel steer", wheel_line);
         }

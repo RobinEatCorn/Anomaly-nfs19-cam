@@ -156,6 +156,11 @@ struct WheelSteerConfig final {
   // crossed the entry threshold.
   double counter_authority_radians{5.0 * kRadiansPerDegree};
   double restore_tolerance_radians{1.5 * kRadiansPerDegree};
+  // Lateral position of the countersteer travel-angle sample on the front
+  // axle, as a fraction of half the front track. Positive samples the inside
+  // of the drift and negative the outside; the caller mirrors the value with
+  // the drift direction. Zero keeps the front-axle centre.
+  double counter_sample_fraction{0.0};
   // Time spent showing the player's turn-in angle before the countersteer
   // blend starts. This is the visual equivalent of the NFS steering phase
   // before RemapSteeringForDrift hands the wheel to the countersteer target.
@@ -239,10 +244,20 @@ struct WheelSteerTarget final {
 };
 
 struct WheelSteerTravel final {
+  // Travel angle at the configured point on the front axle. This is the angle
+  // the countersteer target uses; with a zero sample fraction it is identical
+  // to `front_center_angle_radians`.
   double front_angle_radians{};
+  // Travel angle at the front-axle centre, kept for diagnostics and as the
+  // fallback when the sampled point cannot produce a valid direction.
+  double front_center_angle_radians{};
   double rear_angle_radians{};
   bool front_valid{};
+  bool front_center_valid{};
   bool rear_valid{};
+  // Signed lateral offset of the sampled point from the axle centre, in
+  // metres. Positive is toward the inside of the drift.
+  double front_sample_offset_meters{};
 };
 
 // Compute the travel angle at a point offset from the velocity reference. The
@@ -252,7 +267,7 @@ struct WheelSteerTravel final {
 // closer to the NFS 2015 rear-wheel slip signal.
 [[nodiscard]] inline bool ComputeWheelSteerTravelAngle(
     const Vec3 car_forward, const Vec3 car_up, const Vec3 world_velocity,
-    double& angle_radians) noexcept {
+    double &angle_radians) noexcept {
   const Vec3 up = Normalize(car_up);
   if (Length(up) < 1e-6) {
     return false;
@@ -269,10 +284,17 @@ struct WheelSteerTravel final {
   return std::isfinite(angle_radians);
 }
 
+// Compute the front and rear travel angles. `front_sample_fraction` moves the
+// front measurement along the front axle, as a fraction of
+// `front_half_track_meters`: positive samples the inside of the drift and
+// negative the outside, mirroring with the rear-slip (or yaw) direction. Zero
+// keeps the front-axle centre. The rear angle always uses the rear-axle
+// centre because it drives the entry/exit slip gate.
 [[nodiscard]] inline WheelSteerTravel ComputeWheelSteerTravel(
     const Vec3 car_forward, const Vec3 car_up, const Vec3 world_velocity,
     const double yaw_rate, const Vec3 front_axle_offset,
-    const Vec3 rear_axle_offset) noexcept {
+    const Vec3 rear_axle_offset, const double front_sample_fraction = 0.0,
+    const double front_half_track_meters = 0.0) noexcept {
   WheelSteerTravel result;
   const Vec3 up = Normalize(car_up);
   if (Length(up) < 1e-6 || !std::isfinite(yaw_rate)) {
@@ -280,7 +302,7 @@ struct WheelSteerTravel final {
   }
 
   const Vec3 omega = Mul(up, yaw_rate);
-  const Vec3 front_velocity =
+  const Vec3 front_center_velocity =
       Add(world_velocity, Cross(omega, front_axle_offset));
   const Vec3 rear_velocity =
       Add(world_velocity, Cross(omega, rear_axle_offset));
@@ -289,17 +311,60 @@ struct WheelSteerTravel final {
   const bool body_valid = ComputeWheelSteerTravelAngle(
       car_forward, car_up, world_velocity, body_angle);
 
-  result.front_valid = ComputeWheelSteerTravelAngle(
-      car_forward, car_up, front_velocity, result.front_angle_radians);
-  if (!result.front_valid && body_valid) {
-    result.front_angle_radians = body_angle;
-    result.front_valid = true;
+  result.front_center_valid = ComputeWheelSteerTravelAngle(
+      car_forward, car_up, front_center_velocity,
+      result.front_center_angle_radians);
+  if (!result.front_center_valid && body_valid) {
+    result.front_center_angle_radians = body_angle;
+    result.front_center_valid = true;
   }
+  result.front_angle_radians = result.front_center_angle_radians;
+  result.front_valid = result.front_center_valid;
+
   result.rear_valid = ComputeWheelSteerTravelAngle(
       car_forward, car_up, rear_velocity, result.rear_angle_radians);
   if (!result.rear_valid && body_valid) {
     result.rear_angle_radians = body_angle;
     result.rear_valid = true;
+  }
+
+  // Move the sample point along the front axle. The rear slip sign defines the
+  // drift direction, so the same slider value always selects the same side of
+  // the drift (inside for positive, outside for negative) instead of a fixed
+  // car-left/car-right side. A right-hand drift has a negative rear slip angle
+  // and its inside is the car's right side; a left-hand drift mirrors. When
+  // the rear angle is exactly zero, use the yaw rate for the same convention.
+  const double fraction =
+      std::isfinite(front_sample_fraction)
+          ? Clamp(front_sample_fraction, -1.0, 1.0)
+          : 0.0;
+  const double half_track =
+      std::isfinite(front_half_track_meters)
+          ? Clamp(front_half_track_meters, 0.0, 2.0)
+          : 0.0;
+  if (std::fabs(fraction) > 1e-9 && half_track > 1e-6) {
+    double inside_sign = 0.0;
+    if (result.rear_valid && std::fabs(result.rear_angle_radians) > 1e-9) {
+      inside_sign = result.rear_angle_radians > 0.0 ? -1.0 : 1.0;
+    } else if (std::fabs(yaw_rate) > 1e-9) {
+      inside_sign = yaw_rate > 0.0 ? 1.0 : -1.0;
+    }
+    Vec3 forward = Sub(car_forward, Mul(up, Dot(car_forward, up)));
+    if (inside_sign != 0.0 && Length(forward) > 1e-6) {
+      forward = Normalize(forward);
+      const Vec3 right = Normalize(Cross(up, forward));
+      const double lateral = inside_sign * fraction * half_track;
+      const Vec3 sample_velocity = Add(
+          world_velocity,
+          Cross(omega, Add(front_axle_offset, Mul(right, lateral))));
+      double sampled_angle = 0.0;
+      if (ComputeWheelSteerTravelAngle(car_forward, car_up, sample_velocity,
+                                       sampled_angle)) {
+        result.front_angle_radians = sampled_angle;
+        result.front_valid = true;
+        result.front_sample_offset_meters = lateral;
+      }
+    }
   }
   return result;
 }

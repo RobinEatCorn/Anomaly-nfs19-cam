@@ -132,7 +132,8 @@ bool BurnoutSettingsValid(const double entry_delay, const double entry_time,
 bool WheelSteerSettingsValid(const double max_degrees, const double gain,
                              const double full_slip_degrees,
                              const double rate_degrees_per_second,
-                             const double entry_speed_kmh) noexcept {
+                             const double entry_speed_kmh,
+                             const double sample_percent) noexcept {
   return std::isfinite(entry_speed_kmh) &&
          entry_speed_kmh >= kMinimumWheelSteerEntrySpeedKmh &&
          entry_speed_kmh <= kMaximumWheelSteerEntrySpeedKmh &&
@@ -148,7 +149,10 @@ bool WheelSteerSettingsValid(const double max_degrees, const double gain,
          rate_degrees_per_second >=
              kMinimumWheelSteerRateDegreesPerSecond &&
          rate_degrees_per_second <=
-             kMaximumWheelSteerRateDegreesPerSecond;
+             kMaximumWheelSteerRateDegreesPerSecond &&
+         std::isfinite(sample_percent) &&
+         sample_percent >= kMinimumWheelSteerSamplePercent &&
+         sample_percent <= kMaximumWheelSteerSamplePercent;
 }
 
 bool AppendText(char *&cursor, char *const end,
@@ -254,6 +258,8 @@ bool PersistSettings(Context &context) noexcept {
   const double wheel_steer_rate_degrees_per_second =
       context.wheel_steer_rate_degrees_per_second.load(
           std::memory_order_acquire);
+  const double wheel_steer_sample_percent =
+      context.wheel_steer_sample_percent.load(std::memory_order_acquire);
   const bool slope_follow =
       context.slope_follow.load(std::memory_order_acquire);
   const double slope_strength =
@@ -301,7 +307,8 @@ bool PersistSettings(Context &context) noexcept {
       !WheelSteerSettingsValid(wheel_steer_max_degrees, wheel_steer_gain,
                                wheel_steer_full_slip_degrees,
                                wheel_steer_rate_degrees_per_second,
-                               wheel_steer_entry_speed_kmh) ||
+                               wheel_steer_entry_speed_kmh,
+                               wheel_steer_sample_percent) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
     // A UI write landed while the fields were being read; keep the revision
     // unpersisted so the next tick writes a coherent document.
@@ -396,6 +403,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, wheel_steer_full_slip_degrees) &&
       AppendText(cursor, end, ",\"wheelSteerRateDegreesPerSecond\":") &&
       AppendNumber(cursor, end, wheel_steer_rate_degrees_per_second) &&
+      AppendText(cursor, end, ",\"wheelSteerSamplePercent\":") &&
+      AppendNumber(cursor, end, wheel_steer_sample_percent) &&
       AppendText(cursor, end, ",\"rollOnlyInDrift\":") &&
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
@@ -483,6 +492,8 @@ void SetDefaults(Context &context) noexcept {
       kDefaultWheelSteerFullSlipDegrees, std::memory_order_release);
   context.wheel_steer_rate_degrees_per_second.store(
       kDefaultWheelSteerRateDegreesPerSecond, std::memory_order_release);
+  context.wheel_steer_sample_percent.store(
+      kDefaultWheelSteerSamplePercent, std::memory_order_release);
   context.slope_follow.store(true, std::memory_order_release);
   context.slope_strength.store(kDefaultSlopeStrength,
                                std::memory_order_release);
@@ -674,6 +685,7 @@ bool LoadSettings(Context &context) noexcept {
       kDefaultWheelSteerFullSlipDegrees;
   double wheel_steer_rate_degrees_per_second =
       kDefaultWheelSteerRateDegreesPerSecond;
+  double wheel_steer_sample_percent = kDefaultWheelSteerSamplePercent;
   bool roll_only_in_drift = true;
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
@@ -742,6 +754,8 @@ bool LoadSettings(Context &context) noexcept {
   static_cast<void>(JsonObjectNumber(
       json, root, "wheelSteerRateDegreesPerSecond",
       wheel_steer_rate_degrees_per_second));
+  static_cast<void>(JsonObjectNumber(json, root, "wheelSteerSamplePercent",
+                                     wheel_steer_sample_percent));
   if (wheel_steer_max_degrees == kLegacyWheelSteerMaxDegrees &&
       wheel_steer_full_slip_degrees ==
           kLegacyWheelSteerFullSlipDegrees &&
@@ -797,7 +811,8 @@ bool LoadSettings(Context &context) noexcept {
       !WheelSteerSettingsValid(wheel_steer_max_degrees, wheel_steer_gain,
                                wheel_steer_full_slip_degrees,
                                wheel_steer_rate_degrees_per_second,
-                               wheel_steer_entry_speed_kmh)) {
+                               wheel_steer_entry_speed_kmh,
+                               wheel_steer_sample_percent)) {
     return false;
   }
   context.enabled.store(enabled, std::memory_order_release);
@@ -852,6 +867,11 @@ bool LoadSettings(Context &context) noexcept {
       wheel_steer_full_slip_degrees, std::memory_order_release);
   context.wheel_steer_rate_degrees_per_second.store(
       wheel_steer_rate_degrees_per_second, std::memory_order_release);
+  context.wheel_steer_sample_percent.store(
+      nfs2015_chase::Clamp(wheel_steer_sample_percent,
+                           kMinimumWheelSteerSamplePercent,
+                           kMaximumWheelSteerSamplePercent),
+      std::memory_order_release);
   context.slope_follow.store(slope_follow, std::memory_order_release);
   context.slope_strength.store(slope_strength, std::memory_order_release);
   context.slope_max_gradient_degrees.store(

@@ -556,6 +556,8 @@ int main() {
           "default full countersteer slip should be 40 degrees");
     Check(std::fabs(defaults.entry_speed_mps - 54.0 / 3.6) < 1e-9,
           "default entry speed should be 54 km/h");
+    Check(defaults.counter_sample_fraction == 0.0,
+          "default countersteer sample point should be the axle centre");
   }
 
   // Front-axle travel differs from body-centre travel by omega x r. With a
@@ -585,6 +587,54 @@ int main() {
     Check(std::fabs(front.counter_angle_radians) <
               std::fabs(center.counter_angle_radians),
           "countersteer target must use the front-axle travel angle");
+  }
+
+  // The countersteer sample point moves along the front axle as a fraction of
+  // half track. Positive is the inside of the drift, so a right-hand drift
+  // (positive yaw, negative rear slip) samples the car's right side and a
+  // left-hand drift mirrors it. Zero must keep the historical centre angle.
+  {
+    const Vec3 forward{1.0, 0.0, 0.0};
+    const Vec3 up{0.0, 0.0, 1.0};
+    const Vec3 velocity{20.0, 0.0, 0.0};
+    const Vec3 front{1.3, 0.0, 0.0};
+    const Vec3 rear{-1.3, 0.0, 0.0};
+    const double half_track = 0.8;
+
+    const auto centre_travel =
+        ComputeWheelSteerTravel(forward, up, velocity, 0.5, front, rear);
+    const auto inside_travel = ComputeWheelSteerTravel(
+        forward, up, velocity, 0.5, front, rear, 1.0, half_track);
+    const auto outside_travel = ComputeWheelSteerTravel(
+        forward, up, velocity, 0.5, front, rear, -1.0, half_track);
+    Check(std::fabs(inside_travel.front_center_angle_radians -
+                    centre_travel.front_angle_radians) < 1e-9,
+          "the front-centre angle must not move with the sample point");
+    Check(std::fabs(inside_travel.front_sample_offset_meters - half_track) <
+              1e-9,
+          "positive sample fraction must move toward the drift inside");
+    Check(inside_travel.front_angle_radians >
+              centre_travel.front_angle_radians,
+          "the inside sample must enlarge a positive front travel angle");
+    Check(outside_travel.front_angle_radians <
+              centre_travel.front_angle_radians,
+          "the outside sample must shrink a positive front travel angle");
+
+    const auto mirrored_centre =
+        ComputeWheelSteerTravel(forward, up, velocity, -0.5, front, rear);
+    const auto mirrored_inside = ComputeWheelSteerTravel(
+        forward, up, velocity, -0.5, front, rear, 1.0, half_track);
+    Check(mirrored_inside.front_sample_offset_meters < 0.0,
+          "a left-hand drift must mirror the sample to the car's left side");
+    Check(mirrored_inside.front_angle_radians <
+              mirrored_centre.front_angle_radians,
+          "the mirrored inside sample must enlarge a negative front angle");
+
+    const auto no_track = ComputeWheelSteerTravel(
+        forward, up, velocity, 0.5, front, rear, 1.0, 0.0);
+    Check(std::fabs(no_track.front_angle_radians -
+                    no_track.front_center_angle_radians) < 1e-12,
+          "an unknown front track must fall back to the axle centre");
   }
 
   // The final applied-angle clamp is still a pure rate limit.

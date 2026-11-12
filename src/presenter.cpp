@@ -1040,6 +1040,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     context.display.wheel_steer_rate_degrees_per_second =
         context.wheel_steer_rate_degrees_per_second.load(
             std::memory_order_relaxed);
+    context.display.wheel_steer_sample_percent =
+        context.wheel_steer_sample_percent.load(std::memory_order_relaxed);
     context.display.drift =
         context.presenter_drift.load(std::memory_order_relaxed);
     const float presenter_lens =

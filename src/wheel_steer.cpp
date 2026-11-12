@@ -412,8 +412,12 @@ bool MeasureStockWheelSteer(Context &context, const WheelSteerState &state,
 // Returns false when the translations are unavailable; the caller then falls
 // back to the body-centre travel angle.
 bool ReadWheelAxleOffsets(Context &context, const WheelSteerState &state,
+                          const nfs2015_chase::Vec3 car_forward,
+                          const nfs2015_chase::Vec3 car_up,
                           nfs2015_chase::Vec3 &front_offset,
-                          nfs2015_chase::Vec3 &rear_offset) noexcept {
+                          nfs2015_chase::Vec3 &rear_offset,
+                          double &front_half_track) noexcept {
+  front_half_track = 0.0;
   double mesh_translation[3]{};
   if (!Read(context.core,
             state.mesh + kSceneComponentTransformTranslationOffset,
@@ -425,6 +429,22 @@ bool ReadWheelAxleOffsets(Context &context, const WheelSteerState &state,
       return false;
     }
   }
+
+  // Project the front wheels onto the car's right axis. The wheel positions
+  // include suspension travel, so this is recomputed every tick; the extents
+  // give the real half track used by the countersteer sample-point slider.
+  const nfs2015_chase::Vec3 up = nfs2015_chase::Normalize(car_up);
+  nfs2015_chase::Vec3 forward = nfs2015_chase::Sub(
+      car_forward, nfs2015_chase::Mul(up, nfs2015_chase::Dot(car_forward, up)));
+  if (nfs2015_chase::Length(up) < 1e-6 ||
+      nfs2015_chase::Length(forward) < 1e-6) {
+    return false;
+  }
+  forward = nfs2015_chase::Normalize(forward);
+  const nfs2015_chase::Vec3 right =
+      nfs2015_chase::Normalize(nfs2015_chase::Cross(up, forward));
+  double front_min_lateral = 1e30;
+  double front_max_lateral = -1e30;
 
   double front_sum[3]{};
   double rear_sum[3]{};
@@ -448,10 +468,21 @@ bool ReadWheelAxleOffsets(Context &context, const WheelSteerState &state,
     if (!finite) {
       return false;
     }
+    const double offset[3]{translation[0] - mesh_translation[0],
+                           translation[1] - mesh_translation[1],
+                           translation[2] - mesh_translation[2]};
     double *sum = state.front[index] ? front_sum : rear_sum;
     std::size_t &count = state.front[index] ? front_count : rear_count;
     for (std::size_t axis = 0; axis < 3; ++axis) {
-      sum[axis] += translation[axis];
+      sum[axis] += offset[axis];
+    }
+    if (state.front[index]) {
+      const double lateral =
+          (offset[0] * right.x + offset[1] * right.y +
+           offset[2] * right.z) /
+          100.0;
+      front_min_lateral = (std::min)(front_min_lateral, lateral);
+      front_max_lateral = (std::max)(front_max_lateral, lateral);
     }
     ++count;
   }
@@ -472,6 +503,15 @@ bool ReadWheelAxleOffsets(Context &context, const WheelSteerState &state,
       !std::isfinite(front_offset.z) || !std::isfinite(rear_offset.x) ||
       !std::isfinite(rear_offset.y) || !std::isfinite(rear_offset.z)) {
     return false;
+  }
+  if (front_count >= 2 && std::isfinite(front_min_lateral) &&
+      std::isfinite(front_max_lateral)) {
+    const double half_track = 0.5 * (front_max_lateral - front_min_lateral);
+    // A real car's half track is roughly 0.6 to 1.2 metres. Reject stale or
+    // non-world-space samples instead of letting the slider amplify them.
+    if (half_track >= 0.2 && half_track <= 2.0) {
+      front_half_track = half_track;
+    }
   }
   // Plausibility guard: a wheel-to-mesh offset is roughly one to three metres.
   // If the component transform is not in world space (or a stale pointer was
@@ -615,6 +655,9 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   const double entry_speed_kmh = nfs2015_chase::Clamp(
       context.wheel_steer_entry_speed_kmh.load(std::memory_order_acquire),
       kMinimumWheelSteerEntrySpeedKmh, kMaximumWheelSteerEntrySpeedKmh);
+  const double sample_percent = nfs2015_chase::Clamp(
+      context.wheel_steer_sample_percent.load(std::memory_order_acquire),
+      kMinimumWheelSteerSamplePercent, kMaximumWheelSteerSamplePercent);
   config.enabled = true;
   config.max_angle_radians =
       max_degrees * nfs2015_chase::kRadiansPerDegree;
@@ -638,6 +681,7 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
       kWheelSteerCounterAuthorityDegrees * nfs2015_chase::kRadiansPerDegree;
   config.restore_tolerance_radians =
       kWheelSteerRestoreToleranceDegrees * nfs2015_chase::kRadiansPerDegree;
+  config.counter_sample_fraction = sample_percent / 100.0;
   config.turn_in_seconds = kWheelSteerTurnInSeconds;
   config.turn_in_min_seconds = kWheelSteerTurnInMinSeconds;
   config.turn_in_max_seconds = kWheelSteerTurnInMaxSeconds;
@@ -673,19 +717,23 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   state.rear_travel_angle = 0.0;
   state.front_axle_offset = {};
   state.rear_axle_offset = {};
+  double front_half_track = 0.0;
   state.axle_offsets_valid =
-      ReadWheelAxleOffsets(context, state, state.front_axle_offset,
-                           state.rear_axle_offset);
+      ReadWheelAxleOffsets(context, state, car_forward, car_up,
+                           state.front_axle_offset, state.rear_axle_offset,
+                           front_half_track);
   if (!state.axle_offsets_valid) {
     state.front_axle_offset = {};
     state.rear_axle_offset = {};
+    front_half_track = 0.0;
   }
   state.yaw_rate = EstimateMeshYawRate(state, mesh, car_up,
                                        context.yaw_rate, dt);
   const nfs2015_chase::WheelSteerTravel travel =
       nfs2015_chase::ComputeWheelSteerTravel(
           car_forward, car_up, world_velocity, state.yaw_rate,
-          state.front_axle_offset, state.rear_axle_offset);
+          state.front_axle_offset, state.rear_axle_offset,
+          config.counter_sample_fraction, front_half_track);
   state.front_travel_angle = travel.front_angle_radians;
   state.rear_travel_angle = travel.rear_angle_radians;
   const nfs2015_chase::WheelSteerPhase previous_phase = state.phase;
@@ -735,19 +783,20 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   state.phase = target.phase;
 
   if (target.phase != previous_phase) {
-    char message[256]{};
+    char message[320]{};
     std::snprintf(
         message, sizeof(message),
         "nfs2015 chase cam: wheel drift %s -> %s speed=%.2f "
         "steer=%.2f front=%.1f rear=%.1f yaw=%.1f stock=%.1f "
-        "counter=%.1f blend=%.2f",
+        "counter=%.1f blend=%.2f sample=%.0f%%",
         WheelSteerPhaseName(previous_phase), WheelSteerPhaseName(target.phase),
         speed_mps, steering_known ? steering_input : 0.0,
         state.front_travel_angle * kRadiansToDegrees,
         state.rear_travel_angle * kRadiansToDegrees,
         state.yaw_rate * kRadiansToDegrees,
         state.stock_angle * kRadiansToDegrees,
-        target.counter_angle_radians * kRadiansToDegrees, target.blend);
+        target.counter_angle_radians * kRadiansToDegrees, target.blend,
+        sample_percent);
     Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
   }
 
@@ -837,13 +886,14 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
   if (wrote_any) {
     if (!state.activation_logged) {
       state.activation_logged = true;
-      char message[320]{};
+      char message[384]{};
       std::snprintf(
           message, sizeof(message),
           "nfs2015 chase cam: visual wheel override active "
           "(front=%zu rear=%zu phase=%s target=%.1f deg applied=%.1f deg "
           "stock=%.1f deg counter=%.1f deg blend=%.2f front_slip=%.1f "
-          "rear_slip=%.1f offsets=%d max=%.1f)",
+          "front_center=%.1f rear_slip=%.1f offsets=%d max=%.1f "
+          "sample=%.0f%% point=%.2fm)",
           state.front_count, state.rear_count,
           WheelSteerPhaseName(target.phase),
           state.target_angle * kRadiansToDegrees,
@@ -851,8 +901,10 @@ void UpdateWheelSteer(Context &context, const std::uintptr_t vehicle,
           state.stock_angle * kRadiansToDegrees,
           target.counter_angle_radians * kRadiansToDegrees, target.blend,
           state.front_travel_angle * kRadiansToDegrees,
+          travel.front_center_angle_radians * kRadiansToDegrees,
           state.rear_travel_angle * kRadiansToDegrees,
-          state.axle_offsets_valid ? 1 : 0, max_degrees);
+          state.axle_offsets_valid ? 1 : 0, max_degrees, sample_percent,
+          travel.front_sample_offset_meters);
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
     }
     state.active = true;

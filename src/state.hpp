@@ -896,6 +896,7 @@ struct DisplayState final {
   double wheel_steer_full_slip_degrees{kDefaultWheelSteerFullSlipDegrees};
   double wheel_steer_rate_degrees_per_second{
       kDefaultWheelSteerRateDegreesPerSecond};
+  double wheel_steer_sample_percent{kDefaultWheelSteerSamplePercent};
   double slip_degrees{};
   double drift{};
   double fov_horizontal{};
@@ -1304,6 +1305,8 @@ struct Context final {
       kDefaultWheelSteerFullSlipDegrees};
   std::atomic<double> wheel_steer_rate_degrees_per_second{
       kDefaultWheelSteerRateDegreesPerSecond};
+  std::atomic<double> wheel_steer_sample_percent{
+      kDefaultWheelSteerSamplePercent};
   std::atomic_bool burnout_enabled{kDefaultBurnoutEnabled};
   std::atomic<double> burnout_entry_delay{kDefaultBurnoutEntryDelay};
   std::atomic<double> burnout_entry_time{kDefaultBurnoutEntryTime};
