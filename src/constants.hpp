@@ -627,7 +627,14 @@ constexpr std::string_view kSettingsSchema = R"json(
     "wheelSteerFullSlipDegrees":{"type":"number","minimum":10.0,"maximum":60.0},
     "wheelSteerRateDegreesPerSecond":{"type":"number","minimum":60.0,"maximum":1200.0},
     "wheelSteerForceTurnDelay":{"type":"number","minimum":0.1,"maximum":2.0},
-    "wheelSteerSamplePercent":{"type":"number","minimum":-100.0,"maximum":100.0}
+    "wheelSteerSamplePercent":{"type":"number","minimum":-100.0,"maximum":100.0},
+    "nfsLensMode":{"type":"integer","minimum":0,"maximum":2},
+    "rigMode":{"type":"integer","minimum":0,"maximum":2},
+    "springsMode":{"type":"integer","minimum":0,"maximum":2},
+    "dynamicsMode":{"type":"integer","minimum":0,"maximum":2},
+    "slopeMode":{"type":"integer","minimum":0,"maximum":2},
+    "wheelSteerMode":{"type":"integer","minimum":0,"maximum":2},
+    "burnoutMode":{"type":"integer","minimum":0,"maximum":2}
   }
 }
 )json";

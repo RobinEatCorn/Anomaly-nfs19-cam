@@ -146,4 +146,29 @@ if(NFS2015_CHASE_CAM_BUILD_TESTS)
     endif()
     add_test(NAME nfs2015_settings_groups_model
              COMMAND nfs2015_settings_groups_test)
+
+    # PLAN-settings-ui-groups.md task group 2. This fixture drives the real
+    # persistence layer through a fake config service and a fake JSON service,
+    # so a document round trip and the legacy inference are pinned without a
+    # host process.
+    add_executable(nfs2015_settings_persistence_test
+        tests/settings_persistence_test.cpp
+        src/settings.cpp
+        src/sdk_support.cpp)
+    target_include_directories(nfs2015_settings_persistence_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(nfs2015_settings_persistence_test
+        PRIVATE Anomaly::sdk)
+    target_compile_definitions(nfs2015_settings_persistence_test PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(MSVC)
+        target_compile_options(nfs2015_settings_persistence_test PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+    elseif(MINGW)
+        target_link_options(nfs2015_settings_persistence_test PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME nfs2015_settings_persistence_model
+             COMMAND nfs2015_settings_persistence_test)
 endif()

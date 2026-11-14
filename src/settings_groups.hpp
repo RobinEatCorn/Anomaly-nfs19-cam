@@ -119,4 +119,123 @@ struct CustomSettings final {
   std::uint32_t burnout_side_mode{kDefaultBurnoutSideMode};
 };
 
+// ---------------------------------------------------------------------------
+// Legacy documents
+// ---------------------------------------------------------------------------
+// A document written before the groups existed has no mode fields: the numbers
+// and the enable switches are the only record of what the user had chosen.
+// Reconstructing the mode from them keeps an upgraded install behaving exactly
+// as it did, and every number the user ever tuned still lands in the custom
+// block, so nothing is lost when a group is switched to Custom later.
+//
+// Exact comparisons are deliberate: the document was written with these same
+// constants, so a value the user never touched parses back to the identical
+// double. The switches win over the numbers: a group that was switched off
+// keeps its numbers in memory but must not come back enabled.
+struct LegacyGroupState final {
+  CustomSettings custom;
+  bool fov_enabled{true};
+  bool slope_follow{true};
+  bool wheel_steer_enabled{kDefaultWheelSteerEnabled};
+  bool burnout_enabled{kDefaultBurnoutEnabled};
+};
+
+[[nodiscard]] constexpr bool RigOnDefaults(
+    const CustomSettings &custom) noexcept {
+  return custom.camera_scale == kDefaultCameraScale &&
+         custom.origin_offset_cm == kDefaultOriginOffsetCm &&
+         custom.aspect_ratio == kDefaultAspectRatio &&
+         custom.speed_distance_scale == kDefaultSpeedDistanceScale;
+}
+
+[[nodiscard]] constexpr bool SpringsOnDefaults(
+    const CustomSettings &custom) noexcept {
+  return custom.position_spring == kDefaultPositionSpring &&
+         custom.yaw_spring == kDefaultYawSpring &&
+         custom.drift_yaw_spring == kDefaultDriftYawSpring &&
+         custom.look_yaw_spring == kDefaultLookYawSpring &&
+         custom.yaw_return_spring == kDefaultYawReturnSpring &&
+         custom.pitch_spring == kDefaultPitchSpring &&
+         custom.roll_spring == kDefaultRollSpring;
+}
+
+[[nodiscard]] constexpr bool DynamicsOnDefaults(
+    const CustomSettings &custom) noexcept {
+  return custom.roll_scale == kDefaultRollScale &&
+         custom.pitch_scale == kDefaultPitchScale &&
+         custom.shake_scale == kDefaultShakeScale &&
+         custom.roll_only_in_drift;
+}
+
+[[nodiscard]] constexpr bool WheelSteerOnDefaults(
+    const CustomSettings &custom) noexcept {
+  return custom.wheel_steer_entry_speed_kmh ==
+             kDefaultWheelSteerEntrySpeedKmh &&
+         custom.wheel_steer_max_degrees == kDefaultWheelSteerMaxDegrees &&
+         custom.wheel_steer_gain == kDefaultWheelSteerGain &&
+         custom.wheel_steer_full_slip_degrees ==
+             kDefaultWheelSteerFullSlipDegrees &&
+         custom.wheel_steer_rate_degrees_per_second ==
+             kDefaultWheelSteerRateDegreesPerSecond &&
+         custom.wheel_steer_force_turn_delay_seconds ==
+             kDefaultWheelSteerForceTurnDelaySeconds &&
+         custom.wheel_steer_sample_percent ==
+             kDefaultWheelSteerSamplePercent;
+}
+
+[[nodiscard]] constexpr bool BurnoutOnDefaults(
+    const CustomSettings &custom) noexcept {
+  return custom.burnout_entry_delay == kDefaultBurnoutEntryDelay &&
+         custom.burnout_entry_time == kDefaultBurnoutEntryTime &&
+         custom.burnout_exit_delay == kDefaultBurnoutExitDelay &&
+         custom.burnout_exit_time == kDefaultBurnoutExitTime &&
+         custom.burnout_launch_exit_time == kDefaultBurnoutLaunchExitTime &&
+         custom.burnout_fov == kDefaultBurnoutFov &&
+         custom.burnout_shake == kDefaultBurnoutShake &&
+         custom.burnout_entry_speed == kDefaultBurnoutEntrySpeed &&
+         custom.burnout_hold_speed == kDefaultBurnoutHoldSpeed &&
+         custom.burnout_side_mode == kDefaultBurnoutSideMode;
+}
+
+[[nodiscard]] constexpr GroupMode InferLegacyGroupMode(
+    const SettingsGroup group, const LegacyGroupState &legacy) noexcept {
+  const CustomSettings &custom = legacy.custom;
+  switch (group) {
+    case SettingsGroup::NfsLens:
+      return legacy.fov_enabled ? GroupMode::Default : GroupMode::Opposite;
+    case SettingsGroup::Rig:
+      return RigOnDefaults(custom) ? GroupMode::Default : GroupMode::Custom;
+    case SettingsGroup::Springs:
+      return SpringsOnDefaults(custom) ? GroupMode::Default
+                                       : GroupMode::Custom;
+    case SettingsGroup::Dynamics:
+      if (custom.roll_scale == 0.0 && custom.pitch_scale == 0.0 &&
+          custom.shake_scale == 0.0) {
+        return GroupMode::Opposite;
+      }
+      return DynamicsOnDefaults(custom) ? GroupMode::Default
+                                        : GroupMode::Custom;
+    case SettingsGroup::Slope:
+      if (!legacy.slope_follow) {
+        return GroupMode::Opposite;
+      }
+      return custom.slope_strength == kDefaultSlopeStrength
+                 ? GroupMode::Default
+                 : GroupMode::Custom;
+    case SettingsGroup::WheelSteer:
+      if (!legacy.wheel_steer_enabled) {
+        return GroupMode::Opposite;
+      }
+      return WheelSteerOnDefaults(custom) ? GroupMode::Default
+                                          : GroupMode::Custom;
+    case SettingsGroup::Burnout:
+      if (!legacy.burnout_enabled) {
+        return GroupMode::Default;
+      }
+      return BurnoutOnDefaults(custom) ? GroupMode::Opposite
+                                       : GroupMode::Custom;
+  }
+  return GroupMode::Default;
+}
+
 }  // namespace nfs2015_chase_cam::detail

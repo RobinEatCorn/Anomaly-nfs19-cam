@@ -201,78 +201,68 @@ bool PersistSettings(Context &context) noexcept {
       context.settings_revision.load(std::memory_order_acquire);
   const bool enabled = context.enabled.load(std::memory_order_acquire);
   const auto preset = context.preset.load(std::memory_order_acquire);
-  const double camera_scale =
-      context.camera_scale.load(std::memory_order_acquire);
-  const double position_spring =
-      context.position_spring.load(std::memory_order_acquire);
-  const double yaw_spring =
-      context.yaw_spring.load(std::memory_order_acquire);
-  const double drift_yaw_spring =
-      context.drift_yaw_spring.load(std::memory_order_acquire);
-  const double look_yaw_spring =
-      context.look_yaw_spring.load(std::memory_order_acquire);
-  const double yaw_return_spring =
-      context.yaw_return_spring.load(std::memory_order_acquire);
-  const double pitch_spring =
-      context.pitch_spring.load(std::memory_order_acquire);
-  const double roll_spring =
-      context.roll_spring.load(std::memory_order_acquire);
-  const double origin_offset_cm =
-      context.origin_offset_cm.load(std::memory_order_acquire);
-  const double aspect_ratio =
-      context.aspect_ratio.load(std::memory_order_acquire);
-  const double speed_distance_scale =
-      context.speed_distance_scale.load(std::memory_order_acquire);
-  const double roll_scale =
-      context.roll_scale.load(std::memory_order_acquire);
-  const double pitch_scale =
-      context.pitch_scale.load(std::memory_order_acquire);
-  const double shake_scale =
-      context.shake_scale.load(std::memory_order_acquire);
+  // The stored document has two layers. Grouped numbers are written from the
+  // custom block even while their group is on Default or Opposite: the keys
+  // always describe what "Custom" would apply, so switching groups around
+  // never loses the user's numbers. The four group enable keys are written as
+  // their effective values, so a build that predates the mode keys still turns
+  // the same features on and off. The settings below the groups (the slope
+  // shape, the diagnostics and the anchor controls) have no group and are also
+  // written as their effective values.
+  CustomSettings custom;
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    custom = context.custom_settings;
+  }
+  const double camera_scale = custom.camera_scale;
+  const double position_spring = custom.position_spring;
+  const double yaw_spring = custom.yaw_spring;
+  const double drift_yaw_spring = custom.drift_yaw_spring;
+  const double look_yaw_spring = custom.look_yaw_spring;
+  const double yaw_return_spring = custom.yaw_return_spring;
+  const double pitch_spring = custom.pitch_spring;
+  const double roll_spring = custom.roll_spring;
+  const double origin_offset_cm = custom.origin_offset_cm;
+  const double aspect_ratio = custom.aspect_ratio;
+  const double speed_distance_scale = custom.speed_distance_scale;
+  const double roll_scale = custom.roll_scale;
+  const double pitch_scale = custom.pitch_scale;
+  const double shake_scale = custom.shake_scale;
   const bool burnout_enabled =
       context.burnout_enabled.load(std::memory_order_acquire);
-  const double burnout_entry_delay =
-      context.burnout_entry_delay.load(std::memory_order_acquire);
-  const double burnout_entry_time =
-      context.burnout_entry_time.load(std::memory_order_acquire);
-  const double burnout_exit_delay =
-      context.burnout_exit_delay.load(std::memory_order_acquire);
-  const double burnout_exit_time =
-      context.burnout_exit_time.load(std::memory_order_acquire);
-  const double burnout_launch_exit_time =
-      context.burnout_launch_exit_time.load(std::memory_order_acquire);
-  const double burnout_fov =
-      context.burnout_fov.load(std::memory_order_acquire);
-  const double burnout_shake =
-      context.burnout_shake.load(std::memory_order_acquire);
-  const double burnout_side_mode = static_cast<double>(
-      context.burnout_side_mode.load(std::memory_order_acquire));
-  const double burnout_entry_speed =
-      context.burnout_entry_speed.load(std::memory_order_acquire);
+  const double burnout_entry_delay = custom.burnout_entry_delay;
+  const double burnout_entry_time = custom.burnout_entry_time;
+  const double burnout_exit_delay = custom.burnout_exit_delay;
+  const double burnout_exit_time = custom.burnout_exit_time;
+  const double burnout_launch_exit_time = custom.burnout_launch_exit_time;
+  const double burnout_fov = custom.burnout_fov;
+  const double burnout_shake = custom.burnout_shake;
+  const double burnout_side_mode =
+      static_cast<double>(custom.burnout_side_mode);
+  const double burnout_entry_speed = custom.burnout_entry_speed;
+  // The model never runs the hold speed below the entry speed and the
+  // validation below expects the pair in that order; store the clamped pair so
+  // the document describes what the engine actually uses.
   const double burnout_hold_speed =
-      context.burnout_hold_speed.load(std::memory_order_acquire);
+      custom.burnout_hold_speed < custom.burnout_entry_speed
+          ? custom.burnout_entry_speed
+          : custom.burnout_hold_speed;
   const bool wheel_steer_enabled =
       context.wheel_steer_enabled.load(std::memory_order_acquire);
   const double wheel_steer_entry_speed_kmh =
-      context.wheel_steer_entry_speed_kmh.load(std::memory_order_acquire);
-  const double wheel_steer_max_degrees =
-      context.wheel_steer_max_degrees.load(std::memory_order_acquire);
-  const double wheel_steer_gain =
-      context.wheel_steer_gain.load(std::memory_order_acquire);
+      custom.wheel_steer_entry_speed_kmh;
+  const double wheel_steer_max_degrees = custom.wheel_steer_max_degrees;
+  const double wheel_steer_gain = custom.wheel_steer_gain;
   const double wheel_steer_full_slip_degrees =
-      context.wheel_steer_full_slip_degrees.load(std::memory_order_acquire);
+      custom.wheel_steer_full_slip_degrees;
   const double wheel_steer_rate_degrees_per_second =
-      context.wheel_steer_rate_degrees_per_second.load(
-          std::memory_order_acquire);
+      custom.wheel_steer_rate_degrees_per_second;
   const double wheel_steer_force_turn_delay_seconds =
-      context.wheel_steer_force_turn_delay_seconds.load(
-          std::memory_order_acquire);
-  const double wheel_steer_sample_percent =
-      context.wheel_steer_sample_percent.load(std::memory_order_acquire);
+      custom.wheel_steer_force_turn_delay_seconds;
+  const double wheel_steer_sample_percent = custom.wheel_steer_sample_percent;
   const bool slope_follow =
       context.slope_follow.load(std::memory_order_acquire);
-  const double slope_strength =
-      context.slope_strength.load(std::memory_order_acquire);
+  const double slope_strength = custom.slope_strength;
   const double slope_max_gradient_degrees =
       context.slope_max_gradient_degrees.load(std::memory_order_acquire);
   const double slope_up_look_at =
@@ -283,8 +273,7 @@ bool PersistSettings(Context &context) noexcept {
       context.slope_down_look_at.load(std::memory_order_acquire);
   const double slope_down_rest =
       context.slope_down_rest.load(std::memory_order_acquire);
-  const bool roll_only_in_drift =
-      context.roll_only_in_drift.load(std::memory_order_acquire);
+  const bool roll_only_in_drift = custom.roll_only_in_drift;
   const bool fov_enabled =
       context.fov_enabled.load(std::memory_order_acquire);
   const bool diagnostic_flat_pose =
@@ -299,6 +288,18 @@ bool PersistSettings(Context &context) noexcept {
       context.diagnostic_skip_position.load(std::memory_order_acquire);
   const bool diagnostic_skip_rotation =
       context.diagnostic_skip_rotation.load(std::memory_order_acquire);
+  // The modes travel as seven top-level integers; an impossible atomic value
+  // is normalized first so the document never carries a mode its group cannot
+  // express.
+  std::uint32_t group_modes[kSettingsGroupCount]{};
+  for (std::size_t index = 0; index < kSettingsGroupCount; ++index) {
+    group_modes[index] = static_cast<std::uint32_t>(NormalizeGroupMode(
+        static_cast<SettingsGroup>(index),
+        context.group_modes[index].load(std::memory_order_acquire)));
+  }
+  const auto mode_value = [&group_modes](const SettingsGroup group) {
+    return static_cast<double>(group_modes[static_cast<std::size_t>(group)]);
+  };
   if (!ConfigReady(context.config) ||
       !SettingsValid(preset, camera_scale, position_spring, yaw_spring,
                      drift_yaw_spring, look_yaw_spring, yaw_return_spring,
@@ -431,6 +432,20 @@ bool PersistSettings(Context &context) noexcept {
       AppendText(cursor, end, diagnostic_skip_position ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticSkipRotation\":") &&
       AppendText(cursor, end, diagnostic_skip_rotation ? "true" : "false") &&
+      AppendText(cursor, end, ",\"nfsLensMode\":") &&
+      AppendNumber(cursor, end, mode_value(SettingsGroup::NfsLens)) &&
+      AppendText(cursor, end, ",\"rigMode\":") &&
+      AppendNumber(cursor, end, mode_value(SettingsGroup::Rig)) &&
+      AppendText(cursor, end, ",\"springsMode\":") &&
+      AppendNumber(cursor, end, mode_value(SettingsGroup::Springs)) &&
+      AppendText(cursor, end, ",\"dynamicsMode\":") &&
+      AppendNumber(cursor, end, mode_value(SettingsGroup::Dynamics)) &&
+      AppendText(cursor, end, ",\"slopeMode\":") &&
+      AppendNumber(cursor, end, mode_value(SettingsGroup::Slope)) &&
+      AppendText(cursor, end, ",\"wheelSteerMode\":") &&
+      AppendNumber(cursor, end, mode_value(SettingsGroup::WheelSteer)) &&
+      AppendText(cursor, end, ",\"burnoutMode\":") &&
+      AppendNumber(cursor, end, mode_value(SettingsGroup::Burnout)) &&
       AppendText(cursor, end, "}");
   if (!built) {
     return false;
@@ -719,6 +734,39 @@ bool JsonObjectBoolean(const AnomalyJsonServiceV1 &json,
   return true;
 }
 
+// The seven integer keys added in PLAN-settings-ui-groups.md task group 2. They
+// are optional: a document written before them has none, and the loader then
+// reconstructs each mode from the numbers and switches it does carry.
+constexpr const char *kGroupModeKeys[kSettingsGroupCount] = {
+    "nfsLensMode",
+    "rigMode",
+    "springsMode",
+    "dynamicsMode",
+    "slopeMode",
+    "wheelSteerMode",
+    "burnoutMode",
+};
+
+// Reads one group's mode. A value that is not an integer in [0, 2] counts as
+// missing: the numbers below still describe what the document meant, so the
+// legacy inference can decide instead of the whole document failing.
+bool ReadGroupMode(const AnomalyJsonServiceV1 &json,
+                   const AnomalyGenerationHandleV1 object, const char *key,
+                   std::uint32_t &value) noexcept {
+  double number = 0.0;
+  if (!JsonObjectNumber(json, object, key, number)) {
+    return false;
+  }
+  const auto maximum =
+      static_cast<double>(static_cast<std::uint32_t>(GroupMode::Opposite));
+  if (!std::isfinite(number) || number < 0.0 || number > maximum ||
+      std::floor(number) != number) {
+    return false;
+  }
+  value = static_cast<std::uint32_t>(number);
+  return true;
+}
+
 bool LoadSettings(Context &context) noexcept {
   std::uint32_t version{};
   std::size_t size{};
@@ -912,6 +960,15 @@ bool LoadSettings(Context &context) noexcept {
     wheel_steer_rate_degrees_per_second =
         kDefaultWheelSteerRateDegreesPerSecond;
   }
+  // Read the seven optional mode keys before the numbers: a document without
+  // them is the pre-group shape, and the inference below picks the mode from
+  // the values instead.
+  std::uint32_t mode_values[kSettingsGroupCount]{};
+  bool mode_present[kSettingsGroupCount]{};
+  for (std::size_t index = 0; index < kSettingsGroupCount; ++index) {
+    mode_present[index] =
+        ReadGroupMode(json, root, kGroupModeKeys[index], mode_values[index]);
+  }
   static_cast<void>(JsonObjectBoolean(json, root, "rollOnlyInDrift",
                                       roll_only_in_drift));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticFlatPose",
@@ -940,6 +997,13 @@ bool LoadSettings(Context &context) noexcept {
                                      slope_down_look_at));
   static_cast<void>(JsonObjectNumber(json, root, "slopeDownRest",
                                      slope_down_rest));
+  // A hand-edited document can carry the close-up's hold speed below its entry
+  // speed. The model always clamps that pair, so clamp it here too and keep the
+  // document loadable instead of refusing it over a value the engine would
+  // never use.
+  if (burnout_hold_speed < burnout_entry_speed) {
+    burnout_hold_speed = burnout_entry_speed;
+  }
   if (!SettingsValid(preset, camera_scale, position_spring, yaw_spring,
                      drift_yaw_spring, look_yaw_spring, yaw_return_spring,
                      pitch_spring, roll_spring, origin_offset_cm,
@@ -963,68 +1027,77 @@ bool LoadSettings(Context &context) noexcept {
   }
   context.enabled.store(enabled, std::memory_order_release);
   context.preset.store(preset, std::memory_order_release);
-  context.camera_scale.store(camera_scale, std::memory_order_release);
-  context.position_spring.store(position_spring, std::memory_order_release);
-  context.yaw_spring.store(yaw_spring, std::memory_order_release);
-  context.drift_yaw_spring.store(drift_yaw_spring,
-                                 std::memory_order_release);
-  context.look_yaw_spring.store(look_yaw_spring, std::memory_order_release);
-  context.yaw_return_spring.store(yaw_return_spring,
-                                  std::memory_order_release);
-  context.pitch_spring.store(pitch_spring, std::memory_order_release);
-  context.roll_spring.store(roll_spring, std::memory_order_release);
-  context.origin_offset_cm.store(origin_offset_cm,
-                                 std::memory_order_release);
-  context.aspect_ratio.store(aspect_ratio, std::memory_order_release);
-  context.speed_distance_scale.store(speed_distance_scale,
+  // The document's numbers are the group's *custom* block: on an old document
+  // they were the effective values, which is exactly what a switch to Custom
+  // must restore. Everything grouped is written through ApplyAllGroups() at the
+  // end, so the effective values always follow from the modes just stored.
+  CustomSettings custom;
+  custom.camera_scale = camera_scale;
+  custom.origin_offset_cm = origin_offset_cm;
+  custom.aspect_ratio = aspect_ratio;
+  custom.speed_distance_scale = speed_distance_scale;
+  custom.position_spring = position_spring;
+  custom.yaw_spring = yaw_spring;
+  custom.drift_yaw_spring = drift_yaw_spring;
+  custom.look_yaw_spring = look_yaw_spring;
+  custom.yaw_return_spring = yaw_return_spring;
+  custom.pitch_spring = pitch_spring;
+  custom.roll_spring = roll_spring;
+  custom.roll_scale = roll_scale;
+  custom.pitch_scale = pitch_scale;
+  custom.shake_scale = shake_scale;
+  custom.roll_only_in_drift = roll_only_in_drift;
+  custom.slope_strength = slope_strength;
+  custom.wheel_steer_entry_speed_kmh = wheel_steer_entry_speed_kmh;
+  custom.wheel_steer_max_degrees = wheel_steer_max_degrees;
+  custom.wheel_steer_gain = wheel_steer_gain;
+  custom.wheel_steer_full_slip_degrees = wheel_steer_full_slip_degrees;
+  custom.wheel_steer_rate_degrees_per_second =
+      wheel_steer_rate_degrees_per_second;
+  custom.wheel_steer_force_turn_delay_seconds = nfs2015_chase::Clamp(
+      wheel_steer_force_turn_delay_seconds,
+      kMinimumWheelSteerForceTurnDelaySeconds,
+      kMaximumWheelSteerForceTurnDelaySeconds);
+  custom.wheel_steer_sample_percent = nfs2015_chase::Clamp(
+      wheel_steer_sample_percent, kMinimumWheelSteerSamplePercent,
+      kMaximumWheelSteerSamplePercent);
+  custom.burnout_entry_delay = burnout_entry_delay;
+  custom.burnout_entry_time = burnout_entry_time;
+  custom.burnout_exit_delay = burnout_exit_delay;
+  custom.burnout_exit_time = burnout_exit_time;
+  custom.burnout_launch_exit_time = burnout_launch_exit_time;
+  custom.burnout_fov = burnout_fov;
+  custom.burnout_shake = burnout_shake;
+  custom.burnout_entry_speed = burnout_entry_speed;
+  custom.burnout_hold_speed = burnout_hold_speed;
+  custom.burnout_side_mode =
+      static_cast<std::uint32_t>(burnout_side_mode_number);
+  // A document with the mode keys states each mode; one without them states
+  // the same thing through its numbers and the four enable switches, and the
+  // inference reconstructs the mode so nothing changes on upgrade.
+  LegacyGroupState legacy;
+  legacy.custom = custom;
+  legacy.fov_enabled = fov_enabled;
+  legacy.slope_follow = slope_follow;
+  legacy.wheel_steer_enabled = wheel_steer_enabled;
+  legacy.burnout_enabled = burnout_enabled;
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    context.custom_settings = custom;
+  }
+  for (std::size_t index = 0; index < kSettingsGroupCount; ++index) {
+    const auto group = static_cast<SettingsGroup>(index);
+    // A readable mode wins; an unreadable one was already treated as missing.
+    // A readable but impossible one normalizes to Default instead of leaving
+    // the panel in a state it cannot draw.
+    const GroupMode mode =
+        mode_present[index]
+            ? NormalizeGroupMode(group, mode_values[index])
+            : InferLegacyGroupMode(group, legacy);
+    context.group_modes[index].store(static_cast<std::uint32_t>(mode),
                                      std::memory_order_release);
-  context.roll_scale.store(roll_scale, std::memory_order_release);
-  context.pitch_scale.store(pitch_scale, std::memory_order_release);
-  context.shake_scale.store(shake_scale, std::memory_order_release);
-  context.burnout_enabled.store(burnout_enabled, std::memory_order_release);
-  context.burnout_entry_delay.store(burnout_entry_delay,
-                                    std::memory_order_release);
-  context.burnout_entry_time.store(burnout_entry_time,
-                                   std::memory_order_release);
-  context.burnout_exit_delay.store(burnout_exit_delay,
-                                   std::memory_order_release);
-  context.burnout_exit_time.store(burnout_exit_time,
-                                  std::memory_order_release);
-  context.burnout_launch_exit_time.store(burnout_launch_exit_time,
-                                         std::memory_order_release);
-  context.burnout_fov.store(burnout_fov, std::memory_order_release);
-  context.burnout_shake.store(burnout_shake, std::memory_order_release);
-  context.burnout_side_mode.store(
-      static_cast<std::uint32_t>(burnout_side_mode_number),
-      std::memory_order_release);
-  context.burnout_entry_speed.store(burnout_entry_speed,
-                                    std::memory_order_release);
-  context.burnout_hold_speed.store(burnout_hold_speed,
-                                   std::memory_order_release);
-  context.wheel_steer_enabled.store(wheel_steer_enabled,
-                                    std::memory_order_release);
-  context.wheel_steer_entry_speed_kmh.store(
-      wheel_steer_entry_speed_kmh, std::memory_order_release);
-  context.wheel_steer_max_degrees.store(wheel_steer_max_degrees,
-                                        std::memory_order_release);
-  context.wheel_steer_gain.store(wheel_steer_gain,
-                                 std::memory_order_release);
-  context.wheel_steer_full_slip_degrees.store(
-      wheel_steer_full_slip_degrees, std::memory_order_release);
-  context.wheel_steer_rate_degrees_per_second.store(
-      wheel_steer_rate_degrees_per_second, std::memory_order_release);
-  context.wheel_steer_force_turn_delay_seconds.store(
-      nfs2015_chase::Clamp(wheel_steer_force_turn_delay_seconds,
-                           kMinimumWheelSteerForceTurnDelaySeconds,
-                           kMaximumWheelSteerForceTurnDelaySeconds),
-      std::memory_order_release);
-  context.wheel_steer_sample_percent.store(
-      nfs2015_chase::Clamp(wheel_steer_sample_percent,
-                           kMinimumWheelSteerSamplePercent,
-                           kMaximumWheelSteerSamplePercent),
-      std::memory_order_release);
-  context.slope_follow.store(slope_follow, std::memory_order_release);
-  context.slope_strength.store(slope_strength, std::memory_order_release);
+  }
+  // Settings that belong to no group keep the document's value.
   context.slope_max_gradient_degrees.store(
       slope_max_gradient_degrees, std::memory_order_release);
   context.slope_up_look_at.store(slope_up_look_at,
@@ -1033,8 +1106,6 @@ bool LoadSettings(Context &context) noexcept {
   context.slope_down_look_at.store(slope_down_look_at,
                                    std::memory_order_release);
   context.slope_down_rest.store(slope_down_rest, std::memory_order_release);
-  context.roll_only_in_drift.store(roll_only_in_drift,
-                                   std::memory_order_release);
   context.diagnostic_flat_pose.store(diagnostic_flat_pose,
                                      std::memory_order_release);
   context.borrow_strength.store(
@@ -1053,7 +1124,7 @@ bool LoadSettings(Context &context) noexcept {
                                          std::memory_order_release);
   context.diagnostic_skip_rotation.store(diagnostic_skip_rotation,
                                          std::memory_order_release);
-  context.fov_enabled.store(fov_enabled, std::memory_order_release);
+  ApplyAllGroups(context);
   return true;
 }
 
