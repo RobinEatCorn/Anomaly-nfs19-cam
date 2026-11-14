@@ -613,6 +613,590 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                 "player seq jumps", display.player_sequence_jumps);
 }
 
+// --- grouped settings panel -------------------------------------------------
+//
+// Seven base types, each one title plus one mode row: Default uses the built-in
+// numbers, Custom opens the group's own numbers and forces the feature on, and
+// Opposite keeps the defaults but flips the switch (or, where the default is
+// off, turns it on). Only Custom opens detail controls, which is what keeps the
+// default window short.
+//
+// A group's custom numbers are kept while it is on Default or Opposite, so a
+// switch back to Custom restores them; only "restore defaults" clears them.
+
+namespace {
+
+// The identity a group's widgets are keyed by. The visible title changes with
+// the language, so the id is spelled out here instead of derived from it.
+struct GroupIdentity final {
+  const char *title_key;
+  const char *title_fallback;
+  const char *id;
+};
+
+[[nodiscard]] GroupIdentity GroupIdentityFor(const SettingsGroup group) {
+  switch (group) {
+    case SettingsGroup::NfsLens:
+      return {"group.nfs_lens", "NFS lens (FOV)", "nfs-lens"};
+    case SettingsGroup::Rig:
+      return {"group.rig", "Camera geometry", "rig"};
+    case SettingsGroup::Springs:
+      return {"group.springs", "Camera springs", "springs"};
+    case SettingsGroup::Dynamics:
+      return {"group.dynamics", "Camera dynamics", "dynamics"};
+    case SettingsGroup::Slope:
+      return {"group.slope", "Slope following", "slope"};
+    case SettingsGroup::WheelSteer:
+      return {"group.wheel_steer", "Drift front wheels", "wheel-steer"};
+    case SettingsGroup::Burnout:
+      return {"group.burnout", "Burnout close-up", "burnout"};
+  }
+  return {"group.rig", "Camera geometry", "rig"};
+}
+
+// The third state reads "Off" everywhere except the burnout close-up, whose
+// built-in default is off, so its opposite is "On".
+[[nodiscard]] const char *ModeTextKey(const SettingsGroup group,
+                                      const GroupMode mode) noexcept {
+  switch (mode) {
+    case GroupMode::Default:
+      return "mode.default";
+    case GroupMode::Custom:
+      return "mode.custom";
+    case GroupMode::Opposite:
+      return group == SettingsGroup::Burnout ? "mode.on" : "mode.off";
+  }
+  return "mode.default";
+}
+
+[[nodiscard]] const char *ModeTextFallback(const SettingsGroup group,
+                                           const GroupMode mode) noexcept {
+  switch (mode) {
+    case GroupMode::Default:
+      return "Default";
+    case GroupMode::Custom:
+      return "Custom";
+    case GroupMode::Opposite:
+      return group == SettingsGroup::Burnout ? "On" : "Off";
+  }
+  return "Default";
+}
+
+// same_line is optional in the service table. The host built against this SDK
+// has it, but a shorter table must degrade to one button per line instead of
+// reading past the struct.
+[[nodiscard]] bool CanInlineButtons(const AnomalyUiServiceV1 *ui) noexcept {
+  return HasField<AnomalyUiServiceV1,
+                  decltype(AnomalyUiServiceV1::same_line)>(
+             ui, offsetof(AnomalyUiServiceV1, same_line)) &&
+         ui->same_line != nullptr;
+}
+
+void PlaceOnSameRow(const AnomalyUiServiceV1 *ui) noexcept {
+  if (CanInlineButtons(ui)) {
+    ui->same_line(ui->user, 0.0F, 4.0F);
+  }
+}
+
+// The mode is the panel's only record; ApplyGroup derives the effective values
+// from it and the debounce writes the document. No camera reset is requested:
+// every group moves values the camera already smooths, and the lens switch and
+// the burnout shot are deliberate visible changes.
+void ChangeGroupMode(Context &context, const SettingsGroup group,
+                     const GroupMode mode) noexcept {
+  context.group_modes[static_cast<std::size_t>(group)].store(
+      static_cast<std::uint32_t>(mode), std::memory_order_release);
+  ApplyGroup(context, group);
+  MarkSettingsDirty(context);
+}
+
+// The mode row. Seven rows of "Default / Custom / Off" would otherwise share
+// one ImGui identity, and the visible "> " prefix changes with the selection,
+// so every button carries its own "###group-<id>-mode-<n>" suffix.
+[[nodiscard]] GroupMode DrawGroupModes(
+    const AnomalyUiServiceV1 *ui,
+    const nfs2015_chase_cam::Localizer &localizer, const SettingsGroup group,
+    const GroupMode current) {
+  GroupMode picked = current;
+  bool first = true;
+  for (const GroupMode mode :
+       {GroupMode::Default, GroupMode::Custom, GroupMode::Opposite}) {
+    if (!GroupModeAllowed(group, mode)) {
+      continue;
+    }
+    if (!first) {
+      PlaceOnSameRow(ui);
+    }
+    first = false;
+    std::string label = current == mode ? "> " : "  ";
+    label.append(localizer.Text(ModeTextKey(group, mode),
+                                ModeTextFallback(group, mode)));
+    label.append("###group-");
+    label.append(GroupIdentityFor(group).id);
+    label.append("-mode-");
+    label.append(std::to_string(static_cast<std::uint32_t>(mode)));
+    if (ui->button(ui->user, StringView(label), 0.0F, 0.0F) != 0) {
+      picked = mode;
+    }
+  }
+  return picked;
+}
+
+// Draws a group's title and mode row and applies a click. The return value
+// answers "is this group on its custom numbers now", which is the only state
+// that opens detail controls.
+bool DrawGroupHeader(const AnomalyUiServiceV1 *ui, Context &context,
+                     const DisplayState &display, const SettingsGroup group) {
+  const GroupIdentity identity = GroupIdentityFor(group);
+  ui->text(ui->user,
+           StringView(context.localizer.Text(identity.title_key,
+                                             identity.title_fallback)));
+  const GroupMode current =
+      display.group_modes[static_cast<std::size_t>(group)];
+  const GroupMode picked =
+      DrawGroupModes(ui, context.localizer, group, current);
+  if (picked != current) {
+    ChangeGroupMode(context, group, picked);
+  }
+  return picked == GroupMode::Custom;
+}
+
+// One custom number. A moved slider is written to the custom block first, then
+// the group is re-applied, then the document is marked dirty: the effective
+// values follow from the mode, so nothing writes them here.
+void DrawCustomSlider(const AnomalyUiServiceV1 *ui, Context &context,
+                      const SettingsGroup group, const char *key,
+                      const char *fallback, const char *widget_key,
+                      double CustomSettings::*field, const double minimum,
+                      const double maximum) {
+  double current{};
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    current = context.custom_settings.*field;
+  }
+  const std::string label = context.localizer.Label(key, fallback, widget_key);
+  float slider_value = static_cast<float>(current);
+  if (ui->slider_float(ui->user, StringView(label), &slider_value,
+                       static_cast<float>(minimum),
+                       static_cast<float>(maximum)) == 0) {
+    return;
+  }
+  const double clamped = nfs2015_chase::Clamp(
+      static_cast<double>(slider_value), minimum, maximum);
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    context.custom_settings.*field = clamped;
+  }
+  ApplyGroup(context, group);
+  MarkSettingsDirty(context);
+}
+
+void DrawCustomCheckbox(const AnomalyUiServiceV1 *ui, Context &context,
+                        const SettingsGroup group, const char *key,
+                        const char *fallback, const char *widget_key,
+                        bool CustomSettings::*field) {
+  bool current{};
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    current = context.custom_settings.*field;
+  }
+  const std::string label = context.localizer.Label(key, fallback, widget_key);
+  int checked = current ? 1 : 0;
+  if (ui->checkbox(ui->user, StringView(label), &checked) == 0) {
+    return;
+  }
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    context.custom_settings.*field = checked != 0;
+  }
+  ApplyGroup(context, group);
+  MarkSettingsDirty(context);
+}
+
+void DrawNfsLensGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                      const DisplayState &display) {
+  ui->separator(ui->user);
+  // The lens is a switch only: there is no number to tune, so this group never
+  // opens a Custom body.
+  DrawGroupHeader(ui, context, display, SettingsGroup::NfsLens);
+}
+
+void DrawRigGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                  const DisplayState &display) {
+  ui->separator(ui->user);
+  if (!DrawGroupHeader(ui, context, display, SettingsGroup::Rig)) {
+    return;
+  }
+  DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.camera_scale",
+                   "Camera distance / height scale", "chase-scale",
+                   &CustomSettings::camera_scale, kMinimumCameraScale,
+                   kMaximumCameraScale);
+  DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.speed_distance",
+                   "Speed / accel distance scale", "chase-speed-distance",
+                   &CustomSettings::speed_distance_scale,
+                   kMinimumSpeedDistanceScale, kMaximumSpeedDistanceScale);
+  DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.origin_offset",
+                   "Car origin offset (cm)", "chase-origin-offset",
+                   &CustomSettings::origin_offset_cm, kMinimumOriginOffsetCm,
+                   kMaximumOriginOffsetCm);
+  DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.aspect_ratio",
+                   "Viewport aspect ratio", "chase-aspect",
+                   &CustomSettings::aspect_ratio, kMinimumAspectRatio,
+                   kMaximumAspectRatio);
+}
+
+void DrawSpringsGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                      const DisplayState &display) {
+  ui->separator(ui->user);
+  if (!DrawGroupHeader(ui, context, display, SettingsGroup::Springs)) {
+    return;
+  }
+  ui->text(ui->user,
+           StringView(context.localizer.Text(
+               "setting.springs_hint",
+               "Higher = faster follow; look spring: more side offset")));
+  DrawCustomSlider(ui, context, SettingsGroup::Springs,
+                   "setting.position_spring", "Camera position spring",
+                   "chase-spring-position", &CustomSettings::position_spring,
+                   kMinimumPositionSpring, kMaximumPositionSpring);
+  DrawCustomSlider(ui, context, SettingsGroup::Springs, "setting.yaw_spring",
+                   "Normal yaw spring", "chase-spring-yaw",
+                   &CustomSettings::yaw_spring, kMinimumYawSpring,
+                   kMaximumYawSpring);
+  DrawCustomSlider(ui, context, SettingsGroup::Springs,
+                   "setting.drift_yaw_spring",
+                   "Drift yaw spring (camera position)",
+                   "chase-spring-drift-yaw",
+                   &CustomSettings::drift_yaw_spring,
+                   kMinimumDriftYawSpring, kMaximumDriftYawSpring);
+  DrawCustomSlider(ui, context, SettingsGroup::Springs,
+                   "setting.look_yaw_spring",
+                   "Drift look spring (larger = more side offset)",
+                   "chase-look-yaw-spring", &CustomSettings::look_yaw_spring,
+                   kMinimumLookYawSpring, kMaximumLookYawSpring);
+  DrawCustomSlider(ui, context, SettingsGroup::Springs,
+                   "setting.yaw_return_spring", "Drift yaw return spring",
+                   "chase-spring-yaw-return",
+                   &CustomSettings::yaw_return_spring,
+                   kMinimumYawReturnSpring, kMaximumYawReturnSpring);
+  DrawCustomSlider(ui, context, SettingsGroup::Springs,
+                   "setting.pitch_spring", "Pitch spring",
+                   "chase-spring-pitch", &CustomSettings::pitch_spring,
+                   kMinimumPitchSpring, kMaximumPitchSpring);
+  DrawCustomSlider(ui, context, SettingsGroup::Springs,
+                   "setting.roll_spring", "Roll spring", "chase-spring-roll",
+                   &CustomSettings::roll_spring, kMinimumRollSpring,
+                   kMaximumRollSpring);
+}
+
+void DrawDynamicsGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                       const DisplayState &display) {
+  ui->separator(ui->user);
+  if (!DrawGroupHeader(ui, context, display, SettingsGroup::Dynamics)) {
+    return;
+  }
+  DrawCustomSlider(ui, context, SettingsGroup::Dynamics, "setting.roll_scale",
+                   "Roll strength", "chase-roll-scale",
+                   &CustomSettings::roll_scale, kMinimumRollScale,
+                   kMaximumRollScale);
+  DrawCustomSlider(ui, context, SettingsGroup::Dynamics, "setting.pitch_scale",
+                   "Braking pitch strength", "chase-pitch-scale",
+                   &CustomSettings::pitch_scale, kMinimumPitchScale,
+                   kMaximumPitchScale);
+  DrawCustomSlider(ui, context, SettingsGroup::Dynamics, "setting.shake_scale",
+                   "Camera shake strength", "chase-shake-scale",
+                   &CustomSettings::shake_scale, kMinimumShakeScale,
+                   kMaximumShakeScale);
+  DrawCustomCheckbox(ui, context, SettingsGroup::Dynamics,
+                     "setting.roll_only_drift", "Roll only while drifting",
+                     "chase-roll-only-drift",
+                     &CustomSettings::roll_only_in_drift);
+}
+
+void DrawSlopeGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                    const DisplayState &display) {
+  ui->separator(ui->user);
+  if (!DrawGroupHeader(ui, context, display, SettingsGroup::Slope)) {
+    return;
+  }
+  DrawCustomSlider(ui, context, SettingsGroup::Slope,
+                   "setting.slope_strength", "Slope composition strength",
+                   "chase-slope-strength", &CustomSettings::slope_strength,
+                   kMinimumSlopeStrength, kMaximumSlopeStrength);
+}
+
+void DrawWheelSteerGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                         const DisplayState &display) {
+  ui->separator(ui->user);
+  if (!DrawGroupHeader(ui, context, display, SettingsGroup::WheelSteer)) {
+    return;
+  }
+  // One summary line: the full description of the countersteer behaviour lives
+  // in the README, where it can be read once instead of on every open.
+  ui->text(ui->user,
+           StringView(context.localizer.Text(
+               "setting.wheel_steer_summary",
+               "The front wheels follow the travel direction during a drift; "
+               "see the README for the full behaviour.")));
+  DrawCustomSlider(ui, context, SettingsGroup::WheelSteer,
+                   "setting.wheel_steer_entry_speed",
+                   "Drift entry speed (km/h)",
+                   "chase-wheel-steer-entry-speed",
+                   &CustomSettings::wheel_steer_entry_speed_kmh,
+                   kMinimumWheelSteerEntrySpeedKmh,
+                   kMaximumWheelSteerEntrySpeedKmh);
+  DrawCustomSlider(ui, context, SettingsGroup::WheelSteer,
+                   "setting.wheel_steer_max", "Front wheel visual limit (deg)",
+                   "chase-wheel-steer-max",
+                   &CustomSettings::wheel_steer_max_degrees,
+                   kMinimumWheelSteerMaxDegrees,
+                   kMaximumWheelSteerMaxDegrees);
+  DrawCustomSlider(ui, context, SettingsGroup::WheelSteer,
+                   "setting.wheel_steer_gain", "Countersteer gain",
+                   "chase-wheel-steer-gain",
+                   &CustomSettings::wheel_steer_gain,
+                   kMinimumWheelSteerGain, kMaximumWheelSteerGain);
+  DrawCustomSlider(ui, context, SettingsGroup::WheelSteer,
+                   "setting.wheel_steer_sample",
+                   "Countersteer sample point (% half track, -out/+in)",
+                   "chase-wheel-steer-sample",
+                   &CustomSettings::wheel_steer_sample_percent,
+                   kMinimumWheelSteerSamplePercent,
+                   kMaximumWheelSteerSamplePercent);
+  DrawCustomSlider(ui, context, SettingsGroup::WheelSteer,
+                   "setting.wheel_steer_full_slip", "Full-angle slip (deg)",
+                   "chase-wheel-steer-full-slip",
+                   &CustomSettings::wheel_steer_full_slip_degrees,
+                   kMinimumWheelSteerFullSlipDegrees,
+                   kMaximumWheelSteerFullSlipDegrees);
+  DrawCustomSlider(ui, context, SettingsGroup::WheelSteer,
+                   "setting.wheel_steer_rate", "Steer rate (deg/s)",
+                   "chase-wheel-steer-rate",
+                   &CustomSettings::wheel_steer_rate_degrees_per_second,
+                   kMinimumWheelSteerRateDegreesPerSecond,
+                   kMaximumWheelSteerRateDegreesPerSecond);
+  DrawCustomSlider(ui, context, SettingsGroup::WheelSteer,
+                   "setting.wheel_steer_force_turn", "Force-turn hold (s)",
+                   "chase-wheel-steer-force-turn",
+                   &CustomSettings::wheel_steer_force_turn_delay_seconds,
+                   kMinimumWheelSteerForceTurnDelaySeconds,
+                   kMaximumWheelSteerForceTurnDelaySeconds);
+}
+
+// The entry speed and the hold speed are one pair: the hold speed may never sit
+// below the entry speed, so raising the entry speed lifts the hold speed with
+// it. Store, re-apply, mark dirty is the same order as every other control.
+void DrawBurnoutEntrySpeed(const AnomalyUiServiceV1 *ui, Context &context) {
+  double current{};
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    current = context.custom_settings.burnout_entry_speed;
+  }
+  const std::string label = context.localizer.Label(
+      "setting.burnout_entry_speed", "Entry speed (m/s)",
+      "chase-burnout-entry-speed");
+  float slider_value = static_cast<float>(current);
+  if (ui->slider_float(ui->user, StringView(label), &slider_value,
+                       static_cast<float>(kMinimumBurnoutEntrySpeed),
+                       static_cast<float>(kMaximumBurnoutEntrySpeed)) == 0) {
+    return;
+  }
+  const double clamped = nfs2015_chase::Clamp(
+      static_cast<double>(slider_value), kMinimumBurnoutEntrySpeed,
+      kMaximumBurnoutEntrySpeed);
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    context.custom_settings.burnout_entry_speed = clamped;
+    if (context.custom_settings.burnout_hold_speed < clamped) {
+      context.custom_settings.burnout_hold_speed = clamped;
+    }
+  }
+  ApplyGroup(context, SettingsGroup::Burnout);
+  MarkSettingsDirty(context);
+}
+
+void DrawBurnoutSideButtons(const AnomalyUiServiceV1 *ui, Context &context) {
+  std::uint32_t current{kDefaultBurnoutSideMode};
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    current = context.custom_settings.burnout_side_mode;
+  }
+  ui->text(ui->user,
+           StringView(context.localizer.Text(
+               "setting.burnout_side", "Shot side (latched on entry)")));
+  const auto side_button = [&](const std::uint32_t mode, const char *key,
+                               const char *fallback) {
+    std::string label = current == mode ? "> " : "  ";
+    label.append(context.localizer.Text(key, fallback));
+    label.append("###burnout-side-");
+    label.append(std::to_string(mode));
+    if (ui->button(ui->user, StringView(label), 0.0F, 0.0F) == 0) {
+      return;
+    }
+    {
+      std::scoped_lock lock(context.custom_settings_mutex);
+      context.custom_settings.burnout_side_mode = mode;
+    }
+    ApplyGroup(context, SettingsGroup::Burnout);
+    MarkSettingsDirty(context);
+  };
+  side_button(0, "burnout.side.auto", "Auto / steering");
+  PlaceOnSameRow(ui);
+  side_button(1, "burnout.side.left", "Left rear");
+  PlaceOnSameRow(ui);
+  side_button(2, "burnout.side.right", "Right rear");
+  PlaceOnSameRow(ui);
+  side_button(3, "burnout.side.center", "Centred");
+}
+
+void DrawBurnoutGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                      const DisplayState &display) {
+  ui->separator(ui->user);
+  if (!DrawGroupHeader(ui, context, display, SettingsGroup::Burnout)) {
+    return;
+  }
+  DrawCustomSlider(ui, context, SettingsGroup::Burnout,
+                   "setting.burnout_fov", "Shot horizontal FOV",
+                   "chase-burnout-fov", &CustomSettings::burnout_fov,
+                   kMinimumBurnoutFov, kMaximumBurnoutFov);
+  DrawCustomSlider(ui, context, SettingsGroup::Burnout,
+                   "setting.burnout_shake", "Shot shake strength",
+                   "chase-burnout-shake", &CustomSettings::burnout_shake,
+                   kMinimumBurnoutShake, kMaximumBurnoutShake);
+  DrawCustomSlider(ui, context, SettingsGroup::Burnout,
+                   "setting.burnout_entry_delay", "Entry delay (s)",
+                   "chase-burnout-entry-delay",
+                   &CustomSettings::burnout_entry_delay,
+                   kMinimumBurnoutEntryDelay, kMaximumBurnoutEntryDelay);
+  DrawCustomSlider(ui, context, SettingsGroup::Burnout,
+                   "setting.burnout_entry_time", "Entry time (s)",
+                   "chase-burnout-entry-time",
+                   &CustomSettings::burnout_entry_time,
+                   kMinimumBurnoutEntryTime, kMaximumBurnoutEntryTime);
+  DrawCustomSlider(ui, context, SettingsGroup::Burnout,
+                   "setting.burnout_exit_delay", "Exit delay (s)",
+                   "chase-burnout-exit-delay",
+                   &CustomSettings::burnout_exit_delay,
+                   kMinimumBurnoutExitDelay, kMaximumBurnoutExitDelay);
+  DrawCustomSlider(ui, context, SettingsGroup::Burnout,
+                   "setting.burnout_exit_time", "Exit time (s)",
+                   "chase-burnout-exit-time",
+                   &CustomSettings::burnout_exit_time, kMinimumBurnoutExitTime,
+                   kMaximumBurnoutExitTime);
+  DrawCustomSlider(ui, context, SettingsGroup::Burnout,
+                   "setting.burnout_launch_exit_time", "Launch exit time (s)",
+                   "chase-burnout-launch-exit-time",
+                   &CustomSettings::burnout_launch_exit_time,
+                   kMinimumBurnoutLaunchExitTime,
+                   kMaximumBurnoutLaunchExitTime);
+  DrawBurnoutEntrySpeed(ui, context);
+  // The lower bound follows the entry speed, so the pair can never be stored
+  // inverted (the document validator rejects that).
+  double entry_speed{};
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    entry_speed = context.custom_settings.burnout_entry_speed;
+  }
+  const double hold_minimum =
+      (std::max)(kMinimumBurnoutHoldSpeed, entry_speed);
+  DrawCustomSlider(ui, context, SettingsGroup::Burnout,
+                   "setting.burnout_hold_speed", "Hold speed (m/s)",
+                   "chase-burnout-hold-speed",
+                   &CustomSettings::burnout_hold_speed, hold_minimum,
+                   kMaximumBurnoutHoldSpeed);
+  DrawBurnoutSideButtons(ui, context);
+}
+
+// Advanced stays closed by default: it holds the anchor choice, the lock onto
+// the Game's camera, the diagnostic switches and the counters panel, none of
+// which is part of a base type.
+void DrawAdvancedGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                       const DisplayState &display) {
+  ui->separator(ui->user);
+  const std::string advanced_label =
+      context.localizer.Label("setting.advanced", "Advanced", "advanced-open");
+  int advanced_open = context.advanced_open ? 1 : 0;
+  if (ui->checkbox(ui->user, StringView(advanced_label), &advanced_open) != 0) {
+    context.advanced_open = advanced_open != 0;
+  }
+  if (!context.advanced_open) {
+    return;
+  }
+  ui->text(ui->user,
+           StringView(context.localizer.Text("setting.anchor_source",
+                                             "Anchor source")));
+  const auto anchor_button = [&](const std::uint32_t source, const char *key,
+                                 const char *fallback) {
+    std::string label;
+    label.append(display.anchor_source == source ? "> " : "  ");
+    label.append(context.localizer.Text(key, fallback));
+    label.append("###anchor-");
+    label.append(std::to_string(source));
+    if (ui->button(ui->user, StringView(label), 0.0F, 0.0F) != 0) {
+      context.anchor_source.store(source, std::memory_order_release);
+      MarkSettingsDirty(context);
+    }
+  };
+  anchor_button(kAnchorSourceX, "anchor.x", "X anchored");
+  anchor_button(kAnchorSourceVehicle, "anchor.vehicle", "Vehicle mesh");
+  anchor_button(kAnchorSourceBorrow, "anchor.borrow", "Borrow estimate");
+  anchor_button(kAnchorSourceModel, "anchor.model", "Pure model");
+
+  const std::string borrow_label = context.localizer.Label(
+      "setting.borrow_strength", "Lock to the Game's camera (0 = pure model)",
+      "chase-borrow");
+  float borrow = static_cast<float>(display.borrow_strength);
+  if (ui->slider_float(ui->user, StringView(borrow_label), &borrow, 0.0F,
+                       1.0F) != 0) {
+    context.borrow_strength.store(
+        nfs2015_chase::Clamp(static_cast<double>(borrow), 0.0, 1.0),
+        std::memory_order_release);
+    MarkSettingsDirty(context);
+  }
+
+  const auto advanced_checkbox = [&](const char *key, const char *fallback,
+                                     const char *widget_key,
+                                     const bool value,
+                                     std::atomic<bool> &target) {
+    const std::string label =
+        context.localizer.Label(key, fallback, widget_key);
+    int checked = value ? 1 : 0;
+    if (ui->checkbox(ui->user, StringView(label), &checked) != 0) {
+      target.store(checked != 0, std::memory_order_release);
+      MarkSettingsDirty(context);
+    }
+  };
+  advanced_checkbox("setting.diagnostic_flat_pose",
+                    "Diagnostic: position and yaw only", "chase-flat-pose",
+                    display.diagnostic_flat_pose,
+                    context.diagnostic_flat_pose);
+  advanced_checkbox("setting.diagnostic_zero_lag",
+                    "Diagnostic: zero lag, newest tick position",
+                    "chase-zero-lag", display.diagnostic_zero_lag,
+                    context.diagnostic_zero_lag);
+  advanced_checkbox("setting.diagnostic_skip_position",
+                    "Diagnostic: keep the Game's position",
+                    "chase-skip-position", display.diagnostic_skip_position,
+                    context.diagnostic_skip_position);
+  advanced_checkbox("setting.diagnostic_skip_rotation",
+                    "Diagnostic: keep the Game's rotation",
+                    "chase-skip-rotation", display.diagnostic_skip_rotation,
+                    context.diagnostic_skip_rotation);
+
+  const std::string diagnostics_label = context.localizer.Label(
+      "setting.diagnostics", "Diagnostics", "chase-diagnostics");
+  int diagnostics_open = context.diagnostics_open ? 1 : 0;
+  if (ui->checkbox(ui->user, StringView(diagnostics_label),
+                   &diagnostics_open) != 0) {
+    context.diagnostics_open = diagnostics_open != 0;
+  }
+  if (context.diagnostics_open) {
+    DrawDiagnostics(ui, context.localizer, display);
+  }
+}
+
+}  // namespace
+
 void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
   auto *context = static_cast<Context *>(plugin_context);
   if (context == nullptr) {
@@ -705,491 +1289,22 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
         RestoreDefaults(*context);
       }
 
-      const std::string anchor_label =
-          context->localizer.Text("setting.anchor_source", "Anchor source");
-      ui->text(ui->user, StringView(anchor_label));
-      const auto anchor_button = [&](const std::uint32_t source,
-                                     const char *key, const char *fallback) {
-        std::string label;
-        label.append(display.anchor_source == source ? "> " : "  ");
-        label.append(context->localizer.Text(key, fallback));
-        if (ui->button(ui->user, StringView(label), 0.0F, 0.0F) != 0) {
-          context->anchor_source.store(source, std::memory_order_release);
-          MarkSettingsDirty(*context);
-        }
-      };
-      anchor_button(kAnchorSourceX, "anchor.x", "X anchored");
-      anchor_button(kAnchorSourceVehicle, "anchor.vehicle", "Vehicle mesh");
-      anchor_button(kAnchorSourceBorrow, "anchor.borrow", "Borrow estimate");
-      anchor_button(kAnchorSourceModel, "anchor.model", "Pure model");
-
-      const std::string fov_label = context->localizer.Label(
-          "setting.fov", "Apply NFS lens (FOV)", "chase-fov");
-      int fov_enabled = display.fov_enabled ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(fov_label), &fov_enabled) != 0) {
-        context->fov_enabled.store(fov_enabled != 0, std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string scale_label = context->localizer.Label(
-          "setting.camera_scale", "Camera distance / height scale",
-          "chase-scale");
-      float scale = static_cast<float>(display.camera_scale);
-      if (ui->slider_float(ui->user, StringView(scale_label), &scale,
-                           static_cast<float>(kMinimumCameraScale),
-                           static_cast<float>(kMaximumCameraScale)) != 0) {
-        context->camera_scale.store(
-            nfs2015_chase::Clamp(static_cast<double>(scale),
-                                 kMinimumCameraScale, kMaximumCameraScale),
-            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
+      // The seven base types, then the advanced block. A group keeps its custom
+      // numbers while it is not on Custom, so switching back restores the
+      // tuning; only "restore defaults" clears them.
+      DrawNfsLensGroup(ui, *context, display);
+      DrawRigGroup(ui, *context, display);
+      // The Cinematic preset ignores the springs, so the panel does not offer
+      // them there. Their custom numbers stay in the model and come back with
+      // the NFS preset.
       if (display.preset == 0) {
-        ui->separator(ui->user);
-        const std::string springs_label = context->localizer.Text(
-            "setting.springs", "Camera springs");
-        ui->text(ui->user, StringView(springs_label));
-        const std::string springs_hint = context->localizer.Text(
-            "setting.springs_hint",
-            "Higher = faster follow; look spring: more side offset");
-        ui->text(ui->user, StringView(springs_hint));
-
-        const auto spring_slider =
-            [&](const char *key, const char *fallback,
-                const char *widget_key, const double value,
-                const double minimum, const double maximum,
-                std::atomic<double> &target) {
-              const std::string label = context->localizer.Label(
-                  key, fallback, widget_key);
-              float slider_value = static_cast<float>(value);
-              if (ui->slider_float(
-                      ui->user, StringView(label), &slider_value,
-                      static_cast<float>(minimum),
-                      static_cast<float>(maximum)) != 0) {
-                target.store(
-                    nfs2015_chase::Clamp(
-                        static_cast<double>(slider_value), minimum, maximum),
-                    std::memory_order_release);
-                MarkSettingsDirty(*context);
-              }
-            };
-        spring_slider("setting.position_spring", "Camera position spring",
-                      "chase-spring-position", display.position_spring,
-                      kMinimumPositionSpring, kMaximumPositionSpring,
-                      context->position_spring);
-        spring_slider("setting.yaw_spring", "Normal yaw spring",
-                      "chase-spring-yaw", display.yaw_spring,
-                      kMinimumYawSpring, kMaximumYawSpring,
-                      context->yaw_spring);
-        spring_slider("setting.drift_yaw_spring",
-                      "Drift yaw spring (camera position)",
-                      "chase-spring-drift-yaw", display.drift_yaw_spring,
-                      kMinimumDriftYawSpring, kMaximumDriftYawSpring,
-                      context->drift_yaw_spring);
-        spring_slider("setting.look_yaw_spring",
-                      "Drift look spring (larger = more side offset)",
-                      "chase-look-yaw-spring", display.look_yaw_spring,
-                      kMinimumLookYawSpring, kMaximumLookYawSpring,
-                      context->look_yaw_spring);
-        spring_slider("setting.yaw_return_spring",
-                      "Drift yaw return spring",
-                      "chase-spring-yaw-return", display.yaw_return_spring,
-                      kMinimumYawReturnSpring, kMaximumYawReturnSpring,
-                      context->yaw_return_spring);
-        spring_slider("setting.pitch_spring", "Pitch spring",
-                      "chase-spring-pitch", display.pitch_spring,
-                      kMinimumPitchSpring, kMaximumPitchSpring,
-                      context->pitch_spring);
-        spring_slider("setting.roll_spring", "Roll spring",
-                      "chase-spring-roll", display.roll_spring,
-                      kMinimumRollSpring, kMaximumRollSpring,
-                      context->roll_spring);
+        DrawSpringsGroup(ui, *context, display);
       }
-
-      const std::string slope_follow_label = context->localizer.Label(
-          "setting.slope_follow", "Follow slope (body pitch)",
-          "chase-slope-follow");
-      int slope_follow = display.slope_follow ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(slope_follow_label),
-                       &slope_follow) != 0) {
-        context->slope_follow.store(slope_follow != 0,
-                                    std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string slope_strength_label = context->localizer.Label(
-          "setting.slope_strength", "Slope composition strength",
-          "chase-slope-strength");
-      float slope_strength = static_cast<float>(display.slope_strength);
-      if (ui->slider_float(ui->user, StringView(slope_strength_label),
-                           &slope_strength,
-                           static_cast<float>(kMinimumSlopeStrength),
-                           static_cast<float>(kMaximumSlopeStrength)) != 0) {
-        context->slope_strength.store(
-            nfs2015_chase::Clamp(static_cast<double>(slope_strength),
-                                 kMinimumSlopeStrength,
-                                 kMaximumSlopeStrength),
-            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string wheel_steer_label = context->localizer.Label(
-          "setting.wheel_steer_enabled", "NFS drift front wheels",
-          "chase-wheel-steer-enabled");
-      int wheel_steer_enabled = display.wheel_steer_enabled ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(wheel_steer_label),
-                       &wheel_steer_enabled) != 0) {
-        context->wheel_steer_enabled.store(wheel_steer_enabled != 0,
-                                           std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-      if (display.wheel_steer_enabled) {
-        const std::string wheel_hint = context->localizer.Text(
-            "setting.wheel_steer_hint",
-            "During a drift the front wheels follow the actual travel "
-            "direction. Entry speed only gates entering; once engaged, "
-            "low speed does not release the countersteer. The countersteer "
-            "sample point moves along the front axle and mirrors with the "
-            "drift direction: 0 is the axle centre, +100% the inside front "
-            "wheel, -100% the outside wheel. The first drift-side press in "
-            "each direction of a drift (including a key already held when the "
-            "drift starts) uses the measured stock wheel angle as the entry "
-            "intent if the reflected steering sample is stale, so the quick "
-            "turn owns the initial movement instead of the slow stock "
-            "animation. It turns the wheels toward the drift at 150 deg/s "
-            "until released; releasing returns to the countersteer target, and the "
-            "release phase keeps that target until the grip handoff. "
-            "Each side can trigger at most once per drift. The first quick "
-            "turn of a drift uses the 6.5-degree entry gate; a later "
-            "direction change needs the opposite rear slip to reach 10 "
-            "degrees before a new-side key already held at the change "
-            "triggers. A brief return to grip for up to 1.5 seconds keeps the "
-            "spent side; a longer grip gap resets the one-shot. If quick turn "
-            "is unavailable, holding the drift-side key for the force-turn "
-            "delay (0.4 s by default) keeps the wheel at the same drift-side "
-            "limit until released; the force turn also stays visible through "
-            "the release phase and ends at grip.");
-        ui->text(ui->user, StringView(wheel_hint));
-        const auto wheel_slider =
-            [&](const char *key, const char *fallback,
-                const char *widget_key, const double value,
-                const double minimum, const double maximum,
-                std::atomic<double> &target) {
-              const std::string label = context->localizer.Label(
-                  key, fallback, widget_key);
-              float slider_value = static_cast<float>(value);
-              if (ui->slider_float(
-                      ui->user, StringView(label), &slider_value,
-                      static_cast<float>(minimum),
-                      static_cast<float>(maximum)) != 0) {
-                target.store(
-                    nfs2015_chase::Clamp(
-                        static_cast<double>(slider_value), minimum, maximum),
-                    std::memory_order_release);
-                MarkSettingsDirty(*context);
-              }
-            };
-        wheel_slider("setting.wheel_steer_entry_speed",
-                     "Drift entry speed (km/h)",
-                     "chase-wheel-steer-entry-speed",
-                     display.wheel_steer_entry_speed_kmh,
-                     kMinimumWheelSteerEntrySpeedKmh,
-                     kMaximumWheelSteerEntrySpeedKmh,
-                     context->wheel_steer_entry_speed_kmh);
-        wheel_slider("setting.wheel_steer_max",
-                     "Front wheel visual limit (deg)",
-                     "chase-wheel-steer-max", display.wheel_steer_max_degrees,
-                     kMinimumWheelSteerMaxDegrees,
-                     kMaximumWheelSteerMaxDegrees,
-                     context->wheel_steer_max_degrees);
-        wheel_slider("setting.wheel_steer_gain", "Countersteer gain",
-                     "chase-wheel-steer-gain", display.wheel_steer_gain,
-                     kMinimumWheelSteerGain, kMaximumWheelSteerGain,
-                     context->wheel_steer_gain);
-        wheel_slider("setting.wheel_steer_sample",
-                     "Countersteer sample point (% half track, -out/+in)",
-                     "chase-wheel-steer-sample",
-                     display.wheel_steer_sample_percent,
-                     kMinimumWheelSteerSamplePercent,
-                     kMaximumWheelSteerSamplePercent,
-                     context->wheel_steer_sample_percent);
-        wheel_slider("setting.wheel_steer_full_slip",
-                     "Full-angle slip (deg)", "chase-wheel-steer-full-slip",
-                     display.wheel_steer_full_slip_degrees,
-                     kMinimumWheelSteerFullSlipDegrees,
-                     kMaximumWheelSteerFullSlipDegrees,
-                     context->wheel_steer_full_slip_degrees);
-        wheel_slider("setting.wheel_steer_rate",
-                     "Steer rate (deg/s)", "chase-wheel-steer-rate",
-                     display.wheel_steer_rate_degrees_per_second,
-                     kMinimumWheelSteerRateDegreesPerSecond,
-                     kMaximumWheelSteerRateDegreesPerSecond,
-                     context->wheel_steer_rate_degrees_per_second);
-        wheel_slider("setting.wheel_steer_force_turn",
-                     "Force-turn hold (s)", "chase-wheel-steer-force-turn",
-                     display.wheel_steer_force_turn_delay_seconds,
-                     kMinimumWheelSteerForceTurnDelaySeconds,
-                     kMaximumWheelSteerForceTurnDelaySeconds,
-                     context->wheel_steer_force_turn_delay_seconds);
-      }
-
-      const std::string distance_label = context->localizer.Label(
-          "setting.speed_distance", "Speed / accel distance scale",
-          "chase-speed-distance");
-      float distance_scale =
-          static_cast<float>(display.speed_distance_scale);
-      if (ui->slider_float(
-              ui->user, StringView(distance_label), &distance_scale,
-              static_cast<float>(kMinimumSpeedDistanceScale),
-              static_cast<float>(kMaximumSpeedDistanceScale)) != 0) {
-        context->speed_distance_scale.store(
-            nfs2015_chase::Clamp(static_cast<double>(distance_scale),
-                                 kMinimumSpeedDistanceScale,
-                                 kMaximumSpeedDistanceScale),
-            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string origin_label = context->localizer.Label(
-          "setting.origin_offset", "Car origin offset (cm)",
-          "chase-origin-offset");
-      float origin = static_cast<float>(display.origin_offset_cm);
-      if (ui->slider_float(ui->user, StringView(origin_label), &origin,
-                           static_cast<float>(kMinimumOriginOffsetCm),
-                           static_cast<float>(kMaximumOriginOffsetCm)) != 0) {
-        context->origin_offset_cm.store(
-            nfs2015_chase::Clamp(static_cast<double>(origin),
-                                 kMinimumOriginOffsetCm,
-                                 kMaximumOriginOffsetCm),
-            std::memory_order_release);
-        // This is a continuous vertical trim, not a pose discontinuity. The
-        // old per-frame reset restarted the presenter while the slider was
-        // dragged, which made the view flash on a slope.
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string roll_label = context->localizer.Label(
-          "setting.roll_scale", "Roll strength", "chase-roll-scale");
-      float roll_scale = static_cast<float>(display.roll_scale);
-      if (ui->slider_float(ui->user, StringView(roll_label), &roll_scale,
-                           static_cast<float>(kMinimumRollScale),
-                           static_cast<float>(kMaximumRollScale)) != 0) {
-        context->roll_scale.store(
-            nfs2015_chase::Clamp(static_cast<double>(roll_scale),
-                                 kMinimumRollScale, kMaximumRollScale),
-            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string pitch_label = context->localizer.Label(
-          "setting.pitch_scale", "Braking pitch strength",
-          "chase-pitch-scale");
-      float pitch_scale = static_cast<float>(display.pitch_scale);
-      if (ui->slider_float(ui->user, StringView(pitch_label), &pitch_scale,
-                           static_cast<float>(kMinimumPitchScale),
-                           static_cast<float>(kMaximumPitchScale)) != 0) {
-        context->pitch_scale.store(
-            nfs2015_chase::Clamp(static_cast<double>(pitch_scale),
-                                 kMinimumPitchScale, kMaximumPitchScale),
-            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string shake_label = context->localizer.Label(
-          "setting.shake_scale", "Camera shake strength",
-          "chase-shake-scale");
-      float shake_scale = static_cast<float>(display.shake_scale);
-      if (ui->slider_float(ui->user, StringView(shake_label), &shake_scale,
-                           static_cast<float>(kMinimumShakeScale),
-                           static_cast<float>(kMaximumShakeScale)) != 0) {
-        context->shake_scale.store(
-            nfs2015_chase::Clamp(static_cast<double>(shake_scale),
-                                 kMinimumShakeScale, kMaximumShakeScale),
-            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      ui->separator(ui->user);
-      ui->text(ui->user,
-               StringView(context->localizer.Text(
-                   "setting.burnout", "Burnout close-up (Shift + W)")));
-      const std::string burnout_enabled_label = context->localizer.Label(
-          "setting.burnout_enabled", "Enable burnout close-up",
-          "chase-burnout-enabled");
-      int burnout_enabled = display.burnout_enabled ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(burnout_enabled_label),
-                       &burnout_enabled) != 0) {
-        context->burnout_enabled.store(burnout_enabled != 0,
-                                       std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-      const auto burnout_slider =
-          [&](const char *key, const char *fallback, const char *widget_key,
-              const double value, const double minimum, const double maximum,
-              std::atomic<double> &target) {
-            const std::string label = context->localizer.Label(
-                key, fallback, widget_key);
-            float slider_value = static_cast<float>(value);
-            if (ui->slider_float(
-                    ui->user, StringView(label), &slider_value,
-                    static_cast<float>(minimum),
-                    static_cast<float>(maximum)) != 0) {
-              target.store(
-                  nfs2015_chase::Clamp(static_cast<double>(slider_value),
-                                       minimum, maximum),
-                  std::memory_order_release);
-              MarkSettingsDirty(*context);
-            }
-          };
-      burnout_slider("setting.burnout_fov", "Shot horizontal FOV",
-                     "chase-burnout-fov", display.burnout_fov,
-                     kMinimumBurnoutFov, kMaximumBurnoutFov,
-                     context->burnout_fov);
-      burnout_slider("setting.burnout_shake", "Shot shake strength",
-                     "chase-burnout-shake", display.burnout_shake,
-                     kMinimumBurnoutShake, kMaximumBurnoutShake,
-                     context->burnout_shake);
-      burnout_slider("setting.burnout_entry_delay", "Entry delay (s)",
-                     "chase-burnout-entry-delay",
-                     display.burnout_entry_delay, kMinimumBurnoutEntryDelay,
-                     kMaximumBurnoutEntryDelay, context->burnout_entry_delay);
-      burnout_slider("setting.burnout_entry_time", "Entry time (s)",
-                     "chase-burnout-entry-time", display.burnout_entry_time,
-                     kMinimumBurnoutEntryTime, kMaximumBurnoutEntryTime,
-                     context->burnout_entry_time);
-      burnout_slider("setting.burnout_exit_delay", "Exit delay (s)",
-                     "chase-burnout-exit-delay", display.burnout_exit_delay,
-                     kMinimumBurnoutExitDelay, kMaximumBurnoutExitDelay,
-                     context->burnout_exit_delay);
-      burnout_slider("setting.burnout_exit_time", "Exit time (s)",
-                     "chase-burnout-exit-time", display.burnout_exit_time,
-                     kMinimumBurnoutExitTime, kMaximumBurnoutExitTime,
-                     context->burnout_exit_time);
-      burnout_slider("setting.burnout_launch_exit_time",
-                     "Launch exit time (s)", "chase-burnout-launch-exit-time",
-                     display.burnout_launch_exit_time,
-                     kMinimumBurnoutLaunchExitTime,
-                     kMaximumBurnoutLaunchExitTime,
-                     context->burnout_launch_exit_time);
-      burnout_slider("setting.burnout_entry_speed", "Entry speed (m/s)",
-                     "chase-burnout-entry-speed",
-                     display.burnout_entry_speed, kMinimumBurnoutEntrySpeed,
-                     kMaximumBurnoutEntrySpeed, context->burnout_entry_speed);
-      // Keep the pair valid even when the entry slider is raised.
-      const double entry_speed =
-          context->burnout_entry_speed.load(std::memory_order_acquire);
-      if (context->burnout_hold_speed.load(std::memory_order_acquire) <
-          entry_speed) {
-        context->burnout_hold_speed.store(entry_speed,
-                                          std::memory_order_release);
-      }
-      // Hold speed must not be below entry speed; clamp the slider's lower
-      // bound so the persisted document always passes the validator.
-      const double hold_minimum = (std::max)(
-          kMinimumBurnoutHoldSpeed,
-          context->burnout_entry_speed.load(std::memory_order_acquire));
-      burnout_slider("setting.burnout_hold_speed", "Hold speed (m/s)",
-                     "chase-burnout-hold-speed",
-                     (std::max)(display.burnout_hold_speed, hold_minimum),
-                     hold_minimum, kMaximumBurnoutHoldSpeed,
-                     context->burnout_hold_speed);
-      ui->text(ui->user,
-               StringView(context->localizer.Text(
-                   "setting.burnout_side", "Shot side (latched on entry)")));
-      const auto burnout_side_button = [&](const std::uint32_t mode,
-                                           const char *key,
-                                           const char *fallback) {
-        std::string label;
-        label.append(display.burnout_side_mode == mode ? "> " : "  ");
-        label.append(context->localizer.Text(key, fallback));
-        if (ui->button(ui->user, StringView(label), 0.0F, 0.0F) != 0) {
-          context->burnout_side_mode.store(mode, std::memory_order_release);
-          MarkSettingsDirty(*context);
-        }
-      };
-      burnout_side_button(0, "burnout.side.auto", "Auto / steering");
-      burnout_side_button(1, "burnout.side.left", "Left rear");
-      burnout_side_button(2, "burnout.side.right", "Right rear");
-      burnout_side_button(3, "burnout.side.center", "Centred");
-
-      const std::string roll_drift_label = context->localizer.Label(
-          "setting.roll_only_drift", "Roll only while drifting",
-          "chase-roll-only-drift");
-      int roll_only_drift = display.roll_only_in_drift ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(roll_drift_label),
-                       &roll_only_drift) != 0) {
-        context->roll_only_in_drift.store(roll_only_drift != 0,
-                                          std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string flat_label = context->localizer.Label(
-          "setting.diagnostic_flat_pose",
-          "Diagnostic: position and yaw only", "chase-flat-pose");
-      int flat_pose = display.diagnostic_flat_pose ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(flat_label), &flat_pose) != 0) {
-        context->diagnostic_flat_pose.store(flat_pose != 0,
-                                            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string borrow_label = context->localizer.Label(
-          "setting.borrow_strength",
-          "Lock to the Game's camera (0 = pure model)", "chase-borrow");
-      float borrow = static_cast<float>(display.borrow_strength);
-      if (ui->slider_float(ui->user, StringView(borrow_label), &borrow, 0.0F,
-                           1.0F) != 0) {
-        context->borrow_strength.store(
-            nfs2015_chase::Clamp(static_cast<double>(borrow), 0.0, 1.0),
-            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string zero_lag_label = context->localizer.Label(
-          "setting.diagnostic_zero_lag",
-          "Diagnostic: zero lag, newest tick position", "chase-zero-lag");
-      int zero_lag = display.diagnostic_zero_lag ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(zero_lag_label), &zero_lag) != 0) {
-        context->diagnostic_zero_lag.store(zero_lag != 0,
-                                           std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string skip_position_label = context->localizer.Label(
-          "setting.diagnostic_skip_position",
-          "Diagnostic: keep the Game's position", "chase-skip-position");
-      int skip_position = display.diagnostic_skip_position ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(skip_position_label),
-                       &skip_position) != 0) {
-        context->diagnostic_skip_position.store(skip_position != 0,
-                                                std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string skip_rotation_label = context->localizer.Label(
-          "setting.diagnostic_skip_rotation",
-          "Diagnostic: keep the Game's rotation", "chase-skip-rotation");
-      int skip_rotation = display.diagnostic_skip_rotation ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(skip_rotation_label),
-                       &skip_rotation) != 0) {
-        context->diagnostic_skip_rotation.store(skip_rotation != 0,
-                                                std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
-
-      const std::string aspect_label = context->localizer.Label(
-          "setting.aspect_ratio", "Viewport aspect ratio", "chase-aspect");
-      float aspect = static_cast<float>(display.aspect_ratio);
-      if (ui->slider_float(ui->user, StringView(aspect_label), &aspect,
-                           static_cast<float>(kMinimumAspectRatio),
-                           static_cast<float>(kMaximumAspectRatio)) != 0) {
-        context->aspect_ratio.store(
-            nfs2015_chase::Clamp(static_cast<double>(aspect),
-                                 kMinimumAspectRatio, kMaximumAspectRatio),
-            std::memory_order_release);
-        MarkSettingsDirty(*context);
-      }
+      DrawDynamicsGroup(ui, *context, display);
+      DrawSlopeGroup(ui, *context, display);
+      DrawWheelSteerGroup(ui, *context, display);
+      DrawBurnoutGroup(ui, *context, display);
+      DrawAdvancedGroup(ui, *context, display);
 
       ui->separator(ui->user);
       std::string active_value;
@@ -1348,17 +1463,6 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                  StringView(context->localizer.Text(
                      "hint.reset_done",
                      "Camera re-centered on the car.")));
-      }
-      ui->separator(ui->user);
-      const std::string diagnostics_label = context->localizer.Label(
-          "setting.diagnostics", "Diagnostics", "chase-diagnostics");
-      int diagnostics_open = context->diagnostics_open ? 1 : 0;
-      if (ui->checkbox(ui->user, StringView(diagnostics_label),
-                       &diagnostics_open) != 0) {
-        context->diagnostics_open = diagnostics_open != 0;
-      }
-      if (context->diagnostics_open) {
-        DrawDiagnostics(ui, context->localizer, display);
       }
       ui->separator(ui->user);
       ui->text(ui->user,

@@ -1607,6 +1607,9 @@ struct Context final {
   nfs2015_chase_cam::LatencyWindow camera_cost{};
   double camera_ms_last{};
   double detour_hz{};
+  // Panel state, UI thread only. The advanced block starts closed so the first
+  // view is the seven group choices; the diagnostics panel keeps its own switch.
+  bool advanced_open{};
   bool diagnostics_open{};
 
   // Game writes, Render copies.

@@ -171,4 +171,29 @@ if(NFS2015_CHASE_CAM_BUILD_TESTS)
     endif()
     add_test(NAME nfs2015_settings_persistence_model
              COMMAND nfs2015_settings_persistence_test)
+
+    # PLAN-settings-ui-groups.md task group 3. The panel is drawn against a
+    # recording fake UI service, so the mode rows, the detail visibility and the
+    # widget ids are checked without a host.
+    add_executable(nfs2015_settings_panel_test
+        tests/settings_panel_test.cpp
+        src/ui.cpp
+        src/settings.cpp
+        src/sdk_support.cpp)
+    target_include_directories(nfs2015_settings_panel_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(nfs2015_settings_panel_test
+        PRIVATE Anomaly::sdk)
+    target_compile_definitions(nfs2015_settings_panel_test PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(MSVC)
+        target_compile_options(nfs2015_settings_panel_test PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+    elseif(MINGW)
+        target_link_options(nfs2015_settings_panel_test PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME nfs2015_settings_panel
+             COMMAND nfs2015_settings_panel_test)
 endif()
