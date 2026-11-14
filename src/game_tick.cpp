@@ -380,15 +380,33 @@ double SelectCarYaw(Context &context, const double velocity_yaw,
                     const double velocity_mps, const bool have_velocity,
                     const bool exact_speed,
                     const double signed_speed_kmh) noexcept {
-  // Prefer the Game-tick camera yaw: same clock as the car position, so the
-  // reference cannot alias against a faster writer. The detour's render-thread
+  // The rendered vehicle proxy's chassis forward is the actual car heading.
+  // Prefer it over the game-camera yaw: the camera yaw is a smoothed look
+  // direction that lags the car (and can point at the car rather than down the
+  // road). The camera yaw remains the fallback when the proxy snapshot is
+  // missing, stale, or has no usable horizontal orientation.
+  double body_yaw = 0.0;
+  std::uintptr_t body_proxy = 0;
+  std::int64_t body_timestamp_ns = 0;
+  bool have_body_yaw = ReadRouteBBodyYaw(
+      context.render_x, body_yaw, body_proxy, body_timestamp_ns);
+  if (have_body_yaw) {
+    const std::uintptr_t watched =
+        context.render_x.watched_proxy.load(std::memory_order_relaxed);
+    const std::int64_t age_ns = NowNanoseconds() - body_timestamp_ns;
+    have_body_yaw = body_proxy != 0 && body_proxy == watched &&
+                    age_ns >= 0 &&
+                    age_ns <= kVehicleRenderTransformMaxAgeNs;
+  }
+  // Game-camera fallback: same clock as the car position, so the reference
+  // cannot alias against a faster writer. The detour's render-thread
   // observation is only a fallback for profiles without the ESP tail.
   double camera_yaw = 0.0;
   bool have_camera_yaw = false;
   if (context.camera_yaw_valid) {
     camera_yaw = context.camera_yaw_radians;
     have_camera_yaw = true;
-  } else {
+  } else if (!have_body_yaw) {
     ObservedPose observed{};
     if (ReadObservedPose(context, observed)) {
       const double raw = observed.rotation[1];
@@ -400,11 +418,32 @@ double SelectCarYaw(Context &context, const double velocity_yaw,
     context.diag.camera_yaw_esp_misses.fetch_add(1,
                                                 std::memory_order_relaxed);
   }
-  context.speed_sign_known = exact_speed || have_camera_yaw;
+  context.speed_sign_known =
+      exact_speed || have_body_yaw || have_camera_yaw;
   if (exact_speed) {
     // GetForwardSpeedKmH is signed, so reverse is stateless again exactly as
     // it was in 2.6. The derived-speed hysteresis is only the fallback.
     context.reversing = signed_speed_kmh < -kReverseSpeedKmh;
+  }
+  if (have_body_yaw) {
+    // The body heading already points along the nose in reverse, so the camera
+    // can use it directly instead of deriving travel_yaw + pi from the velocity.
+    // Keep the derived-speed reverse inference for hosts without an exact
+    // speed; compare velocity against the body heading, not the camera yaw.
+    if (!exact_speed && have_velocity &&
+        velocity_mps >= kReverseDecisionMinSpeedMps) {
+      const double alignment =
+          std::cos(WrappedAngle(velocity_yaw - body_yaw));
+      if (context.reversing) {
+        if (alignment > kReverseExitCosine) {
+          context.reversing = false;
+        }
+      } else if (alignment < kReverseEnterCosine) {
+        context.reversing = true;
+      }
+    }
+    NoteYawSource(context, kYawSourceBody);
+    return body_yaw;
   }
   if (!have_camera_yaw) {
     NoteYawSource(context, kYawSourceNoObservation);

@@ -57,6 +57,10 @@ enum YawSource : std::uint32_t {
   kYawSourceObserved = 1,
   kYawSourceVelocity = 2,
   kYawSourceNoObservation = 3,
+  // The rendered vehicle proxy's chassis forward. Unlike the game-camera yaw
+  // above, this is the car's actual heading and does not inherit the camera's
+  // own smoothing or framing offset.
+  kYawSourceBody = 4,
 };
 
 // What produced the speed shown in the panel. Anomaly 2.7.0 has no exact

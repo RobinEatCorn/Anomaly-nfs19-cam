@@ -139,6 +139,12 @@ void ReleaseHook(Context &context) noexcept;
 
 // --- routeb.cpp -----------------------------------------------------------
 [[nodiscard]] double UpdateRenderPitch(Context &context) noexcept;
+// The rendered vehicle proxy's chassis heading (yaw, radians), read under the
+// same seqlock/proxy checks as route B. Returns false when the snapshot is not
+// usable, so the caller can fall back to the game-camera yaw.
+[[nodiscard]] bool ReadRouteBBodyYaw(const RenderXProbe &probe, double &yaw,
+                                     std::uintptr_t &proxy,
+                                     std::int64_t &timestamp_ns) noexcept;
 [[nodiscard]] bool ReadRouteBDirectCar(const RenderXProbe &probe,
                                        double car_cm[3],
                                        double forward[3]) noexcept;

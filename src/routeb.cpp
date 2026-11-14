@@ -139,6 +139,27 @@ bool ReadRouteBSnapshot(const RenderXProbe &probe, double car_cm[3],
   return false;
 }
 
+// The vehicle proxy's local +X is the chassis forward. Its yaw is the car's
+// true heading, not the game camera's look direction. `ReadRouteBSnapshot`
+// already rejects a torn write, a stale proxy and a non-orientation sample;
+// the extra horizontal-length check only rejects a car whose forward is
+// (nearly) vertical, where a heading is undefined.
+bool ReadRouteBBodyYaw(const RenderXProbe &probe, double &yaw,
+                       std::uintptr_t &proxy,
+                       std::int64_t &timestamp_ns) noexcept {
+  double car_cm[3]{};
+  double forward[3]{};
+  if (!ReadRouteBSnapshot(probe, car_cm, forward, proxy, timestamp_ns)) {
+    return false;
+  }
+  const double horizontal = std::hypot(forward[0], forward[1]);
+  if (!(horizontal > 1e-6) || !std::isfinite(horizontal)) {
+    return false;
+  }
+  yaw = std::atan2(forward[1], forward[0]);
+  return std::isfinite(yaw);
+}
+
 // The camera model's pitch source. Same seqlock and proxy checks as route B,
 // but only the body pitch is needed. `atan2` handles both the old horizontally
 // normalised vector and the new 3D one.
