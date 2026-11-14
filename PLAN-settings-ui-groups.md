@@ -67,10 +67,10 @@
   - 验证 UI 服务具备所需控件，且 430px 宽度下布局可行。
   - 建立当前代码的构建/测试基线。
 - **探查行动项**：
-  - [ ] 阅读 `Anomaly/src/plugin/scoped_platform_services.cpp` 中的 `register_schema` / `read` / `write_atomic`：确认 schema 版本 1 下增加可选属性、旧文档读取、`additionalProperties:false` 的行为；确认热重载时同版本但 schema 文档变化是否会产生注册冲突。若存在冲突风险，先记录，不要直接改 schema 版本。
-  - [ ] 估算当前 `PersistSettings` 生成的 JSON 大小，并确认新增 7 个 mode 字段后仍小于 `kMaximumSettingsBytes`（4096）。若接近上限，先汇报，不要擅自改成嵌套大对象。
-  - [ ] 检查 `AnomalyUiServiceV1` 的 `same_line`、`button`、`text`、`separator`、`begin_table` 可选字段，以及托管窗口 `initial_height=0` 时的自动高度行为；确认 430px 宽度下中文模式按钮行是否放得下。
-  - [ ] 运行当前基线构建：`./build-mingw.sh --run-tests`（若环境只能编译不能跑测试，记录原因）。
+  - [x] 阅读 `Anomaly/src/plugin/scoped_platform_services.cpp` 中的 `register_schema` / `read` / `write_atomic`：确认 schema 版本 1 下增加可选属性、旧文档读取、`additionalProperties:false` 的行为；确认热重载时同版本但 schema 文档变化是否会产生注册冲突。若存在冲突风险，先记录，不要直接改 schema 版本。
+  - [x] 估算当前 `PersistSettings` 生成的 JSON 大小，并确认新增 7 个 mode 字段后仍小于 `kMaximumSettingsBytes`（4096）。若接近上限，先汇报，不要擅自改成嵌套大对象。
+  - [x] 检查 `AnomalyUiServiceV1` 的 `same_line`、`button`、`text`、`separator`、`begin_table` 可选字段，以及托管窗口 `initial_height=0` 时的自动高度行为；确认 430px 宽度下中文模式按钮行是否放得下。
+  - [x] 运行当前基线构建：`./build-mingw.sh --run-tests`（若环境只能编译不能跑测试，记录原因）。
 - **⚠️ 探查汇报**：完成此任务组后，请立即向用户输出“探查完毕”，并总结上述四项结论。若任何一项推翻本计划假设，停止并汇报，等待规划 AI 的新方案。
 
 ### 📦 任务组 1：设置模型与三态解析
@@ -82,8 +82,8 @@
   - `src/settings.cpp`：`SetDefaults`（约 451 行）、`RestoreDefaults`（约 534 行）。
   - `src/display.cpp`：`UpdateDisplay`（约 10 行起）。
 - **具体行动项**：
-  - [ ] 定义 `SettingsGroup`（NfsLens / Rig / Springs / Dynamics / Slope / WheelSteer / Burnout）和 `GroupMode`（Default / Custom / Opposite）。
-  - [ ] 定义 `CustomSettings`，只保存“自定义模式下可编辑的值”：
+  - [x] 定义 `SettingsGroup`（NfsLens / Rig / Springs / Dynamics / Slope / WheelSteer / Burnout）和 `GroupMode`（Default / Custom / Opposite）。
+  - [x] 定义 `CustomSettings`，只保存“自定义模式下可编辑的值”：
     - 机位几何：`cameraScale`、`originOffsetCm`、`aspectRatio`、`speedDistanceScale`
     - 弹簧：7 个 spring
     - 动态：`rollScale`、`pitchScale`、`shakeScale`、`rollOnlyInDrift`
@@ -91,12 +91,12 @@
     - 前轮：7 个 wheel-steer 参数
     - 烧胎：8 个参数 + `burnoutSideMode`
     - 不保存 enable 布尔量；enable 由 mode 推导（Custom 强制开启）。
-  - [ ] 在 `Context` 中加入：
+  - [x] 在 `Context` 中加入：
     - `std::atomic<std::uint32_t> group_modes[kSettingsGroupCount]`
     - `CustomSettings custom_settings`
     - 保护 `custom_settings` 的互斥量（或等价的线程安全方案）
-  - [ ] 在 `DisplayState` 中加入 `group_modes[]`，由 `UpdateDisplay` 复制，供 UI 绘制模式按钮。
-  - [ ] 实现 `ApplyGroup(Context&, SettingsGroup)` / `ApplyAllGroups(Context&)`：
+  - [x] 在 `DisplayState` 中加入 `group_modes[]`，由 `UpdateDisplay` 复制，供 UI 绘制模式按钮。
+  - [x] 实现 `ApplyGroup(Context&, SettingsGroup)` / `ApplyAllGroups(Context&)`：
     - 现有 `context.camera_scale`、`context.wheel_steer_enabled` 等原子量继续作为**有效值**，引擎消费者完全不改。
     - `ApplyGroup` 是分组有效值的唯一写入口；UI 不再直接写这些有效值原子量。
     - 解析规则：
@@ -111,10 +111,10 @@
       | 漂移前轮 | enabled=true + 默认参数 | enabled=true + 自定义参数 | enabled=false + 默认参数 |
       | 烧胎特写 | enabled=false + 默认参数 | enabled=true + 自定义参数 + 自定义侧别 | enabled=true + 默认参数 + 默认侧别 |
 
-  - [ ] `SetDefaults` 改为：重置 master/preset/高级项、把 `custom_settings` 重置为默认、所有 mode 置 Default，然后 `ApplyAllGroups`。
-  - [ ] `RestoreDefaults` 继续调用 `SetDefaults`，并设置 `reset_requested` + `MarkSettingsDirty`。
-  - [ ] 注意 `diagnosticFlatPose` 的运行时覆盖逻辑保持不变；它仍在 `presenter.cpp` 中压过动态/FOV/坡度，属于高级诊断。
-  - [ ] 所有对 `custom_settings` 的读写都遵守“先改自定义值，释放锁，再 `ApplyGroup`，最后 `MarkSettingsDirty`”的顺序，避免死锁和半更新。
+  - [x] `SetDefaults` 改为：重置 master/preset/高级项、把 `custom_settings` 重置为默认、所有 mode 置 Default，然后 `ApplyAllGroups`。
+  - [x] `RestoreDefaults` 继续调用 `SetDefaults`，并设置 `reset_requested` + `MarkSettingsDirty`。
+  - [x] 注意 `diagnosticFlatPose` 的运行时覆盖逻辑保持不变；它仍在 `presenter.cpp` 中压过动态/FOV/坡度，属于高级诊断。
+  - [x] 所有对 `custom_settings` 的读写都遵守“先改自定义值，释放锁，再 `ApplyGroup`，最后 `MarkSettingsDirty`”的顺序，避免死锁和半更新。
 - **验收**：编译通过；默认设置与现有默认行为一致；切换 mode 后 `UpdateDisplay` 能看到有效值变化。
 
 ### 📦 任务组 2：持久化与旧配置迁移
