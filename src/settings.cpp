@@ -638,14 +638,11 @@ bool LoadSettings(Context &context) noexcept {
   const JsonHandle root_scope(context.json, root);
   const AnomalyJsonServiceV1 &json = *context.json;
   std::uint32_t kind{};
-  std::size_t field_count{};
-  // The schema has 48 properties today. Keep headroom so a future optional
-  // field does not make existing documents unreadable.
+  // The document only has to be a JSON object; the number of properties is
+  // not limited here. Unknown keys are ignored below, so a document written by
+  // a newer build still loads instead of failing the whole plugin.
   if (json.kind(json.user, root, &kind).code != ANOMALY_STATUS_V1_OK ||
-      kind != ANOMALY_JSON_V1_OBJECT ||
-      json.object_size(json.user, root, &field_count).code !=
-          ANOMALY_STATUS_V1_OK ||
-      field_count < 6 || field_count > 60) {
+      kind != ANOMALY_JSON_V1_OBJECT) {
     return false;
   }
   bool enabled{};
