@@ -482,6 +482,11 @@ void UpdateDisplay(Context &context) noexcept {
           diag.tick_interval_max_ns.load(std::memory_order_relaxed)) *
       1e-6;
   context.display.preset = context.preset.load(std::memory_order_acquire);
+  for (std::size_t index = 0; index < kSettingsGroupCount; ++index) {
+    context.display.group_modes[index] = NormalizeGroupMode(
+        static_cast<SettingsGroup>(index),
+        context.group_modes[index].load(std::memory_order_acquire));
+  }
   context.display.fov_enabled =
       context.fov_enabled.load(std::memory_order_acquire);
   context.display.camera_scale =

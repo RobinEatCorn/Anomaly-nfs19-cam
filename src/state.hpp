@@ -5,6 +5,7 @@
 #pragma once
 
 #include "constants.hpp"
+#include "settings_groups.hpp"
 
 #include "anomaly/sdk/cpp.hpp"
 #include "anomaly/sdk/services/core.h"
@@ -833,6 +834,9 @@ struct DisplayState final {
   bool player_valid{};
   bool fov_enabled{};
   std::uint32_t preset{};
+  // Mode of each settings group (PLAN-settings-ui-groups.md). Normalized on the
+  // copy: the panel never sees a mode its group cannot express.
+  GroupMode group_modes[kSettingsGroupCount]{};
   std::uint8_t speed_source{kSpeedSourceUnavailable};
   bool speed_sign_known{};
   double speed_kmh{};
@@ -1370,6 +1374,14 @@ struct Context final {
   // when the build gate is closed, so the camera never depends on it.
   std::atomic<std::uint32_t> anchor_source{kAnchorSourceDefault};
   std::atomic_bool fov_enabled{true};
+  // Grouped settings (PLAN-settings-ui-groups.md task group 1). The atomics
+  // above remain the effective values every consumer reads; ApplyGroup() is
+  // their only grouped writer. The custom numbers live behind this mutex so a
+  // group apply copies a coherent block and then releases the lock before it
+  // touches any settings atomic.
+  std::mutex custom_settings_mutex;
+  CustomSettings custom_settings;
+  std::atomic<std::uint32_t> group_modes[kSettingsGroupCount]{};
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
   std::atomic<std::uint64_t> settings_changed_at{};

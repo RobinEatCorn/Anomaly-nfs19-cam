@@ -122,4 +122,28 @@ if(NFS2015_CHASE_CAM_BUILD_TESTS)
             -static -static-libgcc -static-libstdc++)
     endif()
     add_test(NAME nfs2015_wheel_steer_model COMMAND nfs2015_wheel_steer_test)
+
+    # PLAN-settings-ui-groups.md task group 1. This fixture links the real
+    # settings translation unit, so the group -> effective value mapping is
+    # exercised without a game process; the host services are only pointers in
+    # Context and none of them is called.
+    add_executable(nfs2015_settings_groups_test
+        tests/settings_groups_test.cpp
+        src/settings.cpp
+        src/sdk_support.cpp)
+    target_include_directories(nfs2015_settings_groups_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(nfs2015_settings_groups_test PRIVATE Anomaly::sdk)
+    target_compile_definitions(nfs2015_settings_groups_test PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(MSVC)
+        target_compile_options(nfs2015_settings_groups_test PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+    elseif(MINGW)
+        target_link_options(nfs2015_settings_groups_test PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME nfs2015_settings_groups_model
+             COMMAND nfs2015_settings_groups_test)
 endif()

@@ -57,6 +57,11 @@ void ANOMALY_CALL Draw(void *plugin_context,
 
 // --- settings.cpp ---------------------------------------------------------
 void MarkSettingsDirty(Context &context) noexcept;
+// Writes one group's effective values into the settings atomics. It is the
+// only grouped writer of those atomics; the caller edits the custom block and
+// then asks for the group to be applied again.
+void ApplyGroup(Context &context, SettingsGroup group) noexcept;
+void ApplyAllGroups(Context &context) noexcept;
 void SetDefaults(Context &context) noexcept;
 void RestoreDefaults(Context &context) noexcept;
 [[nodiscard]] bool PersistSettings(Context &context) noexcept;

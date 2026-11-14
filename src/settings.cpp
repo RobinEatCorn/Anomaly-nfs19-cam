@@ -448,69 +448,190 @@ bool PersistSettings(Context &context) noexcept {
   return true;
 }
 
+// --- grouped settings (PLAN-settings-ui-groups.md task group 1) ------------
+
+void ApplyGroup(Context &context, const SettingsGroup group) noexcept {
+  const auto index = static_cast<std::size_t>(group);
+  // A mode the group cannot express is never applied as-is; it behaves like
+  // Default until the UI or the loader normalizes it.
+  const GroupMode mode = NormalizeGroupMode(
+      group, context.group_modes[index].load(std::memory_order_acquire));
+  CustomSettings custom;
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    custom = context.custom_settings;
+  }
+  const bool use_custom = mode == GroupMode::Custom;
+  switch (group) {
+    case SettingsGroup::NfsLens:
+      // The lens group only owns the FOV switch; it has no custom numbers.
+      context.fov_enabled.store(mode != GroupMode::Opposite,
+                                std::memory_order_release);
+      return;
+    case SettingsGroup::Rig:
+      context.camera_scale.store(
+          use_custom ? custom.camera_scale : kDefaultCameraScale,
+          std::memory_order_release);
+      context.origin_offset_cm.store(
+          use_custom ? custom.origin_offset_cm : kDefaultOriginOffsetCm,
+          std::memory_order_release);
+      context.aspect_ratio.store(
+          use_custom ? custom.aspect_ratio : kDefaultAspectRatio,
+          std::memory_order_release);
+      context.speed_distance_scale.store(
+          use_custom ? custom.speed_distance_scale : kDefaultSpeedDistanceScale,
+          std::memory_order_release);
+      return;
+    case SettingsGroup::Springs:
+      context.position_spring.store(
+          use_custom ? custom.position_spring : kDefaultPositionSpring,
+          std::memory_order_release);
+      context.yaw_spring.store(use_custom ? custom.yaw_spring
+                                          : kDefaultYawSpring,
+                               std::memory_order_release);
+      context.drift_yaw_spring.store(
+          use_custom ? custom.drift_yaw_spring : kDefaultDriftYawSpring,
+          std::memory_order_release);
+      context.look_yaw_spring.store(
+          use_custom ? custom.look_yaw_spring : kDefaultLookYawSpring,
+          std::memory_order_release);
+      context.yaw_return_spring.store(
+          use_custom ? custom.yaw_return_spring : kDefaultYawReturnSpring,
+          std::memory_order_release);
+      context.pitch_spring.store(
+          use_custom ? custom.pitch_spring : kDefaultPitchSpring,
+          std::memory_order_release);
+      context.roll_spring.store(use_custom ? custom.roll_spring
+                                           : kDefaultRollSpring,
+                                std::memory_order_release);
+      return;
+    case SettingsGroup::Dynamics:
+      if (mode == GroupMode::Opposite) {
+        // "Off": no attitude response at all, but the drift gate keeps its
+        // default so a later switch back to Default needs no second change.
+        context.roll_scale.store(0.0, std::memory_order_release);
+        context.pitch_scale.store(0.0, std::memory_order_release);
+        context.shake_scale.store(0.0, std::memory_order_release);
+        context.roll_only_in_drift.store(true, std::memory_order_release);
+      } else {
+        context.roll_scale.store(use_custom ? custom.roll_scale
+                                            : kDefaultRollScale,
+                                 std::memory_order_release);
+        context.pitch_scale.store(use_custom ? custom.pitch_scale
+                                             : kDefaultPitchScale,
+                                  std::memory_order_release);
+        context.shake_scale.store(use_custom ? custom.shake_scale
+                                             : kDefaultShakeScale,
+                                  std::memory_order_release);
+        const bool roll_only =
+            use_custom ? custom.roll_only_in_drift : true;
+        context.roll_only_in_drift.store(roll_only,
+                                         std::memory_order_release);
+      }
+      return;
+    case SettingsGroup::Slope:
+      // Custom and Default both follow the slope; only the strength differs,
+      // and "off" always restores the built-in strength.
+      context.slope_follow.store(mode != GroupMode::Opposite,
+                                 std::memory_order_release);
+      context.slope_strength.store(
+          use_custom ? custom.slope_strength : kDefaultSlopeStrength,
+          std::memory_order_release);
+      return;
+    case SettingsGroup::WheelSteer:
+      // "Off" is the only state that disables the steer; Custom forces it on.
+      context.wheel_steer_enabled.store(
+          mode == GroupMode::Default ? kDefaultWheelSteerEnabled : use_custom,
+          std::memory_order_release);
+      context.wheel_steer_entry_speed_kmh.store(
+          use_custom ? custom.wheel_steer_entry_speed_kmh
+                     : kDefaultWheelSteerEntrySpeedKmh,
+          std::memory_order_release);
+      context.wheel_steer_max_degrees.store(
+          use_custom ? custom.wheel_steer_max_degrees
+                     : kDefaultWheelSteerMaxDegrees,
+          std::memory_order_release);
+      context.wheel_steer_gain.store(
+          use_custom ? custom.wheel_steer_gain : kDefaultWheelSteerGain,
+          std::memory_order_release);
+      context.wheel_steer_full_slip_degrees.store(
+          use_custom ? custom.wheel_steer_full_slip_degrees
+                     : kDefaultWheelSteerFullSlipDegrees,
+          std::memory_order_release);
+      context.wheel_steer_rate_degrees_per_second.store(
+          use_custom ? custom.wheel_steer_rate_degrees_per_second
+                     : kDefaultWheelSteerRateDegreesPerSecond,
+          std::memory_order_release);
+      context.wheel_steer_force_turn_delay_seconds.store(
+          use_custom ? custom.wheel_steer_force_turn_delay_seconds
+                     : kDefaultWheelSteerForceTurnDelaySeconds,
+          std::memory_order_release);
+      context.wheel_steer_sample_percent.store(
+          use_custom ? custom.wheel_steer_sample_percent
+                     : kDefaultWheelSteerSamplePercent,
+          std::memory_order_release);
+      return;
+    case SettingsGroup::Burnout:
+      // The built-in default for the close-up is off, so Default keeps it off
+      // while Custom and Opposite both run it; only Custom uses the custom
+      // numbers and the custom side.
+      context.burnout_enabled.store(mode != GroupMode::Default,
+                                    std::memory_order_release);
+      context.burnout_entry_delay.store(
+          use_custom ? custom.burnout_entry_delay : kDefaultBurnoutEntryDelay,
+          std::memory_order_release);
+      context.burnout_entry_time.store(
+          use_custom ? custom.burnout_entry_time : kDefaultBurnoutEntryTime,
+          std::memory_order_release);
+      context.burnout_exit_delay.store(
+          use_custom ? custom.burnout_exit_delay : kDefaultBurnoutExitDelay,
+          std::memory_order_release);
+      context.burnout_exit_time.store(
+          use_custom ? custom.burnout_exit_time : kDefaultBurnoutExitTime,
+          std::memory_order_release);
+      context.burnout_launch_exit_time.store(
+          use_custom ? custom.burnout_launch_exit_time
+                     : kDefaultBurnoutLaunchExitTime,
+          std::memory_order_release);
+      context.burnout_fov.store(
+          use_custom ? custom.burnout_fov : kDefaultBurnoutFov,
+          std::memory_order_release);
+      context.burnout_shake.store(
+          use_custom ? custom.burnout_shake : kDefaultBurnoutShake,
+          std::memory_order_release);
+      context.burnout_entry_speed.store(
+          use_custom ? custom.burnout_entry_speed : kDefaultBurnoutEntrySpeed,
+          std::memory_order_release);
+      context.burnout_side_mode.store(
+          use_custom ? custom.burnout_side_mode : kDefaultBurnoutSideMode,
+          std::memory_order_release);
+      {
+        // The schema and the model both require the hold speed not to sit
+        // below the entry speed. Clamp on the way out instead of rewriting the
+        // custom pair, so a later entry-speed change can still lower it.
+        const double entry_speed = use_custom ? custom.burnout_entry_speed
+                                              : kDefaultBurnoutEntrySpeed;
+        const double hold_speed = use_custom ? custom.burnout_hold_speed
+                                             : kDefaultBurnoutHoldSpeed;
+        context.burnout_hold_speed.store(
+            hold_speed < entry_speed ? entry_speed : hold_speed,
+            std::memory_order_release);
+      }
+      return;
+  }
+}
+
+void ApplyAllGroups(Context &context) noexcept {
+  for (std::size_t index = 0; index < kSettingsGroupCount; ++index) {
+    ApplyGroup(context, static_cast<SettingsGroup>(index));
+  }
+}
+
 void SetDefaults(Context &context) noexcept {
   context.enabled.store(true, std::memory_order_release);
   context.preset.store(0, std::memory_order_release);
-  context.camera_scale.store(kDefaultCameraScale, std::memory_order_release);
-  context.position_spring.store(kDefaultPositionSpring,
-                                std::memory_order_release);
-  context.yaw_spring.store(kDefaultYawSpring, std::memory_order_release);
-  context.drift_yaw_spring.store(kDefaultDriftYawSpring,
-                                 std::memory_order_release);
-  context.look_yaw_spring.store(kDefaultLookYawSpring,
-                                std::memory_order_release);
-  context.yaw_return_spring.store(kDefaultYawReturnSpring,
-                                  std::memory_order_release);
-  context.pitch_spring.store(kDefaultPitchSpring, std::memory_order_release);
-  context.roll_spring.store(kDefaultRollSpring, std::memory_order_release);
-  context.origin_offset_cm.store(kDefaultOriginOffsetCm,
-                                 std::memory_order_release);
-  context.aspect_ratio.store(kDefaultAspectRatio, std::memory_order_release);
-  context.speed_distance_scale.store(kDefaultSpeedDistanceScale,
-                                     std::memory_order_release);
-  context.roll_scale.store(kDefaultRollScale, std::memory_order_release);
-  context.pitch_scale.store(kDefaultPitchScale, std::memory_order_release);
-  context.shake_scale.store(kDefaultShakeScale, std::memory_order_release);
-  context.burnout_enabled.store(kDefaultBurnoutEnabled,
-                                std::memory_order_release);
-  context.burnout_entry_delay.store(kDefaultBurnoutEntryDelay,
-                                    std::memory_order_release);
-  context.burnout_entry_time.store(kDefaultBurnoutEntryTime,
-                                   std::memory_order_release);
-  context.burnout_exit_delay.store(kDefaultBurnoutExitDelay,
-                                   std::memory_order_release);
-  context.burnout_exit_time.store(kDefaultBurnoutExitTime,
-                                  std::memory_order_release);
-  context.burnout_launch_exit_time.store(kDefaultBurnoutLaunchExitTime,
-                                         std::memory_order_release);
-  context.burnout_fov.store(kDefaultBurnoutFov, std::memory_order_release);
-  context.burnout_shake.store(kDefaultBurnoutShake,
-                              std::memory_order_release);
-  context.burnout_side_mode.store(kDefaultBurnoutSideMode,
-                                  std::memory_order_release);
-  context.burnout_entry_speed.store(kDefaultBurnoutEntrySpeed,
-                                    std::memory_order_release);
-  context.burnout_hold_speed.store(kDefaultBurnoutHoldSpeed,
-                                   std::memory_order_release);
-  context.wheel_steer_enabled.store(kDefaultWheelSteerEnabled,
-                                    std::memory_order_release);
-  context.wheel_steer_entry_speed_kmh.store(
-      kDefaultWheelSteerEntrySpeedKmh, std::memory_order_release);
-  context.wheel_steer_max_degrees.store(kDefaultWheelSteerMaxDegrees,
-                                        std::memory_order_release);
-  context.wheel_steer_gain.store(kDefaultWheelSteerGain,
-                                 std::memory_order_release);
-  context.wheel_steer_full_slip_degrees.store(
-      kDefaultWheelSteerFullSlipDegrees, std::memory_order_release);
-  context.wheel_steer_rate_degrees_per_second.store(
-      kDefaultWheelSteerRateDegreesPerSecond, std::memory_order_release);
-  context.wheel_steer_force_turn_delay_seconds.store(
-      kDefaultWheelSteerForceTurnDelaySeconds, std::memory_order_release);
-  context.wheel_steer_sample_percent.store(
-      kDefaultWheelSteerSamplePercent, std::memory_order_release);
-  context.slope_follow.store(true, std::memory_order_release);
-  context.slope_strength.store(kDefaultSlopeStrength,
-                               std::memory_order_release);
+  // Settings that belong to no group: the slope shape, the diagnostics and the
+  // anchor controls. The grouped values below are written by ApplyAllGroups.
   context.slope_max_gradient_degrees.store(
       kDefaultSlopeMaxGradientDegrees, std::memory_order_release);
   context.slope_up_look_at.store(kDefaultSlopeUpLookAt,
@@ -521,14 +642,22 @@ void SetDefaults(Context &context) noexcept {
                                    std::memory_order_release);
   context.slope_down_rest.store(kDefaultSlopeDownRest,
                                 std::memory_order_release);
-  context.roll_only_in_drift.store(true, std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
   context.diagnostic_zero_lag.store(false, std::memory_order_release);
-  context.borrow_strength.store(1.0, std::memory_order_release);
-  context.anchor_source.store(kAnchorSourceDefault, std::memory_order_release);
   context.diagnostic_skip_position.store(false, std::memory_order_release);
   context.diagnostic_skip_rotation.store(false, std::memory_order_release);
-  context.fov_enabled.store(true, std::memory_order_release);
+  context.borrow_strength.store(1.0, std::memory_order_release);
+  context.anchor_source.store(kAnchorSourceDefault, std::memory_order_release);
+  {
+    std::scoped_lock lock(context.custom_settings_mutex);
+    context.custom_settings = CustomSettings{};
+  }
+  for (std::size_t index = 0; index < kSettingsGroupCount; ++index) {
+    context.group_modes[index].store(
+        static_cast<std::uint32_t>(GroupMode::Default),
+        std::memory_order_release);
+  }
+  ApplyAllGroups(context);
 }
 
 void RestoreDefaults(Context &context) noexcept {
