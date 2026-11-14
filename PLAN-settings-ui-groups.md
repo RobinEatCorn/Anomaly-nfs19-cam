@@ -125,21 +125,21 @@
   - `src/constants.hpp`：`kSettingsSchema`（约 575 行）。
   - `src/settings.cpp`：`PersistSettings`（约 199 行）、`LoadSettings`（约 593 行）。
 - **具体行动项**：
-  - [ ] 在 schema JSON 中追加 7 个可选整数字段：
+  - [x] 在 schema JSON 中追加 7 个可选整数字段：
     - `nfsLensMode`、`rigMode`、`springsMode`、`dynamicsMode`、`slopeMode`、`wheelSteerMode`、`burnoutMode`
     - `minimum:0, maximum:2`
     - `required` 列表保持不变；`additionalProperties:false` 保持不变。
-  - [ ] `PersistSettings` 写入：
+  - [x] `PersistSettings` 写入：
     - 每个组的 mode
     - `custom_settings` 中的自定义值写入现有键（`cameraScale`、`positionSpring`、...、`burnout*`、`wheelSteer*`、`slopeStrength`、`rollScale`、`pitchScale`、`shakeScale`、`rollOnlyInDrift`）
     - 组的 enable 布尔量写**有效值**：`fovEnabled`、`slopeFollow`、`wheelSteerEnabled`、`burnoutEnabled`
     - 高级项保持现有键与写法
-  - [ ] `LoadSettings` 读取：
+  - [x] `LoadSettings` 读取：
     - 先读现有键到局部变量/`custom_settings`
     - 用与现有代码相同的方式做范围校验（复用 `SettingsValid` / `BurnoutSettingsValid` / `WheelSteerSettingsValid`）
     - mode 字段用“可选读取”：缺省或非法时留 sentinel，随后推断
     - 最后写 master/preset/高级原子量、写 `custom_settings`、写 mode、`ApplyAllGroups`
-  - [ ] 旧配置推断规则（mode 缺省时）：
+  - [x] 旧配置推断规则（mode 缺省时）：
     - **NFS 镜头**：`fovEnabled=true` → Default；`false` → Opposite
     - **机位几何**：4 个值都等于默认 → Default；否则 Custom
     - **镜头弹簧**：7 个值都等于默认 → Default；否则 Custom
@@ -148,11 +148,11 @@
     - **漂移前轮**：`wheelSteerEnabled=false` → Opposite；`true` 且 7 个参数都等于默认 → Default；否则 Custom
     - **烧胎特写**：`burnoutEnabled=false` → Default；`true` 且参数都等于默认 → Opposite；否则 Custom
     - 优先级：先看 enable 是否为默认的反向，再看参数是否等于默认。例如旧配置 `burnoutEnabled=false` 但参数是自定义的，应推断为 Default（功能关，参数保留），不要推断成 Custom 把功能打开。
-  - [ ] 记住“现有键的双重含义”并写注释：
+  - [x] 记住“现有键的双重含义”并写注释：
     - 分组参数键保存**自定义值**（即使当前 mode 不是 Custom，也保留，供切回 Custom 使用）。
     - 组 enable 键保存**有效值**（供旧版本/降级读取时行为一致）。
-  - [ ] 确认文档大小仍小于 4096；mode 字段不要用嵌套大对象。
-  - [ ] 手工构造/读取一份旧版 JSON（无 mode 字段）和一份新版 JSON，验证推断与往返持久化不丢值。
+  - [x] 确认文档大小仍小于 4096；mode 字段不要用嵌套大对象。
+  - [x] 手工构造/读取一份旧版 JSON（无 mode 字段）和一份新版 JSON，验证推断与往返持久化不丢值。
 - **验收**：旧配置加载后行为不变；新配置重启后 mode 与自定义值都保留；非法 mode 安全回落到 Default。
 
 ### 📦 任务组 3：UI 分组重构
