@@ -163,26 +163,26 @@
   - `src/ui.cpp`：`Draw`（约 616 行起），当前设置控件从约 670 行到 1200 行。
   - `src/display.cpp`：`UpdateDisplay` 提供 `DisplayState`。
 - **具体行动项**：
-  - [ ] 把设置部分拆成若干 helper（例如 `DrawNfsLensGroup`、`DrawRigGroup`、`DrawSpringsGroup`、`DrawDynamicsGroup`、`DrawSlopeGroup`、`DrawWheelSteerGroup`、`DrawBurnoutGroup`、`DrawAdvancedGroup`），每个 helper 只负责自己组的标题、模式按钮和 Custom 详情。
-  - [ ] 顶部保留：启用相机 checkbox、预设按钮/当前预设、恢复默认值按钮。
-  - [ ] 每组绘制：
+  - [x] 把设置部分拆成若干 helper（例如 `DrawNfsLensGroup`、`DrawRigGroup`、`DrawSpringsGroup`、`DrawDynamicsGroup`、`DrawSlopeGroup`、`DrawWheelSteerGroup`、`DrawBurnoutGroup`、`DrawAdvancedGroup`），每个 helper 只负责自己组的标题、模式按钮和 Custom 详情。
+  - [x] 顶部保留：启用相机 checkbox、预设按钮/当前预设、恢复默认值按钮。
+  - [x] 每组绘制：
     - 组标题
     - 模式按钮行：`默认` / `自定义`（如适用）/ `关闭` 或 `开启`（如适用）
     - 当前选中项用 `> ` 前缀或等价的选中样式
     - 只有 `Custom` 时绘制详情
-  - [ ] **控件 ID 必须唯一**：多个组都有“默认/自定义/关闭”按钮，使用 `Localizer::Label(key, fallback, "group-<name>-mode-default")` 这类稳定 ID，避免 ImGui ID 冲突。滑块继续使用现有的唯一 `widget_key`。
-  - [ ] NFS 镜头组：只画“默认 / 关闭”两态；不画 Custom 详情。
-  - [ ] 机位几何 / 镜头弹簧：只画“默认 / 自定义”；Custom 时画各自滑块。
-  - [ ] 镜头动态：默认 / 自定义 / 关闭；Custom 时画 roll/pitch/shake + rollOnly 复选框；关闭时隐藏详情。
-  - [ ] 坡度跟随：默认 / 自定义 / 关闭；Custom 时只画 strength 滑杆；关闭时隐藏详情。
-  - [ ] 漂移前轮：默认 / 自定义 / 关闭；Custom 时画 7 个滑杆 + 一行摘要提示；完整长说明移到 README。
-  - [ ] 烧胎特写：默认 / 自定义 / 开启；Custom 时画 8 个滑杆 + 侧别按钮；默认/开启时隐藏详情。注意保留“hold speed 不得低于 entry speed”的现有约束。
-  - [ ] 预设为 Cinematic 时隐藏“镜头弹簧”组；切回 NFS 时恢复显示。弹簧的自定义值仍然保留。
-  - [ ] 高级区域：默认折叠；展开后按现有逻辑画锚点来源、`borrowStrength`、4 个诊断开关，以及诊断计数 checkbox/内容。
-  - [ ] 状态行、重置相机按钮、Hook 冲突提示、底部 Z 键提示保持现有逻辑，位置放在分组之后。
-  - [ ] 所有滑杆/复选框修改时：先写 `custom_settings`，再 `ApplyGroup`，再 `MarkSettingsDirty`；不要再直接写有效值原子量。
-  - [ ] 模式按钮点击时：更新 `group_modes`，`ApplyGroup`，`MarkSettingsDirty`；是否 `reset_requested` 由执行 AI 按组的视觉影响自行决定。
-  - [ ] 保持 `try/catch` 边界和窗口 begin/end 配对逻辑不变。
+  - [x] **控件 ID 必须唯一**：多个组都有“默认/自定义/关闭”按钮，使用 `Localizer::Label(key, fallback, "group-<name>-mode-default")` 这类稳定 ID，避免 ImGui ID 冲突。滑块继续使用现有的唯一 `widget_key`。
+  - [x] NFS 镜头组：只画“默认 / 关闭”两态；不画 Custom 详情。
+  - [x] 机位几何 / 镜头弹簧：只画“默认 / 自定义”；Custom 时画各自滑块。
+  - [x] 镜头动态：默认 / 自定义 / 关闭；Custom 时画 roll/pitch/shake + rollOnly 复选框；关闭时隐藏详情。
+  - [x] 坡度跟随：默认 / 自定义 / 关闭；Custom 时只画 strength 滑杆；关闭时隐藏详情。
+  - [x] 漂移前轮：默认 / 自定义 / 关闭；Custom 时画 7 个滑杆 + 一行摘要提示；完整长说明移到 README。
+  - [x] 烧胎特写：默认 / 自定义 / 开启；Custom 时画 8 个滑杆 + 侧别按钮；默认/开启时隐藏详情。注意保留“hold speed 不得低于 entry speed”的现有约束。
+  - [x] 预设为 Cinematic 时隐藏“镜头弹簧”组；切回 NFS 时恢复显示。弹簧的自定义值仍然保留。
+  - [x] 高级区域：默认折叠；展开后按现有逻辑画锚点来源、`borrowStrength`、4 个诊断开关，以及诊断计数 checkbox/内容。
+  - [x] 状态行、重置相机按钮、Hook 冲突提示、底部 Z 键提示保持现有逻辑，位置放在分组之后。
+  - [x] 所有滑杆/复选框修改时：先写 `custom_settings`，再 `ApplyGroup`，再 `MarkSettingsDirty`；不要再直接写有效值原子量。
+  - [x] 模式按钮点击时：更新 `group_modes`，`ApplyGroup`，`MarkSettingsDirty`；是否 `reset_requested` 由执行 AI 按组的视觉影响自行决定。
+  - [x] 保持 `try/catch` 边界和窗口 begin/end 配对逻辑不变。
 - **验收**：默认状态下窗口明显变短；每个组的模式都能隐藏/显示详情；切换模式后下次打开窗口状态保持；没有重复控件 ID 导致的误点击。
 
 ### 📦 任务组 4：本地化与文档
