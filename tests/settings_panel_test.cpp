@@ -327,6 +327,8 @@ void CheckDefaultPanel(Harness &harness) {
          harness.ui.Find("advanced-open") != nullptr &&
              harness.ui.Find("chase-borrow") == nullptr &&
              harness.ui.Find("anchor-0") == nullptr);
+  Expect("a closed group draws no summary line",
+         !harness.ui.HasText("Distance, origin offset"));
   ExpectUniqueWidgetIds(harness.ui);
 }
 
@@ -334,6 +336,8 @@ void CheckRigDetails(Harness &harness) {
   harness.Click("group-rig-mode-1");
   harness.Frame();
   Expect("the rig opens four sliders", harness.ui.Count("slider") == 4);
+  Expect("the rig opens its summary line",
+         harness.ui.HasText("Distance, origin offset"));
   for (const char *id : {"chase-scale", "chase-speed-distance",
                          "chase-origin-offset", "chase-aspect"}) {
     ExpectModeButton(harness.ui, id, true);

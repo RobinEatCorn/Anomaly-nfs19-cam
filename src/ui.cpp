@@ -827,6 +827,10 @@ void DrawRigGroup(const AnomalyUiServiceV1 *ui, Context &context,
   if (!DrawGroupHeader(ui, context, display, SettingsGroup::Rig)) {
     return;
   }
+  ui->text(ui->user,
+           StringView(context.localizer.Text(
+               "setting.rig_summary",
+               "Distance, origin offset, viewport aspect and speed distance.")));
   DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.camera_scale",
                    "Camera distance / height scale", "chase-scale",
                    &CustomSettings::camera_scale, kMinimumCameraScale,
@@ -895,6 +899,11 @@ void DrawDynamicsGroup(const AnomalyUiServiceV1 *ui, Context &context,
   if (!DrawGroupHeader(ui, context, display, SettingsGroup::Dynamics)) {
     return;
   }
+  ui->text(ui->user,
+           StringView(context.localizer.Text(
+               "setting.dynamics_summary",
+               "Roll, braking pitch and shake; Off stops responding to the "
+               "body.")));
   DrawCustomSlider(ui, context, SettingsGroup::Dynamics, "setting.roll_scale",
                    "Roll strength", "chase-roll-scale",
                    &CustomSettings::roll_scale, kMinimumRollScale,
@@ -919,6 +928,11 @@ void DrawSlopeGroup(const AnomalyUiServiceV1 *ui, Context &context,
   if (!DrawGroupHeader(ui, context, display, SettingsGroup::Slope)) {
     return;
   }
+  ui->text(ui->user,
+           StringView(context.localizer.Text(
+               "setting.slope_summary",
+               "How strongly the camera follows the slope; Off follows the "
+               "heading only.")));
   DrawCustomSlider(ui, context, SettingsGroup::Slope,
                    "setting.slope_strength", "Slope composition strength",
                    "chase-slope-strength", &CustomSettings::slope_strength,
@@ -1055,6 +1069,11 @@ void DrawBurnoutGroup(const AnomalyUiServiceV1 *ui, Context &context,
   if (!DrawGroupHeader(ui, context, display, SettingsGroup::Burnout)) {
     return;
   }
+  ui->text(ui->user,
+           StringView(context.localizer.Text(
+               "setting.burnout_summary",
+               "Shot FOV, shake and entry/exit timing; the hold speed never "
+               "drops below the entry speed.")));
   DrawCustomSlider(ui, context, SettingsGroup::Burnout,
                    "setting.burnout_fov", "Shot horizontal FOV",
                    "chase-burnout-fov", &CustomSettings::burnout_fov,
