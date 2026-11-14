@@ -181,7 +181,8 @@ bool ReadVehicleParentAnchor(const AnomalyCoreServiceV1 *core,
     }
   }
   // The renderer transform, not the derived bounds centre. The constant keeps
-  // the old bounds-centre framing; the user's `originOffsetCm` still applies.
+  // the old bounds-centre framing; the presenter converts this body centre to
+  // the model's fixed ground origin with the same constant on the other side.
   for (std::size_t axis = 0; axis < 3; ++axis) {
     parent_cm[axis] =
         proxy_used ? proxy_translation[axis] : translation[axis];

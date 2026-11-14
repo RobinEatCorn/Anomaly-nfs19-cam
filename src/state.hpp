@@ -615,8 +615,8 @@ struct RenderXProbe final {
   std::atomic<double> route_b_model_car_cm[3]{};
   std::atomic<double> route_b_model_eye_cm[3]{};
   std::atomic<double> route_b_model_rotation[3]{};
-  std::atomic<double> route_b_model_camera_scale{1.0};
-  std::atomic<double> route_b_model_origin_offset_cm{};
+  std::atomic<double> route_b_model_distance_scale{1.0};
+  std::atomic<double> route_b_model_height_scale{1.0};
   std::atomic<float> route_b_model_lens{};
   std::atomic<std::uint64_t> prepare_calls{};
   std::atomic<std::uint64_t> prepare_thread_mismatch{};
@@ -759,8 +759,8 @@ struct RenderXProbe final {
       route_b_model_eye_cm[axis].store(0.0, std::memory_order_relaxed);
       route_b_model_rotation[axis].store(0.0, std::memory_order_relaxed);
     }
-    route_b_model_camera_scale.store(1.0, std::memory_order_relaxed);
-    route_b_model_origin_offset_cm.store(0.0, std::memory_order_relaxed);
+    route_b_model_distance_scale.store(1.0, std::memory_order_relaxed);
+    route_b_model_height_scale.store(1.0, std::memory_order_relaxed);
     route_b_model_lens.store(0.0F, std::memory_order_relaxed);
     prepare_calls.store(0, std::memory_order_relaxed);
     prepare_thread_mismatch.store(0, std::memory_order_relaxed);
@@ -909,10 +909,12 @@ struct DisplayState final {
   double fov_horizontal{};
   double camera_distance_m{};
   double camera_distance_raw_m{};
+  // Live eye height above the ground, from the last presenter pose.
+  double camera_height_m{};
   double update_hz{};
   double view_output_hz{};
   double interpolation_ratio{};
-  double camera_scale{kDefaultCameraScale};
+  double camera_distance_setting_m{kDefaultCameraDistanceM};
   double position_spring{kDefaultPositionSpring};
   double yaw_spring{kDefaultYawSpring};
   double drift_yaw_spring{kDefaultDriftYawSpring};
@@ -920,7 +922,7 @@ struct DisplayState final {
   double yaw_return_spring{kDefaultYawReturnSpring};
   double pitch_spring{kDefaultPitchSpring};
   double roll_spring{kDefaultRollSpring};
-  double origin_offset_cm{kDefaultOriginOffsetCm};
+  double camera_height_setting_m{kDefaultCameraHeightM};
   double aspect_ratio{kDefaultAspectRatio};
   double speed_distance_scale{kDefaultSpeedDistanceScale};
   double roll_scale{kDefaultRollScale};
@@ -1289,7 +1291,7 @@ struct Context final {
   // Settings: Render/hotkey write, Game reads.
   std::atomic_bool enabled{true};
   std::atomic<std::uint32_t> preset{0};
-  std::atomic<double> camera_scale{kDefaultCameraScale};
+  std::atomic<double> camera_distance_m{kDefaultCameraDistanceM};
   std::atomic<double> position_spring{kDefaultPositionSpring};
   std::atomic<double> yaw_spring{kDefaultYawSpring};
   std::atomic<double> drift_yaw_spring{kDefaultDriftYawSpring};
@@ -1297,7 +1299,7 @@ struct Context final {
   std::atomic<double> yaw_return_spring{kDefaultYawReturnSpring};
   std::atomic<double> pitch_spring{kDefaultPitchSpring};
   std::atomic<double> roll_spring{kDefaultRollSpring};
-  std::atomic<double> origin_offset_cm{kDefaultOriginOffsetCm};
+  std::atomic<double> camera_height_m{kDefaultCameraHeightM};
   std::atomic<double> aspect_ratio{kDefaultAspectRatio};
   std::atomic<double> speed_distance_scale{kDefaultSpeedDistanceScale};
   std::atomic<double> roll_scale{kDefaultRollScale};
@@ -1475,6 +1477,9 @@ struct Context final {
   std::atomic<double> presenter_anchor[3]{};
   std::atomic<double> presenter_drift{};
   std::atomic<double> presenter_distance_cm{};
+  // Eye height above the model origin (ground) in centimetres, from the last
+  // published pose. The settings panel shows it beside the live distance.
+  std::atomic<double> presenter_height_cm{};
   // Diagnostics for the mixed chase/shot camera. The blend is written under
   // the presenter lock and read by route B / diagnostics.
   std::atomic<double> presenter_burnout_blend{};

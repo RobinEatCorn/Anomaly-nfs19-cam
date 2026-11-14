@@ -20,13 +20,15 @@ void MarkSettingsDirty(Context &context) noexcept {
   context.settings_revision.fetch_add(1, std::memory_order_acq_rel);
 }
 
-bool SettingsValid(const std::uint32_t preset, const double camera_scale,
+bool SettingsValid(const std::uint32_t preset,
+                   const double camera_distance_m,
+                   const double camera_height_m,
                    const double position_spring, const double yaw_spring,
                    const double drift_yaw_spring,
                    const double look_yaw_spring,
                    const double yaw_return_spring,
                    const double pitch_spring, const double roll_spring,
-                   const double origin_offset_cm, const double aspect_ratio,
+                   const double aspect_ratio,
                    const double speed_distance_scale,
                    const double roll_scale,
                    const double pitch_scale,
@@ -37,9 +39,12 @@ bool SettingsValid(const std::uint32_t preset, const double camera_scale,
                    const double slope_up_rest,
                    const double slope_down_look_at,
                    const double slope_down_rest) noexcept {
-  return std::isfinite(camera_scale) &&
-         camera_scale >= kMinimumCameraScale &&
-         camera_scale <= kMaximumCameraScale &&
+  return std::isfinite(camera_distance_m) &&
+         camera_distance_m >= kMinimumCameraDistanceM &&
+         camera_distance_m <= kMaximumCameraDistanceM &&
+         std::isfinite(camera_height_m) &&
+         camera_height_m >= kMinimumCameraHeightM &&
+         camera_height_m <= kMaximumCameraHeightM &&
          std::isfinite(position_spring) &&
          position_spring >= kMinimumPositionSpring &&
          position_spring <= kMaximumPositionSpring &&
@@ -59,9 +64,6 @@ bool SettingsValid(const std::uint32_t preset, const double camera_scale,
          pitch_spring <= kMaximumPitchSpring &&
          std::isfinite(roll_spring) && roll_spring >= kMinimumRollSpring &&
          roll_spring <= kMaximumRollSpring &&
-         std::isfinite(origin_offset_cm) &&
-         origin_offset_cm >= kMinimumOriginOffsetCm &&
-         origin_offset_cm <= kMaximumOriginOffsetCm &&
          std::isfinite(aspect_ratio) && aspect_ratio >= kMinimumAspectRatio &&
          aspect_ratio <= kMaximumAspectRatio &&
          std::isfinite(speed_distance_scale) &&
@@ -214,7 +216,7 @@ bool PersistSettings(Context &context) noexcept {
     std::scoped_lock lock(context.custom_settings_mutex);
     custom = context.custom_settings;
   }
-  const double camera_scale = custom.camera_scale;
+  const double camera_distance_m = custom.camera_distance_m;
   const double position_spring = custom.position_spring;
   const double yaw_spring = custom.yaw_spring;
   const double drift_yaw_spring = custom.drift_yaw_spring;
@@ -222,7 +224,20 @@ bool PersistSettings(Context &context) noexcept {
   const double yaw_return_spring = custom.yaw_return_spring;
   const double pitch_spring = custom.pitch_spring;
   const double roll_spring = custom.roll_spring;
-  const double origin_offset_cm = custom.origin_offset_cm;
+  const double camera_height_m = custom.camera_height_m;
+  // The old scale/origin pair is still written so a build that predates the
+  // metric fields can load the document. It reproduces the NFS reference pose:
+  // eye.z_cm = 70 + originOffsetCm + 149 * cameraScale. Clamp both fields to
+  // the old ranges: a height of 4.6 m at 3.0 m distance would otherwise
+  // derive an origin offset near +301 cm, and the old SettingsValid() would
+  // reject the whole document. Downgrade is approximate at those extremes.
+  const double camera_scale = nfs2015_chase::Clamp(
+      camera_distance_m / kDefaultCameraDistanceM, kMinimumCameraScale,
+      kMaximumCameraScale);
+  const double origin_offset_cm = nfs2015_chase::Clamp(
+      100.0 * camera_height_m - kVehicleAnchorCenterHeightCm -
+          kDefaultCameraHeightM * 100.0 * camera_scale,
+      kMinimumOriginOffsetCm, kMaximumOriginOffsetCm);
   const double aspect_ratio = custom.aspect_ratio;
   const double speed_distance_scale = custom.speed_distance_scale;
   const double roll_scale = custom.roll_scale;
@@ -301,11 +316,11 @@ bool PersistSettings(Context &context) noexcept {
     return static_cast<double>(group_modes[static_cast<std::size_t>(group)]);
   };
   if (!ConfigReady(context.config) ||
-      !SettingsValid(preset, camera_scale, position_spring, yaw_spring,
-                     drift_yaw_spring, look_yaw_spring, yaw_return_spring,
-                     pitch_spring, roll_spring, origin_offset_cm,
-                     aspect_ratio, speed_distance_scale, roll_scale,
-                     pitch_scale, shake_scale, slope_strength,
+      !SettingsValid(preset, camera_distance_m, camera_height_m,
+                     position_spring, yaw_spring, drift_yaw_spring,
+                     look_yaw_spring, yaw_return_spring, pitch_spring,
+                     roll_spring, aspect_ratio, speed_distance_scale,
+                     roll_scale, pitch_scale, shake_scale, slope_strength,
                      slope_max_gradient_degrees, slope_up_look_at,
                      slope_up_rest, slope_down_look_at,
                      slope_down_rest) ||
@@ -336,6 +351,10 @@ bool PersistSettings(Context &context) noexcept {
       AppendText(cursor, end, enabled ? "true" : "false") &&
       AppendText(cursor, end, ",\"preset\":") &&
       AppendNumber(cursor, end, static_cast<double>(preset)) &&
+      AppendText(cursor, end, ",\"cameraDistanceM\":") &&
+      AppendNumber(cursor, end, camera_distance_m) &&
+      AppendText(cursor, end, ",\"cameraHeightM\":") &&
+      AppendNumber(cursor, end, camera_height_m) &&
       AppendText(cursor, end, ",\"cameraScale\":") &&
       AppendNumber(cursor, end, camera_scale) &&
       AppendText(cursor, end, ",\"positionSpring\":") &&
@@ -484,11 +503,11 @@ void ApplyGroup(Context &context, const SettingsGroup group) noexcept {
                                 std::memory_order_release);
       return;
     case SettingsGroup::Rig:
-      context.camera_scale.store(
-          use_custom ? custom.camera_scale : kDefaultCameraScale,
+      context.camera_distance_m.store(
+          use_custom ? custom.camera_distance_m : kDefaultCameraDistanceM,
           std::memory_order_release);
-      context.origin_offset_cm.store(
-          use_custom ? custom.origin_offset_cm : kDefaultOriginOffsetCm,
+      context.camera_height_m.store(
+          use_custom ? custom.camera_height_m : kDefaultCameraHeightM,
           std::memory_order_release);
       context.aspect_ratio.store(
           use_custom ? custom.aspect_ratio : kDefaultAspectRatio,
@@ -825,7 +844,9 @@ bool LoadSettings(Context &context) noexcept {
   bool enabled{};
   bool fov_enabled{};
   double preset_number{};
-  double camera_scale{};
+  double camera_scale = kDefaultCameraScale;
+  double camera_distance_m = kDefaultCameraDistanceM;
+  double camera_height_m = kDefaultCameraHeightM;
   double position_spring = kDefaultPositionSpring;
   double yaw_spring = kDefaultYawSpring;
   double drift_yaw_spring = kDefaultDriftYawSpring;
@@ -833,16 +854,47 @@ bool LoadSettings(Context &context) noexcept {
   double yaw_return_spring = kDefaultYawReturnSpring;
   double pitch_spring = kDefaultPitchSpring;
   double roll_spring = kDefaultRollSpring;
-  double origin_offset_cm{};
+  double origin_offset_cm = kDefaultOriginOffsetCm;
   double aspect_ratio{};
   if (!JsonObjectBoolean(json, root, "enabled", enabled) ||
       !JsonObjectNumber(json, root, "preset", preset_number) ||
-      !JsonObjectNumber(json, root, "cameraScale", camera_scale) ||
-      !JsonObjectNumber(json, root, "originOffsetCm", origin_offset_cm) ||
       !JsonObjectNumber(json, root, "aspectRatio", aspect_ratio) ||
       !JsonObjectBoolean(json, root, "fovEnabled", fov_enabled)) {
     return false;
   }
+  // The old pair is optional on read: a new document always carries it for
+  // downgrade, but a hand-written or future document may only have the metric
+  // fields. Missing values fall back to the old defaults before derivation.
+  static_cast<void>(
+      JsonObjectNumber(json, root, "cameraScale", camera_scale));
+  static_cast<void>(
+      JsonObjectNumber(json, root, "originOffsetCm", origin_offset_cm));
+  if (!std::isfinite(camera_scale)) camera_scale = kDefaultCameraScale;
+  if (!std::isfinite(origin_offset_cm)) {
+    origin_offset_cm = kDefaultOriginOffsetCm;
+  }
+  const bool has_distance =
+      JsonObjectNumber(json, root, "cameraDistanceM", camera_distance_m) &&
+      std::isfinite(camera_distance_m);
+  const bool has_height =
+      JsonObjectNumber(json, root, "cameraHeightM", camera_height_m) &&
+      std::isfinite(camera_height_m);
+  // Old value -> metric value. The scale-only case is exact (both factors equal
+  // the old scale); an old vertical trim keeps its static height but now
+  // scales the vertical dynamics with that height, which is the intended new
+  // behaviour.
+  if (!has_distance) {
+    camera_distance_m = kDefaultCameraDistanceM * camera_scale;
+  }
+  if (!has_height) {
+    camera_height_m = kDefaultCameraHeightM * camera_scale +
+                      (origin_offset_cm + kVehicleAnchorCenterHeightCm) /
+                          100.0;
+  }
+  camera_distance_m = nfs2015_chase::Clamp(
+      camera_distance_m, kMinimumCameraDistanceM, kMaximumCameraDistanceM);
+  camera_height_m = nfs2015_chase::Clamp(
+      camera_height_m, kMinimumCameraHeightM, kMaximumCameraHeightM);
   if (!std::isfinite(preset_number) || preset_number < 0.0 ||
       preset_number > 1.0 || std::floor(preset_number) != preset_number) {
     return false;
@@ -1004,11 +1056,11 @@ bool LoadSettings(Context &context) noexcept {
   if (burnout_hold_speed < burnout_entry_speed) {
     burnout_hold_speed = burnout_entry_speed;
   }
-  if (!SettingsValid(preset, camera_scale, position_spring, yaw_spring,
-                     drift_yaw_spring, look_yaw_spring, yaw_return_spring,
-                     pitch_spring, roll_spring, origin_offset_cm,
-                     aspect_ratio, speed_distance_scale, roll_scale,
-                     pitch_scale, shake_scale, slope_strength,
+  if (!SettingsValid(preset, camera_distance_m, camera_height_m,
+                     position_spring, yaw_spring, drift_yaw_spring,
+                     look_yaw_spring, yaw_return_spring, pitch_spring,
+                     roll_spring, aspect_ratio, speed_distance_scale,
+                     roll_scale, pitch_scale, shake_scale, slope_strength,
                      slope_max_gradient_degrees, slope_up_look_at,
                      slope_up_rest, slope_down_look_at,
                      slope_down_rest) ||
@@ -1032,8 +1084,8 @@ bool LoadSettings(Context &context) noexcept {
   // must restore. Everything grouped is written through ApplyAllGroups() at the
   // end, so the effective values always follow from the modes just stored.
   CustomSettings custom;
-  custom.camera_scale = camera_scale;
-  custom.origin_offset_cm = origin_offset_cm;
+  custom.camera_distance_m = camera_distance_m;
+  custom.camera_height_m = camera_height_m;
   custom.aspect_ratio = aspect_ratio;
   custom.speed_distance_scale = speed_distance_scale;
   custom.position_spring = position_spring;

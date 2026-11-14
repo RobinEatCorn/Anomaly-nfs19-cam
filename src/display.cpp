@@ -489,8 +489,8 @@ void UpdateDisplay(Context &context) noexcept {
   }
   context.display.fov_enabled =
       context.fov_enabled.load(std::memory_order_acquire);
-  context.display.camera_scale =
-      context.camera_scale.load(std::memory_order_acquire);
+  context.display.camera_distance_setting_m =
+      context.camera_distance_m.load(std::memory_order_acquire);
   context.display.position_spring =
       context.position_spring.load(std::memory_order_acquire);
   context.display.yaw_spring =
@@ -505,8 +505,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.pitch_spring.load(std::memory_order_acquire);
   context.display.roll_spring =
       context.roll_spring.load(std::memory_order_acquire);
-  context.display.origin_offset_cm =
-      context.origin_offset_cm.load(std::memory_order_acquire);
+  context.display.camera_height_setting_m =
+      context.camera_height_m.load(std::memory_order_acquire);
   context.display.aspect_ratio =
       context.aspect_ratio.load(std::memory_order_acquire);
   context.display.speed_distance_scale =

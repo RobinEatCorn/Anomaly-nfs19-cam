@@ -15,6 +15,7 @@
 // off-axis, without copying the reference's unrotated-offset numbers.
 
 #include "../car_sample.hpp"
+#include "../camera_rig.hpp"
 #include "../chase_cam.hpp"
 #include "../latency_window.hpp"
 #include "../view_blend.hpp"
@@ -25,6 +26,7 @@
 
 namespace {
 
+using nfs2015_chase::CameraRigFactorsFor;
 using nfs2015_chase::CarBasis;
 using nfs2015_chase::CarLocalToWorld;
 using nfs2015_chase::CarState;
@@ -186,6 +188,32 @@ void CheckDrift(const char* name, const Config& config,
              kToleranceFov);
 }
 
+void CheckCameraRigFactors() {
+  const auto nfs_default =
+      CameraRigFactorsFor({-5.10, 0.0, 1.49}, 5.10, 1.49);
+  ExpectNear("rig factor default distance", nfs_default.distance, 1.0, 1e-12);
+  ExpectNear("rig factor default height", nfs_default.height, 1.0, 1e-12);
+
+  const auto nfs_custom =
+      CameraRigFactorsFor({-5.10, 0.0, 1.49}, 6.12, 2.98);
+  ExpectNear("rig factor distance", nfs_custom.distance, 1.2, 1e-12);
+  ExpectNear("rig factor height", nfs_custom.height, 2.0, 1e-12);
+  ExpectNear("rig static distance", -5.10 * nfs_custom.distance, -6.12,
+             1e-12);
+  ExpectNear("rig static height", 1.49 * nfs_custom.height, 2.98, 1e-12);
+
+  const auto cinematic =
+      CameraRigFactorsFor({-5.20, 0.0, 1.55}, 5.10, 1.49);
+  ExpectNear("cinematic factor distance", cinematic.distance, 5.10 / 5.20,
+             1e-12);
+  ExpectNear("cinematic factor height", cinematic.height, 1.49 / 1.55,
+             1e-12);
+  ExpectNear("cinematic static distance", -5.20 * cinematic.distance, -5.10,
+             1e-12);
+  ExpectNear("cinematic static height", 1.55 * cinematic.height, 1.49,
+             1e-12);
+}
+
 }  // namespace
 
 int main() {
@@ -198,6 +226,8 @@ int main() {
   Expect("cinematic roll gate defaults on",
          CinematicPreset().roll_only_in_drift);
   Expect("game roll gate defaults on", GamePreset().roll_only_in_drift);
+
+  CheckCameraRigFactors();
 
   // §6.3 drift rows, with the local-offset rotation corrected. The camera
   // stays close, drops, hangs to one side, banks, widens the lens, and leaves

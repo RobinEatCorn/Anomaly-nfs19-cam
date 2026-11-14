@@ -34,7 +34,8 @@ using nfs2015_chase_cam::detail::Context;
 using nfs2015_chase_cam::detail::CustomSettings;
 using nfs2015_chase_cam::detail::Draw;
 using nfs2015_chase_cam::detail::GroupMode;
-using nfs2015_chase_cam::detail::kDefaultCameraScale;
+using nfs2015_chase_cam::detail::kDefaultCameraDistanceM;
+using nfs2015_chase_cam::detail::kDefaultCameraHeightM;
 using nfs2015_chase_cam::detail::kSettingsGroupCount;
 using nfs2015_chase_cam::detail::NormalizeGroupMode;
 using nfs2015_chase_cam::detail::SettingsGroup;
@@ -328,7 +329,7 @@ void CheckDefaultPanel(Harness &harness) {
              harness.ui.Find("chase-borrow") == nullptr &&
              harness.ui.Find("anchor-0") == nullptr);
   Expect("a closed group draws no summary line",
-         !harness.ui.HasText("Distance, origin offset"));
+         !harness.ui.HasText("Distance, height"));
   ExpectUniqueWidgetIds(harness.ui);
 }
 
@@ -337,39 +338,59 @@ void CheckRigDetails(Harness &harness) {
   harness.Frame();
   Expect("the rig opens four sliders", harness.ui.Count("slider") == 4);
   Expect("the rig opens its summary line",
-         harness.ui.HasText("Distance, origin offset"));
-  for (const char *id : {"chase-scale", "chase-speed-distance",
-                         "chase-origin-offset", "chase-aspect"}) {
+         harness.ui.HasText("Distance, height"));
+  for (const char *id : {"chase-camera-distance", "chase-camera-height",
+                         "chase-speed-distance", "chase-aspect"}) {
     ExpectModeButton(harness.ui, id, true);
   }
   ExpectUniqueWidgetIds(harness.ui);
 
-  harness.MoveSlider("chase-scale", 1.4F);
+  harness.MoveSlider("chase-camera-distance", 6.4F);
   harness.Frame();
-  ExpectNear("the edit lands in the custom block",
-             harness.Custom().camera_scale, 1.4);
-  ExpectNear("the edit lands in the effective value",
-             harness.context.camera_scale.load(), 1.4);
+  ExpectNear("the distance edit lands in the custom block",
+             harness.Custom().camera_distance_m, 6.4);
+  ExpectNear("the distance edit lands in the effective value",
+             harness.context.camera_distance_m.load(), 6.4);
+  ExpectNear("the distance edit leaves the static height alone",
+             harness.context.camera_height_m.load(), kDefaultCameraHeightM);
   Expect("the group stays on Custom",
          harness.Mode(SettingsGroup::Rig) == GroupMode::Custom);
 
-  const Widget *slider = harness.ui.Find("chase-scale");
-  ExpectNear("the slider shows the custom value",
-             slider != nullptr ? static_cast<double>(slider->value) : 0.0, 1.4);
+  harness.MoveSlider("chase-camera-height", 2.2F);
+  harness.Frame();
+  ExpectNear("the height edit lands in the custom block",
+             harness.Custom().camera_height_m, 2.2);
+  ExpectNear("the height edit lands in the effective value",
+             harness.context.camera_height_m.load(), 2.2);
+  ExpectNear("the height edit leaves the static distance alone",
+             harness.context.camera_distance_m.load(), 6.4);
+
+  const Widget *slider = harness.ui.Find("chase-camera-distance");
+  ExpectNear("the distance slider shows the custom value",
+             slider != nullptr ? static_cast<double>(slider->value) : 0.0, 6.4);
 
   harness.Click("group-rig-mode-0");
   harness.Frame();
   Expect("Default closes the rig details", harness.ui.Count("slider") == 0);
-  ExpectNear("Default restores the built-in geometry",
-             harness.context.camera_scale.load(), kDefaultCameraScale);
-  ExpectNear("Default keeps the custom geometry as the custom value",
-             harness.Custom().camera_scale, 1.4);
+  ExpectNear("Default restores the built-in distance",
+             harness.context.camera_distance_m.load(),
+             kDefaultCameraDistanceM);
+  ExpectNear("Default restores the built-in height",
+             harness.context.camera_height_m.load(),
+             kDefaultCameraHeightM);
+  ExpectNear("Default keeps the custom distance as the custom value",
+             harness.Custom().camera_distance_m, 6.4);
+  ExpectNear("Default keeps the custom height as the custom value",
+             harness.Custom().camera_height_m, 2.2);
 
   harness.Click("group-rig-mode-1");
   harness.Frame();
-  slider = harness.ui.Find("chase-scale");
-  ExpectNear("switching back restores the tuned slider",
-             slider != nullptr ? static_cast<double>(slider->value) : 0.0, 1.4);
+  slider = harness.ui.Find("chase-camera-distance");
+  ExpectNear("switching back restores the tuned distance slider",
+             slider != nullptr ? static_cast<double>(slider->value) : 0.0, 6.4);
+  slider = harness.ui.Find("chase-camera-height");
+  ExpectNear("switching back restores the tuned height slider",
+             slider != nullptr ? static_cast<double>(slider->value) : 0.0, 2.2);
 }
 
 void CheckOppositeStates(Harness &harness) {
@@ -503,22 +524,28 @@ void CheckAdvancedBlock(Harness &harness) {
 void CheckRestoreDefaults(Harness &harness) {
   harness.Frame();
   Expect("two groups are open before restoring",
-         harness.ui.Find("chase-scale") != nullptr &&
+         harness.ui.Find("chase-camera-distance") != nullptr &&
              harness.ui.Find("chase-spring-pitch") != nullptr);
   harness.Click("Restore defaults");
   harness.Frame();
   Expect("restore defaults closes every group",
-         harness.ui.Find("chase-scale") == nullptr &&
+         harness.ui.Find("chase-camera-distance") == nullptr &&
              harness.ui.Find("chase-spring-pitch") == nullptr &&
              harness.ui.Find("chase-roll-scale") == nullptr);
   for (std::size_t index = 0; index < kSettingsGroupCount; ++index) {
     Expect("restore defaults returns every group to Default",
            harness.context.group_modes[index].load() == 0);
   }
-  ExpectNear("restore defaults returns the geometry",
-             harness.context.camera_scale.load(), kDefaultCameraScale);
-  ExpectNear("restore defaults clears the custom numbers",
-             harness.Custom().camera_scale, kDefaultCameraScale);
+  ExpectNear("restore defaults returns the distance",
+             harness.context.camera_distance_m.load(),
+             kDefaultCameraDistanceM);
+  ExpectNear("restore defaults returns the height",
+             harness.context.camera_height_m.load(),
+             kDefaultCameraHeightM);
+  ExpectNear("restore defaults clears the custom distance",
+             harness.Custom().camera_distance_m, kDefaultCameraDistanceM);
+  ExpectNear("restore defaults clears the custom height",
+             harness.Custom().camera_height_m, kDefaultCameraHeightM);
 }
 
 }  // namespace

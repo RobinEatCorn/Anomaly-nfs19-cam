@@ -51,7 +51,11 @@ struct CarSample final {
   double anchor_cm[3]{};
   // Model origin used by the camera-scale transform, cm.
   double origin_cm[3]{};
-  double camera_scale{1.0};
+  // User-facing rig geometry in metres. The presenter turns these into per-axis
+  // factors against the active preset's rest pose; the game-tick copy is the
+  // static value, and the live eye height is reported separately.
+  double camera_distance_m{5.10};
+  double camera_height_m{1.49};
   double aspect_ratio{16.0 / 9.0};
   bool fov_enabled{};
   bool driving{};
@@ -94,7 +98,10 @@ struct CarSample final {
     result.origin_cm[axis] =
         Lerp(from.origin_cm[axis], to.origin_cm[axis], t);
   }
-  result.camera_scale = Lerp(from.camera_scale, to.camera_scale, t);
+  result.camera_distance_m =
+      Lerp(from.camera_distance_m, to.camera_distance_m, t);
+  result.camera_height_m =
+      Lerp(from.camera_height_m, to.camera_height_m, t);
   // Burnout facts are event flags plus a smoothed strength. A boolean halfway
   // between true and false is meaningless, so active/left/right come from the
   // newer sample; the continuous values are safe to interpolate.

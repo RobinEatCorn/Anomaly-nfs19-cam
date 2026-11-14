@@ -467,6 +467,14 @@ void CheckDefaultsDocument(FakeHost &host) {
     const std::string needle = std::string(",\"") + key + "\":0";
     Expect(label.c_str(), host.document.find(needle) != std::string::npos);
   }
+  Expect("the document stores the metric distance",
+         host.document.find("\"cameraDistanceM\":") != std::string::npos);
+  Expect("the document stores the metric height",
+         host.document.find("\"cameraHeightM\":") != std::string::npos);
+  Expect("the document keeps the legacy scale for downgrade",
+         host.document.find("\"cameraScale\":") != std::string::npos);
+  Expect("the document keeps the legacy offset for downgrade",
+         host.document.find("\"originOffsetCm\":") != std::string::npos);
 
   Context loaded;
   Bind(loaded, host);
@@ -475,9 +483,12 @@ void CheckDefaultsDocument(FakeHost &host) {
     Expect("a default document loads every group as Default",
            loaded.group_modes[index].load() == 0);
   }
-  ExpectNear("loaded defaults keep the camera scale",
-             loaded.camera_scale.load(),
-             nfs2015_chase_cam::detail::kDefaultCameraScale);
+  ExpectNear("loaded defaults keep the camera distance",
+             loaded.camera_distance_m.load(),
+             nfs2015_chase_cam::detail::kDefaultCameraDistanceM);
+  ExpectNear("loaded defaults keep the camera height",
+             loaded.camera_height_m.load(),
+             nfs2015_chase_cam::detail::kDefaultCameraHeightM);
   Expect("loaded defaults keep the burnout off",
          !loaded.burnout_enabled.load());
 }
@@ -487,7 +498,8 @@ void CheckRoundTrip(FakeHost &host) {
   Bind(context, host);
   SetDefaults(context);
   EditCustom(context, [](CustomSettings &custom) {
-    custom.camera_scale = 1.25;
+    custom.camera_distance_m = 6.4;
+    custom.camera_height_m = 2.2;
     custom.position_spring = 12.5;
     custom.roll_spring = 80.0;
     custom.roll_scale = 0.5;
@@ -526,7 +538,9 @@ void CheckRoundTrip(FakeHost &host) {
          GroupIs(loaded, SettingsGroup::Burnout, GroupMode::Custom));
 
   const CustomSettings custom = CustomCopy(loaded);
-  ExpectNear("the custom camera scale survives", custom.camera_scale, 1.25);
+  ExpectNear("the custom camera distance survives", custom.camera_distance_m,
+             6.4);
+  ExpectNear("the custom camera height survives", custom.camera_height_m, 2.2);
   ExpectNear("the custom position spring survives",
              custom.position_spring, 12.5);
   ExpectNear("the custom roll spring survives", custom.roll_spring, 80.0);
@@ -540,8 +554,10 @@ void CheckRoundTrip(FakeHost &host) {
   ExpectNear("the custom burnout FOV survives", custom.burnout_fov, 62.0);
   Expect("the custom burnout side survives", custom.burnout_side_mode == 2);
 
-  ExpectNear("the effective camera scale follows the custom value",
-             loaded.camera_scale.load(), 1.25);
+  ExpectNear("the effective camera distance follows the custom value",
+             loaded.camera_distance_m.load(), 6.4);
+  ExpectNear("the effective camera height follows the custom value",
+             loaded.camera_height_m.load(), 2.2);
   ExpectNear("the effective roll spring follows the custom value",
              loaded.roll_spring.load(), 80.0);
   ExpectNear("the effective slope strength follows the custom value",
@@ -577,8 +593,12 @@ void CheckLegacyInference(FakeHost &host) {
   Context legacy;
   Bind(legacy, legacy_host);
   Expect("load a document without mode keys", LoadSettings(legacy));
-  ExpectNear("legacy camera scale matches the tuned document",
-             legacy.camera_scale.load(), reference.camera_scale.load());
+  ExpectNear("legacy camera distance matches the tuned document",
+             legacy.camera_distance_m.load(),
+             reference.camera_distance_m.load());
+  ExpectNear("legacy camera height matches the tuned document",
+             legacy.camera_height_m.load(),
+             reference.camera_height_m.load());
   ExpectNear("legacy roll spring matches the tuned document",
              legacy.roll_spring.load(), reference.roll_spring.load());
   ExpectNear("legacy roll scale matches the tuned document",
@@ -599,6 +619,119 @@ void CheckLegacyInference(FakeHost &host) {
            legacy.group_modes[index].load() ==
                reference.group_modes[index].load());
   }
+}
+
+void CheckLegacyGeometryMigration(FakeHost &tuned_host) {
+  FakeHost defaults_host;
+  {
+    Context defaults;
+    Bind(defaults, defaults_host);
+    SetDefaults(defaults);
+    Expect("persist a default geometry document",
+           PersistSettings(defaults));
+  }
+
+  const auto check = [&](const char *name, const double scale,
+                         const double offset, const double expected_distance,
+                         const double expected_height,
+                         const GroupMode expected_mode) {
+    FakeHost legacy;
+    const std::string parse_label = std::string(name) + ": parse";
+    Expect(parse_label.c_str(),
+           legacy.ParseDocument(WithoutModeKeys(defaults_host.document)));
+    const std::string remove_label = std::string(name) + ": remove new keys";
+    Expect(remove_label.c_str(), legacy.RemoveKey("cameraDistanceM"));
+    Expect(remove_label.c_str(), legacy.RemoveKey("cameraHeightM"));
+    const std::string set_label = std::string(name) + ": set old keys";
+    Expect(set_label.c_str(), legacy.SetNumber("cameraScale", scale));
+    Expect(set_label.c_str(), legacy.SetNumber("originOffsetCm", offset));
+    legacy.document = legacy.SerializeDocument();
+    legacy.has_document = true;
+
+    Context loaded;
+    Bind(loaded, legacy);
+    const std::string load_label = std::string(name) + ": load";
+    Expect(load_label.c_str(), LoadSettings(loaded));
+    const std::string distance_label = std::string(name) + ": distance";
+    ExpectNear(distance_label.c_str(), loaded.camera_distance_m.load(),
+               expected_distance, 1e-6);
+    const std::string height_label = std::string(name) + ": height";
+    ExpectNear(height_label.c_str(), loaded.camera_height_m.load(),
+               expected_height, 1e-6);
+    const std::string mode_label = std::string(name) + ": rig mode";
+    Expect(mode_label.c_str(),
+           GroupIs(loaded, SettingsGroup::Rig, expected_mode));
+    if (expected_mode == GroupMode::Custom) {
+      const std::string custom_label =
+          std::string(name) + ": custom values";
+      ExpectNear(custom_label.c_str(),
+                 CustomCopy(loaded).camera_distance_m, expected_distance,
+                 1e-9);
+    }
+  };
+
+  check("legacy default", 1.0, -70.0, 5.10, 1.49, GroupMode::Default);
+  check("legacy scale-only", 0.8, -70.0, 4.08, 1.192, GroupMode::Custom);
+  check("legacy offset-only", 1.0, 0.0, 5.10, 2.19, GroupMode::Custom);
+  check("legacy low offset", 1.0, -150.0, 5.10, 0.69, GroupMode::Custom);
+
+  // A document that only carries the metric fields must still load: the old
+  // pair is optional on read, even though the schema still requires it for
+  // writes (the new build always writes both).
+  FakeHost new_only;
+  Expect("parse the tuned document",
+         new_only.ParseDocument(tuned_host.document));
+  Expect("remove the legacy scale", new_only.RemoveKey("cameraScale"));
+  Expect("remove the legacy offset", new_only.RemoveKey("originOffsetCm"));
+  new_only.document = new_only.SerializeDocument();
+  new_only.has_document = true;
+  Context loaded_new;
+  Bind(loaded_new, new_only);
+  Expect("a metric-only document loads", LoadSettings(loaded_new));
+  ExpectNear("the metric-only distance survives",
+             loaded_new.camera_distance_m.load(), 6.4, 1e-6);
+  ExpectNear("the metric-only height survives",
+             loaded_new.camera_height_m.load(), 2.2, 1e-6);
+}
+
+void CheckDowngradeClamp() {
+  FakeHost host;
+  Context context;
+  Bind(context, host);
+  SetDefaults(context);
+  EditCustom(context, [](CustomSettings &custom) {
+    custom.camera_distance_m = 8.2;
+    custom.camera_height_m = 4.6;
+  });
+  SetMode(context, SettingsGroup::Rig, GroupMode::Custom);
+  Expect("persist the extreme geometry", PersistSettings(context));
+
+  FakeHost editor;
+  Expect("parse the extreme document", editor.ParseDocument(host.document));
+  const std::uint64_t scale_child = editor.Child("cameraScale");
+  const std::uint64_t offset_child = editor.Child("originOffsetCm");
+  Expect("the document keeps the legacy scale", scale_child != 0);
+  Expect("the document keeps the legacy offset", offset_child != 0);
+  const double scale = editor.nodes.at(scale_child).number;
+  const double offset = editor.nodes.at(offset_child).number;
+  Expect("the legacy scale is inside the old schema",
+         scale >= nfs2015_chase_cam::detail::kMinimumCameraScale &&
+             scale <= nfs2015_chase_cam::detail::kMaximumCameraScale);
+  Expect("the legacy offset is inside the old schema",
+         offset >= nfs2015_chase_cam::detail::kMinimumOriginOffsetCm &&
+             offset <= nfs2015_chase_cam::detail::kMaximumOriginOffsetCm);
+  ExpectNear("the legacy scale is clamped", scale,
+             nfs2015_chase_cam::detail::kMaximumCameraScale);
+  ExpectNear("the legacy offset is clamped", offset,
+             nfs2015_chase_cam::detail::kMaximumOriginOffsetCm);
+
+  Context loaded;
+  Bind(loaded, host);
+  Expect("the extreme document loads", LoadSettings(loaded));
+  ExpectNear("the extreme distance survives",
+             loaded.camera_distance_m.load(), 8.2, 1e-6);
+  ExpectNear("the extreme height survives",
+             loaded.camera_height_m.load(), 4.6, 1e-6);
 }
 
 void CheckOffWins() {
@@ -673,7 +806,8 @@ void CheckBadModes(FakeHost &tuned_host) {
   FakeHost broken;
   Expect("parse the tuned document", broken.ParseDocument(tuned_host.document));
   Expect("break the rig mode", broken.SetNumber("rigMode", 7.0));
-  Expect("tune the camera scale", broken.SetNumber("cameraScale", 1.3));
+  Expect("tune the camera distance",
+         broken.SetNumber("cameraDistanceM", 7.0));
   broken.document = broken.SerializeDocument();
   broken.has_document = true;
   Context loaded;
@@ -682,7 +816,7 @@ void CheckBadModes(FakeHost &tuned_host) {
   Expect("a broken rig mode infers Custom",
          GroupIs(loaded, SettingsGroup::Rig, GroupMode::Custom));
   ExpectNear("a broken rig mode keeps the geometry",
-             loaded.camera_scale.load(), 1.3);
+             loaded.camera_distance_m.load(), 7.0);
 
   // A readable but impossible mode (the rig cannot be Opposite) normalizes to
   // Default instead of leaving a state the panel cannot draw.
@@ -698,7 +832,7 @@ void CheckBadModes(FakeHost &tuned_host) {
   Expect("an impossible rig mode becomes Default",
          GroupIs(normalized, SettingsGroup::Rig, GroupMode::Default));
   ExpectNear("an impossible mode keeps the custom geometry",
-             CustomCopy(normalized).camera_scale, 1.25);
+             CustomCopy(normalized).camera_distance_m, 6.4);
 }
 
 }  // namespace
@@ -708,6 +842,8 @@ int main() {
   CheckDefaultsDocument(host);
   CheckRoundTrip(host);
   CheckLegacyInference(host);
+  CheckLegacyGeometryMigration(host);
+  CheckDowngradeClamp();
   CheckOffWins();
   CheckBadModes(host);
   std::printf("\nall settings persistence checks passed\n");

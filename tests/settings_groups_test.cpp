@@ -100,8 +100,10 @@ void CheckDefaults(Context& context) {
   }
   Expect("every group starts on Default", all_default);
   ApplyAllGroups(context);
-  ExpectNear("fresh camera scale", context.camera_scale.load(),
-             nfs2015_chase_cam::detail::kDefaultCameraScale);
+  ExpectNear("fresh camera distance", context.camera_distance_m.load(),
+             nfs2015_chase_cam::detail::kDefaultCameraDistanceM);
+  ExpectNear("fresh camera height", context.camera_height_m.load(),
+             nfs2015_chase_cam::detail::kDefaultCameraHeightM);
   ExpectNear("fresh yaw spring", context.yaw_spring.load(),
              nfs2015_chase_cam::detail::kDefaultYawSpring);
   ExpectNear("fresh roll spring", context.roll_spring.load(),
@@ -127,29 +129,35 @@ void CheckNfsLens(Context& context) {
 
 void CheckRig(Context& context) {
   EditCustom(context, [](CustomSettings& custom) {
-    custom.camera_scale = 1.3;
-    custom.origin_offset_cm = -40.0;
+    custom.camera_distance_m = 6.4;
+    custom.camera_height_m = 2.2;
     custom.aspect_ratio = 2.0;
     custom.speed_distance_scale = 0.5;
   });
   SetMode(context, SettingsGroup::Rig, GroupMode::Custom);
-  ExpectNear("rig custom camera scale", context.camera_scale.load(), 1.3);
-  ExpectNear("rig custom origin offset", context.origin_offset_cm.load(),
-             -40.0);
+  ExpectNear("rig custom camera distance", context.camera_distance_m.load(),
+             6.4);
+  ExpectNear("rig custom camera height", context.camera_height_m.load(),
+             2.2);
   ExpectNear("rig custom aspect ratio", context.aspect_ratio.load(), 2.0);
   ExpectNear("rig custom speed distance", context.speed_distance_scale.load(),
              0.5);
   SetMode(context, SettingsGroup::Rig, GroupMode::Default);
-  ExpectNear("rig default camera scale", context.camera_scale.load(),
-             nfs2015_chase_cam::detail::kDefaultCameraScale);
+  ExpectNear("rig default camera distance", context.camera_distance_m.load(),
+             nfs2015_chase_cam::detail::kDefaultCameraDistanceM);
+  ExpectNear("rig default camera height", context.camera_height_m.load(),
+             nfs2015_chase_cam::detail::kDefaultCameraHeightM);
   ExpectNear("rig default aspect ratio", context.aspect_ratio.load(),
              nfs2015_chase_cam::detail::kDefaultAspectRatio);
   SetMode(context, SettingsGroup::Rig, GroupMode::Opposite);
-  ExpectNear("rig opposite behaves like Default", context.camera_scale.load(),
-             nfs2015_chase_cam::detail::kDefaultCameraScale);
+  ExpectNear("rig opposite behaves like Default",
+             context.camera_distance_m.load(),
+             nfs2015_chase_cam::detail::kDefaultCameraDistanceM);
   SetMode(context, SettingsGroup::Rig, GroupMode::Custom);
-  ExpectNear("rig custom values survived Default", context.camera_scale.load(),
-             1.3);
+  ExpectNear("rig custom values survived Default",
+             context.camera_distance_m.load(), 6.4);
+  ExpectNear("rig custom height survived Default",
+             context.camera_height_m.load(), 2.2);
 }
 
 void CheckSprings(Context& context) {
@@ -268,8 +276,11 @@ void CheckRestoreDefaults(Context& context) {
              SettingsGroup::Burnout)]
                  .load() == static_cast<std::uint32_t>(GroupMode::Default));
   ExpectNear("restore defaults clears the custom geometry",
-             CustomCopy(context).camera_scale,
-             nfs2015_chase_cam::detail::kDefaultCameraScale);
+             CustomCopy(context).camera_distance_m,
+             nfs2015_chase_cam::detail::kDefaultCameraDistanceM);
+  ExpectNear("restore defaults clears the custom height",
+             CustomCopy(context).camera_height_m,
+             nfs2015_chase_cam::detail::kDefaultCameraHeightM);
   ExpectNear("restore defaults clears the custom burnout FOV",
              CustomCopy(context).burnout_fov,
              nfs2015_chase_cam::detail::kDefaultBurnoutFov);

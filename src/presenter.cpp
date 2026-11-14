@@ -2,6 +2,7 @@
 // the model state into the pose the detour serves, through a seqlock the Game
 // thread writes and the detour thread reads.
 #include "internal.hpp"
+#include "camera_rig.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -36,6 +37,7 @@ void LockPresenter(Context &context) noexcept {
     std::this_thread::yield();
   }
 }
+
 
 // Ask the render side to restart the model. The epoch travels with the samples,
 // so the renderer notices even if it was not running at the time.
@@ -126,13 +128,14 @@ void PublishRouteBModelPose(Context &context,
     probe.route_b_model_rotation[axis].store(model_rotation,
                                              std::memory_order_relaxed);
   }
-  probe.route_b_model_camera_scale.store(
-      nfs2015_chase::Clamp(sample.camera_scale, kMinimumCameraScale,
-                           kMaximumCameraScale),
-      std::memory_order_relaxed);
-  probe.route_b_model_origin_offset_cm.store(
-      context.origin_offset_cm.load(std::memory_order_acquire),
-      std::memory_order_relaxed);
+  const nfs2015_chase::CameraRigFactors factors =
+      nfs2015_chase::CameraRigFactorsFor(
+          context.chase.config().rest, sample.camera_distance_m,
+          sample.camera_height_m);
+  probe.route_b_model_distance_scale.store(factors.distance,
+                                           std::memory_order_relaxed);
+  probe.route_b_model_height_scale.store(factors.height,
+                                         std::memory_order_relaxed);
   probe.route_b_model_lens.store(
       sample.fov_enabled
           ? static_cast<float>(
@@ -274,21 +277,19 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         raw_est_cm[axis] = context.render_x.vehicle_anchor_cm[axis].load(
             std::memory_order_relaxed);
       }
-      raw_est_cm[2] +=
-          context.origin_offset_cm.load(std::memory_order_relaxed);
+      raw_est_cm[2] -= kVehicleAnchorCenterHeightCm;
       context.game_offset_valid = false;
       context.game_offset_last_ns = 0;
       context.render_x.last_used.store(kAnchorStateVehicle,
                                        std::memory_order_relaxed);
     } else if (anchor_source == kAnchorSourceX && x_valid) {
-      // X is the raw `root+280`; the model's car origin is that value plus the
-      // user's `originOffsetCm`, applied on Z exactly as `QueryPlayer` does.
+      // X is the raw `root+280` (the body centre); the model origin is the
+      // fixed ground, so subtract the centre height exactly as game_tick does.
       for (std::size_t axis = 0; axis < 3; ++axis) {
         raw_est_cm[axis] =
             context.render_x.anchor_cm[axis].load(std::memory_order_relaxed);
       }
-      raw_est_cm[2] +=
-          context.origin_offset_cm.load(std::memory_order_relaxed);
+      raw_est_cm[2] -= kVehicleAnchorCenterHeightCm;
       // The borrow offset is not tracking in this mode. If the X path falls
       // back, the offset re-initialises from the current Game camera instead
       // of resuming a stale estimate.
@@ -303,8 +304,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         raw_est_cm[axis] =
             context.render_x.anchor_cm[axis].load(std::memory_order_relaxed);
       }
-      raw_est_cm[2] +=
-          context.origin_offset_cm.load(std::memory_order_relaxed);
+      raw_est_cm[2] -= kVehicleAnchorCenterHeightCm;
       context.game_offset_valid = false;
       context.game_offset_last_ns = 0;
       context.render_x.last_used.store(kAnchorStateX,
@@ -431,7 +431,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         context.burnout_hold_speed.load(std::memory_order_acquire);
     shot_config.slope_follow =
         context.slope_follow.load(std::memory_order_acquire);
-    // The presenter / route B still applies the user's cameraScale once,
+    // The presenter / route B still applies the user's metric rig scale once,
     // around the car origin, after the blend. Scaling the shot locally as well
     // would square that value (0.6 -> 0.36) and pull the close-up into the car.
     shot_config.camera_scale = 1.0;
@@ -458,17 +458,21 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   if (!sample.fov_enabled) {
     view.fov_y_degrees = chase_view.fov_y_degrees;
   }
+  const nfs2015_chase::CameraRigFactors factors =
+      nfs2015_chase::CameraRigFactorsFor(
+          context.chase.config().rest, sample.camera_distance_m,
+          sample.camera_height_m);
   PublishRouteBModelPose(context, sample, view, now_ns);
 
-  // Scale around the model origin, exactly as the old publish path did, and
-  // report the result in world centimetres. The anchor cancels out of this
-  // transform; it is kept in the sample for diagnostics.
-  const double scale = nfs2015_chase::Clamp(
-      sample.camera_scale, kMinimumCameraScale, kMaximumCameraScale);
+  // Scale around the fixed ground origin per axis. x/y use the distance factor
+  // and z uses the height factor, so the two metric sliders are independent;
+  // the model's dynamics ride along on their own axis. The anchor is kept in
+  // the sample for diagnostics but cancels out of this transform.
   for (std::size_t axis = 0; axis < 3; ++axis) {
     const double origin = sample.origin_cm[axis];
     const double model = (&view.position.x)[axis] * 100.0;
-    location[axis] = origin + (model - origin) * scale;
+    const double factor = axis == 2 ? factors.height : factors.distance;
+    location[axis] = origin + (model - origin) * factor;
   }
   rotation[0] = view.pitch_degrees;
   rotation[1] = view.yaw_degrees;
@@ -501,6 +505,10 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   }
   const double distance_cm = std::sqrt(distance2);
   context.presenter_distance_cm.store(distance_cm, std::memory_order_relaxed);
+  // Eye height above the ground origin, not world Z: the panel reports the
+  // live rig height while the slider keeps the static value.
+  context.presenter_height_cm.store(location[2] - sample.origin_cm[2],
+                                    std::memory_order_relaxed);
   *advanced = true;
 
   return true;
@@ -510,8 +518,10 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   const bool enabled = context.enabled.load(std::memory_order_acquire);
   const std::uint32_t preset = context.preset.load(std::memory_order_acquire);
   bool fov_enabled = context.fov_enabled.load(std::memory_order_acquire);
-  const double camera_scale =
-      context.camera_scale.load(std::memory_order_acquire);
+  const double camera_distance_m =
+      context.camera_distance_m.load(std::memory_order_acquire);
+  const double camera_height_m =
+      context.camera_height_m.load(std::memory_order_acquire);
   const double position_spring =
       context.position_spring.load(std::memory_order_acquire);
   const double yaw_spring =
@@ -946,7 +956,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
       sample.anchor_cm[axis] = base_cm[axis];
       sample.origin_cm[axis] = origin_cm[axis];
     }
-    sample.camera_scale = camera_scale;
+    sample.camera_distance_m = camera_distance_m;
+    sample.camera_height_m = camera_height_m;
     sample.aspect_ratio = aspect_ratio;
     sample.fov_enabled = fov_enabled;
     sample.driving = true;
@@ -1058,6 +1069,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
         context.presenter_distance_cm.load(std::memory_order_relaxed) / 100.0;
     context.display.camera_distance_raw_m =
         context.display.camera_distance_m;
+    context.display.camera_height_m =
+        context.presenter_height_cm.load(std::memory_order_relaxed) / 100.0;
     const BurnoutProbeState &burnout = context.burnout_probe;
     context.display.burnout_probe_is_burnout_known =
         burnout.is_burnout_known;

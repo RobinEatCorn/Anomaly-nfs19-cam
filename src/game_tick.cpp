@@ -96,15 +96,15 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
       context.camera_yaw_valid = true;
     }
   }
-  const double origin_offset_cm =
-      context.origin_offset_cm.load(std::memory_order_acquire);
   // The camera model is anchored to the rigid Pawn root. The mesh bounds
   // centre and extent move with body roll and pitch; anchoring the camera to
   // them made the eye inherit that motion 1:1, which reads as twitch. Keep the
   // bounds fields only for the probe, never for the model origin.
+  // `base_cm` is the body centre reported by the anchor; the chase model's
+  // local rest is ground-relative, so the model origin is always the ground.
   origin_cm[0] = base_cm[0];
   origin_cm[1] = base_cm[1];
-  origin_cm[2] = base_cm[2] + origin_offset_cm;
+  origin_cm[2] = base_cm[2] - kVehicleAnchorCenterHeightCm;
   // The frame callback projects this. The Pawn root, so the measurement is of
   // what the game actually moved, with no mesh bound in it.
   for (std::size_t axis = 0; axis < 3; ++axis) {

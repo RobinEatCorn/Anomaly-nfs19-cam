@@ -352,12 +352,10 @@ bool BuildRouteBPoseFromModel(const RenderXProbe &probe,
   }
   // `model_eye` already contains the body-frame slope from the chase model.
   // Only its translation moves to this render frame; applying the pitch again
-  // here would double the slope.
-  const double fresh_car[3] = {
-      car_cm[0],
-      car_cm[1],
-      car_cm[2] + kVehicleAnchorCenterHeightCm,
-  };
+  // here would double the slope. The raw proxy translation is the ground, and
+  // the model's car origin is the fixed ground too, so no +70/-70 conversion
+  // is needed here.
+  const double fresh_car[3] = {car_cm[0], car_cm[1], car_cm[2]};
   double delta[3]{};
   double distance_squared = 0.0;
   for (std::size_t axis = 0; axis < 3; ++axis) {
@@ -368,20 +366,18 @@ bool BuildRouteBPoseFromModel(const RenderXProbe &probe,
       distance_squared > kVehicleProxyMaxOffsetCm * kVehicleProxyMaxOffsetCm) {
     return false;
   }
-  const double scale = nfs2015_chase::Clamp(
-      probe.route_b_model_camera_scale.load(std::memory_order_relaxed),
-      kMinimumCameraScale, kMaximumCameraScale);
-  const double origin_offset_cm =
-      probe.route_b_model_origin_offset_cm.load(std::memory_order_relaxed);
+  const double distance_scale = nfs2015_chase::Clamp(
+      probe.route_b_model_distance_scale.load(std::memory_order_relaxed),
+      0.05, 10.0);
+  const double height_scale = nfs2015_chase::Clamp(
+      probe.route_b_model_height_scale.load(std::memory_order_relaxed),
+      0.05, 10.0);
   for (std::size_t axis = 0; axis < 3; ++axis) {
     const double model_offset = model_eye[axis] - model_car[axis];
-    eye[axis] = fresh_car[axis] + model_offset * scale;
+    const double factor = axis == 2 ? height_scale : distance_scale;
+    eye[axis] = fresh_car[axis] + model_offset * factor;
     rotation[axis] = model_rotation[axis];
   }
-  // `origin_offset_cm` is a user-facing vertical trim. The model already
-  // contains the game-tick copy of it, so the render anchor above must not
-  // apply it twice; adding it here makes the slider move route B.
-  eye[2] += origin_offset_cm;
   return std::isfinite(eye[0]) && std::isfinite(eye[1]) &&
          std::isfinite(eye[2]) && std::isfinite(rotation[0]) &&
          std::isfinite(rotation[1]) && std::isfinite(rotation[2]) &&
@@ -447,13 +443,8 @@ bool BuildRouteBPoseFromPresenter(Context &context, const RenderXProbe &probe,
     for (std::size_t axis = 0; axis < 3; ++axis) {
       eye[axis] += fresh_car[axis] - presenter_car[axis];
     }
-    // `presenter_car` already contains the configured origin offset, and
-    // moving to the raw VehicleMesh cancels it. Re-apply the slider as a trim
-    // relative to the default; comparing against the presenter's own offset
-    // is always zero in steady state, which is why that version was inert.
-    const double current_offset =
-        context.origin_offset_cm.load(std::memory_order_acquire);
-    eye[2] += current_offset - kDefaultOriginOffsetCm;
+    // Both poses are now built around the same fixed ground origin; the old
+    // origin-offset trim has no user-facing counterpart to re-apply here.
   }
   return std::isfinite(eye[0]) && std::isfinite(eye[1]) &&
          std::isfinite(eye[2]) && std::isfinite(rotation[0]) &&

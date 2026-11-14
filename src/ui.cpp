@@ -830,19 +830,19 @@ void DrawRigGroup(const AnomalyUiServiceV1 *ui, Context &context,
   ui->text(ui->user,
            StringView(context.localizer.Text(
                "setting.rig_summary",
-               "Distance, origin offset, viewport aspect and speed distance.")));
-  DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.camera_scale",
-                   "Camera distance / height scale", "chase-scale",
-                   &CustomSettings::camera_scale, kMinimumCameraScale,
-                   kMaximumCameraScale);
+               "Distance, height, viewport aspect and speed distance.")));
+  DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.camera_distance",
+                   "Camera distance at rest (m)", "chase-camera-distance",
+                   &CustomSettings::camera_distance_m,
+                   kMinimumCameraDistanceM, kMaximumCameraDistanceM);
+  DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.camera_height",
+                   "Camera height at rest (m)", "chase-camera-height",
+                   &CustomSettings::camera_height_m, kMinimumCameraHeightM,
+                   kMaximumCameraHeightM);
   DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.speed_distance",
                    "Speed / accel distance scale", "chase-speed-distance",
                    &CustomSettings::speed_distance_scale,
                    kMinimumSpeedDistanceScale, kMaximumSpeedDistanceScale);
-  DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.origin_offset",
-                   "Car origin offset (cm)", "chase-origin-offset",
-                   &CustomSettings::origin_offset_cm, kMinimumOriginOffsetCm,
-                   kMaximumOriginOffsetCm);
   DrawCustomSlider(ui, context, SettingsGroup::Rig, "setting.aspect_ratio",
                    "Viewport aspect ratio", "chase-aspect",
                    &CustomSettings::aspect_ratio, kMinimumAspectRatio,
@@ -1430,6 +1430,11 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
                       display.camera_distance_raw_m);
         DrawStatusLine(ui, context->localizer, "status.distance",
                        "Camera-car distance", distance_line);
+        char height_line[32]{};
+        std::snprintf(height_line, sizeof(height_line), "%.2f m",
+                      display.camera_height_m);
+        DrawStatusLine(ui, context->localizer, "status.camera_height",
+                       "Camera height (live)", height_line);
         char speed_distance_line[32]{};
         std::snprintf(speed_distance_line, sizeof(speed_distance_line),
                       "%.2f", display.speed_distance_scale);

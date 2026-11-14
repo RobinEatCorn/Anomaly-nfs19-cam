@@ -77,8 +77,8 @@ enum class GroupMode : std::uint32_t {
 // from the mode.
 struct CustomSettings final {
   // Rig geometry.
-  double camera_scale{kDefaultCameraScale};
-  double origin_offset_cm{kDefaultOriginOffsetCm};
+  double camera_distance_m{kDefaultCameraDistanceM};
+  double camera_height_m{kDefaultCameraHeightM};
   double aspect_ratio{kDefaultAspectRatio};
   double speed_distance_scale{kDefaultSpeedDistanceScale};
   // Chase-camera springs.
@@ -142,8 +142,8 @@ struct LegacyGroupState final {
 
 [[nodiscard]] constexpr bool RigOnDefaults(
     const CustomSettings &custom) noexcept {
-  return custom.camera_scale == kDefaultCameraScale &&
-         custom.origin_offset_cm == kDefaultOriginOffsetCm &&
+  return custom.camera_distance_m == kDefaultCameraDistanceM &&
+         custom.camera_height_m == kDefaultCameraHeightM &&
          custom.aspect_ratio == kDefaultAspectRatio &&
          custom.speed_distance_scale == kDefaultSpeedDistanceScale;
 }

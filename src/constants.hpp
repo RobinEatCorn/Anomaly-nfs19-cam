@@ -25,6 +25,16 @@ constexpr double kRadiansToDegrees =
 constexpr double kDefaultCameraScale = 1.0;
 constexpr double kMinimumCameraScale = 0.6;
 constexpr double kMaximumCameraScale = 1.6;
+// User-facing metric rig geometry. The camera applies these as per-axis
+// factors around the fixed ground origin; the old scale/origin pair below
+// remains only for loading old documents and for the derived fields written
+// for older builds.
+constexpr double kDefaultCameraDistanceM = 5.10;
+constexpr double kMinimumCameraDistanceM = 3.0;
+constexpr double kMaximumCameraDistanceM = 8.2;
+constexpr double kDefaultCameraHeightM = 1.49;
+constexpr double kMinimumCameraHeightM = 0.45;
+constexpr double kMaximumCameraHeightM = 4.6;
 constexpr double kDefaultPositionSpring = 7.5;
 constexpr double kMinimumPositionSpring = 0.5;
 constexpr double kMaximumPositionSpring = 30.0;
@@ -49,8 +59,9 @@ constexpr double kMinimumRollSpring = 1.0;
 constexpr double kMaximumRollSpring = 200.0;
 // Route B anchors the NFS camera to the vehicle proxy's ground pivot. The
 // NFS preset's local rest height is ground-relative, so the old +70 cm centre
-// offset must be cancelled by default; otherwise the first install sits about
-// 70 cm too high. Existing configs keep their explicit value.
+// offset must be cancelled by default. The user-facing height now lives in
+// cameraHeightM; these two values are retained for migration and for the
+// derived fields written so older builds can still load a new document.
 constexpr double kDefaultOriginOffsetCm = -70.0;
 constexpr double kMinimumOriginOffsetCm = -150.0;
 constexpr double kMaximumOriginOffsetCm = 150.0;
@@ -581,6 +592,8 @@ constexpr std::string_view kSettingsSchema = R"json(
     "enabled":{"type":"boolean"},
     "preset":{"type":"integer","minimum":0,"maximum":1},
     "cameraScale":{"type":"number","minimum":0.6,"maximum":1.6},
+    "cameraDistanceM":{"type":"number","minimum":3.0,"maximum":8.2},
+    "cameraHeightM":{"type":"number","minimum":0.45,"maximum":4.6},
     "positionSpring":{"type":"number","minimum":0.5,"maximum":30.0},
     "yawSpring":{"type":"number","minimum":0.5,"maximum":30.0},
     "driftYawSpring":{"type":"number","minimum":0.5,"maximum":30.0},

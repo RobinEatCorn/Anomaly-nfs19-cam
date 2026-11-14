@@ -185,7 +185,8 @@ Result Run(const Path &path, const Clock &tick_clock, const Clock &frame_clock,
     }
     sample.driving = true;
     sample.epoch = 1;
-    sample.camera_scale = 1.0;
+    sample.camera_distance_m = 5.10;
+    sample.camera_height_m = 1.49;
     sample.aspect_ratio = 16.0 / 9.0;
     sample.fov_enabled = true;
     return sample;
