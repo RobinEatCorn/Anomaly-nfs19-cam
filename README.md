@@ -144,7 +144,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
-├── RELEASE-NOTES-2.0.5.md 车体朝向来源（相机 yaw → 车辆 proxy heading）
+├── RELEASE-NOTES-2.0.5.md 设置分组、米制机位、漂移前轮、车体朝向
 ├── RELEASE-NOTES-2.0.4.md Z 键三档视角循环（追车/第三人称/第一人称）
 ├── RELEASE-NOTES-2.0.3.md NFS 漂移前轮反打（低速门槛/平滑交接）
 ├── RELEASE-NOTES-2.0.2.md 弹簧滑块与默认看向值说明
