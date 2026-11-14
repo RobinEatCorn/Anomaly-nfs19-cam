@@ -190,20 +190,20 @@
 - **难度评级**：⭐ [简单]
 - **目标**：新增分组/模式文案；把长说明移到文档。
 - **具体行动项**：
-  - [ ] 在 `locales/zh-CN.json` 增加：
+  - [x] 在 `locales/zh-CN.json` 增加：
     - 7 个组名（例如 `group.nfs_lens`、`group.rig`、`group.springs`、`group.dynamics`、`group.slope`、`group.wheel_steer`、`group.burnout`、`group.advanced`）
     - 模式按钮文案（`mode.default`、`mode.custom`、`mode.off`、`mode.on`）
     - 高级区展开/收起文案
     - 每组 Custom 的一行摘要（尤其是漂移前轮）
-  - [ ] 代码中的英文 fallback 保持可读；不要只依赖 zh-CN。
-  - [ ] 把当前 `setting.wheel_steer_hint` 的完整内容移到 `README.md` 的前轮反打章节；UI 只保留一行摘要。
-  - [ ] 在 README 增加“设置面板”小节，说明：
+  - [x] 代码中的英文 fallback 保持可读；不要只依赖 zh-CN。
+  - [x] 把当前 `setting.wheel_steer_hint` 的完整内容移到 `README.md` 的前轮反打章节；UI 只保留一行摘要。
+  - [x] 在 README 增加“设置面板”小节，说明：
     - 基础类型与三态语义
     - 默认/自定义/反向分别代表什么
     - FOV 是独立组
     - 弹簧只在 NFS 预设下生效
     - 旧配置会自动推断 mode，不会丢失自定义值
-  - [ ] 可选：更新 `RELEASE-NOTES-*.md` 或新增一条简短说明；不作为本阶段硬性要求。
+  - [x] 可选：更新 `RELEASE-NOTES-*.md` 或新增一条简短说明；不作为本阶段硬性要求。
 - **验收**：UI 中文文案完整；切到英文/无本地化时 fallback 可读；README 能找到完整前轮说明。
 
 ### 📦 任务组 5：构建、测试与交付验证
