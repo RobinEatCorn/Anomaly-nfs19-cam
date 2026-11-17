@@ -72,7 +72,14 @@ struct OrbitShotConfig final {
   double entry_time{2.0};
   double exit_time{1.0};
 
-  // Orbit geometry. `period_seconds` is one full revolution.
+// Orbit geometry. `period_seconds` is one full revolution.
+  //
+  // The numbers below are the reference guide's geometry, kept as the model's
+  // fallbacks so this header stays a faithful copy of the analysed asset. The
+  // plugin does not ship them: every run sets the radius, the camera height and
+  // the look-at height from the settings, whose defaults live in
+  // src/constants.hpp (kDefaultOrbitRadius / kDefaultOrbitHeight /
+  // kDefaultOrbitLookAtHeight).
   double period_seconds{60.0};
   double radius_m{5.05};
   // Absolute body-up camera height above the car origin. A positive value

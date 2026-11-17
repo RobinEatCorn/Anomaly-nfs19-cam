@@ -125,20 +125,23 @@ constexpr double kMaximumOrbitEntryDelay = 60.0;
 constexpr double kDefaultOrbitPeriod = 60.0;
 constexpr double kMinimumOrbitPeriod = 10.0;
 constexpr double kMaximumOrbitPeriod = 600.0;
-constexpr double kDefaultOrbitRadius = 5.05;
+constexpr double kDefaultOrbitRadius = 4.0;
 constexpr double kMinimumOrbitRadius = 2.0;
 constexpr double kMaximumOrbitRadius = 12.0;
-// Camera height above the car origin. The default reproduces the guide's
-// 6.8 degree elevation at the 5.05 m radius (look-at height 1.23 m).
-constexpr double kDefaultOrbitHeight = 1.83;
+// Camera height above the car origin, in metres along the body up axis. The
+// shipped default is tuned on the car rather than copied from the guide: the
+// guide's 5.05 m / 1.83 m / 1.23 m reference geometry stays in orbit_shot.hpp
+// as that model's fallback.
+constexpr double kDefaultOrbitHeight = 0.724;
 constexpr double kMinimumOrbitHeight = 0.3;
 constexpr double kMaximumOrbitHeight = 3.0;
 // Where the camera looks, measured above the car origin along the body up axis.
-// Targeting the origin frames the tyres instead of the car, so the guide keeps
-// it 1.23 m up. The eye height above and the look-at height are independent
-// sliders; their difference sets the elevation angle and the 3D slant radius
-// stays at the orbit radius.
-constexpr double kDefaultOrbitLookAtHeight = 1.23;
+// Targeting the origin frames the tyres instead of the car, so the default
+// keeps it above the wheel centre. The eye height above and the look-at height
+// are independent sliders; their difference sets the elevation angle
+// (0.724 - 0.671 = 0.053 m, about 0.76 degrees at the 4.0 m radius) and the 3D
+// slant radius stays at the orbit radius.
+constexpr double kDefaultOrbitLookAtHeight = 0.671;
 constexpr double kMinimumOrbitLookAtHeight = 0.3;
 constexpr double kMaximumOrbitLookAtHeight = 3.0;
 constexpr double kDefaultOrbitWeave = 1.0;
