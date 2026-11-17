@@ -165,7 +165,8 @@ bool WheelSteerSettingsValid(const double max_degrees, const double gain,
 
 bool OrbitSettingsValid(const double entry_delay, const double period,
                         const double radius_m, const double height_m,
-                        const double weave, const double fov_degrees,
+                        const double look_at_height_m, const double weave,
+                        const double fov_degrees,
                         const double shake_strength,
                         const double shake_frequency) noexcept {
   return std::isfinite(entry_delay) &&
@@ -176,7 +177,11 @@ bool OrbitSettingsValid(const double entry_delay, const double period,
          radius_m >= kMinimumOrbitRadius &&
          radius_m <= kMaximumOrbitRadius && std::isfinite(height_m) &&
          height_m >= kMinimumOrbitHeight &&
-         height_m <= kMaximumOrbitHeight && std::isfinite(weave) &&
+         height_m <= kMaximumOrbitHeight &&
+         std::isfinite(look_at_height_m) &&
+         look_at_height_m >= kMinimumOrbitLookAtHeight &&
+         look_at_height_m <= kMaximumOrbitLookAtHeight &&
+         std::isfinite(weave) &&
          weave >= kMinimumOrbitWeave && weave <= kMaximumOrbitWeave &&
          std::isfinite(fov_degrees) && fov_degrees >= kMinimumOrbitFov &&
          fov_degrees <= kMaximumOrbitFov &&
@@ -284,6 +289,7 @@ bool PersistSettings(Context &context) noexcept {
   const double orbit_period = custom.orbit_period;
   const double orbit_radius_m = custom.orbit_radius_m;
   const double orbit_height_m = custom.orbit_height_m;
+  const double orbit_look_at_height_m = custom.orbit_look_at_height_m;
   const double orbit_weave = custom.orbit_weave;
   const double orbit_fov = custom.orbit_fov;
   const double orbit_shake_strength = custom.orbit_shake_strength;
@@ -370,8 +376,8 @@ bool PersistSettings(Context &context) noexcept {
                                wheel_steer_entry_speed_kmh,
                                wheel_steer_sample_percent) ||
       !OrbitSettingsValid(orbit_entry_delay, orbit_period, orbit_radius_m,
-                          orbit_height_m, orbit_weave, orbit_fov,
-                          orbit_shake_strength,
+                          orbit_height_m, orbit_look_at_height_m,
+                          orbit_weave, orbit_fov, orbit_shake_strength,
                           orbit_shake_frequency) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
     // A UI write landed while the fields were being read; keep the revision
@@ -483,6 +489,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, orbit_radius_m) &&
       AppendText(cursor, end, ",\"orbitHeight\":") &&
       AppendNumber(cursor, end, orbit_height_m) &&
+      AppendText(cursor, end, ",\"orbitLookAtHeight\":") &&
+      AppendNumber(cursor, end, orbit_look_at_height_m) &&
       AppendText(cursor, end, ",\"orbitWeave\":") &&
       AppendNumber(cursor, end, orbit_weave) &&
       AppendText(cursor, end, ",\"orbitFov\":") &&
@@ -711,11 +719,12 @@ void ApplyGroup(Context &context, const SettingsGroup group) noexcept {
       }
       return;
     case SettingsGroup::Orbit:
-      // Same shape as the burnout close-up: the built-in default is off, so
-      // Default keeps the orbit parked while Custom and Opposite both run it.
-      // Only Custom reads the custom numbers and the custom HUD switch.
-      context.orbit_enabled.store(mode != GroupMode::Default,
-                                  std::memory_order_release);
+      // Same shape as the slope follow: Default runs it on the built-in numbers
+      // (the feature is on out of the box), Custom runs it on the custom ones,
+      // and Opposite is the only state that turns it off.
+      context.orbit_enabled.store(
+          mode == GroupMode::Default ? kDefaultOrbitEnabled : use_custom,
+          std::memory_order_release);
       context.orbit_entry_delay.store(
           use_custom ? custom.orbit_entry_delay : kDefaultOrbitEntryDelay,
           std::memory_order_release);
@@ -727,6 +736,10 @@ void ApplyGroup(Context &context, const SettingsGroup group) noexcept {
           std::memory_order_release);
       context.orbit_height.store(
           use_custom ? custom.orbit_height_m : kDefaultOrbitHeight,
+          std::memory_order_release);
+      context.orbit_look_at_height.store(
+          use_custom ? custom.orbit_look_at_height_m
+                     : kDefaultOrbitLookAtHeight,
           std::memory_order_release);
       context.orbit_weave.store(
           use_custom ? custom.orbit_weave : kDefaultOrbitWeave,
@@ -1036,6 +1049,7 @@ bool LoadSettings(Context &context) noexcept {
   double orbit_period = kDefaultOrbitPeriod;
   double orbit_radius_m = kDefaultOrbitRadius;
   double orbit_height_m = kDefaultOrbitHeight;
+  double orbit_look_at_height_m = kDefaultOrbitLookAtHeight;
   double orbit_weave = kDefaultOrbitWeave;
   double orbit_fov = kDefaultOrbitFov;
   double orbit_shake_strength = kDefaultOrbitShakeStrength;
@@ -1155,6 +1169,8 @@ bool LoadSettings(Context &context) noexcept {
                                      orbit_radius_m));
   static_cast<void>(JsonObjectNumber(json, root, "orbitHeight",
                                      orbit_height_m));
+  static_cast<void>(JsonObjectNumber(json, root, "orbitLookAtHeight",
+                                     orbit_look_at_height_m));
   static_cast<void>(JsonObjectNumber(json, root, "orbitWeave",
                                      orbit_weave));
   static_cast<void>(
@@ -1202,8 +1218,9 @@ bool LoadSettings(Context &context) noexcept {
                                wheel_steer_entry_speed_kmh,
                                wheel_steer_sample_percent) ||
       !OrbitSettingsValid(orbit_entry_delay, orbit_period, orbit_radius_m,
-                          orbit_height_m, orbit_weave, orbit_fov,
-                          orbit_shake_strength, orbit_shake_frequency)) {
+                          orbit_height_m, orbit_look_at_height_m,
+                          orbit_weave, orbit_fov, orbit_shake_strength,
+                          orbit_shake_frequency)) {
     return false;
   }
   context.enabled.store(enabled, std::memory_order_release);
@@ -1257,6 +1274,7 @@ bool LoadSettings(Context &context) noexcept {
   custom.orbit_period = orbit_period;
   custom.orbit_radius_m = orbit_radius_m;
   custom.orbit_height_m = orbit_height_m;
+  custom.orbit_look_at_height_m = orbit_look_at_height_m;
   custom.orbit_weave = orbit_weave;
   custom.orbit_fov = orbit_fov;
   custom.orbit_shake_strength = orbit_shake_strength;

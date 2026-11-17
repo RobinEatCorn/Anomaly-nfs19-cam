@@ -36,6 +36,7 @@ using nfs2015_chase_cam::detail::Draw;
 using nfs2015_chase_cam::detail::GroupMode;
 using nfs2015_chase_cam::detail::kDefaultCameraDistanceM;
 using nfs2015_chase_cam::detail::kDefaultCameraHeightM;
+using nfs2015_chase_cam::detail::kDefaultOrbitLookAtHeight;
 using nfs2015_chase_cam::detail::kDefaultOrbitRadius;
 using nfs2015_chase_cam::detail::kSettingsGroupCount;
 using nfs2015_chase_cam::detail::NormalizeGroupMode;
@@ -327,11 +328,11 @@ void CheckDefaultPanel(Harness &harness) {
          burnout_on != nullptr &&
              VisiblePart(burnout_on->label).find("On") != std::string::npos &&
              VisiblePart(burnout_on->label).find("Off") == std::string::npos);
-  const Widget *orbit_on = harness.ui.Find("group-orbit-mode-2");
-  Expect("the orbit third state reads On",
-         orbit_on != nullptr &&
-             VisiblePart(orbit_on->label).find("On") != std::string::npos &&
-             VisiblePart(orbit_on->label).find("Off") == std::string::npos);
+  const Widget *orbit_off = harness.ui.Find("group-orbit-mode-2");
+  Expect("the orbit third state reads Off",
+         orbit_off != nullptr &&
+             VisiblePart(orbit_off->label).find("Off") != std::string::npos &&
+             VisiblePart(orbit_off->label).find("On") == std::string::npos);
 
   Expect("the advanced block starts closed",
          harness.ui.Find("advanced-open") != nullptr &&
@@ -511,13 +512,13 @@ void CheckPresetHidesSprings(Harness &harness) {
 void CheckOrbitDetails(Harness &harness) {
   harness.Click("group-orbit-mode-1");
   harness.Frame();
-  Expect("Orbit/Custom opens eight sliders",
+  Expect("Orbit/Custom opens nine sliders",
          CountIds(harness.ui,
                   {"chase-orbit-entry-delay", "chase-orbit-period",
                    "chase-orbit-radius", "chase-orbit-height",
-                   "chase-orbit-weave", "chase-orbit-fov",
-                   "chase-orbit-shake-strength",
-                   "chase-orbit-shake-frequency"}) == 8);
+                   "chase-orbit-look-at-height", "chase-orbit-weave",
+                   "chase-orbit-fov", "chase-orbit-shake-strength",
+                   "chase-orbit-shake-frequency"}) == 9);
   ExpectModeButton(harness.ui, "chase-orbit-hide-ui", true);
   Expect("Orbit/Custom runs the orbit", harness.context.orbit_enabled.load());
   ExpectUniqueWidgetIds(harness.ui);
@@ -529,6 +530,20 @@ void CheckOrbitDetails(Harness &harness) {
   ExpectNear("the orbit radius reaches the effective value",
              harness.context.orbit_radius.load(), 6.5);
 
+  harness.MoveSlider("chase-orbit-height", 2.4F);
+  harness.Frame();
+  ExpectNear("the camera height lands in the custom block",
+             harness.Custom().orbit_height_m, 2.4);
+
+  harness.MoveSlider("chase-orbit-look-at-height", 0.8F);
+  harness.Frame();
+  ExpectNear("the look-at height lands in the custom block",
+             harness.Custom().orbit_look_at_height_m, 0.8);
+  ExpectNear("the look-at height reaches the effective value",
+             harness.context.orbit_look_at_height.load(), 0.8);
+  ExpectNear("the look-at edit leaves the camera height alone",
+             harness.context.orbit_height.load(), 2.4);
+
   harness.Click("chase-orbit-hide-ui");
   harness.Frame();
   Expect("the HUD switch lands in the custom block",
@@ -538,23 +553,26 @@ void CheckOrbitDetails(Harness &harness) {
 
   harness.Click("group-orbit-mode-0");
   harness.Frame();
-  Expect("Orbit/Default parks the orbit",
-         !harness.context.orbit_enabled.load());
+  Expect("Orbit/Default runs the orbit again",
+         harness.context.orbit_enabled.load());
   Expect("Orbit/Default draws no detail controls",
          harness.ui.Find("chase-orbit-radius") == nullptr &&
              harness.ui.Find("chase-orbit-hide-ui") == nullptr);
   ExpectNear("Orbit/Default restores the built-in radius",
              harness.context.orbit_radius.load(), kDefaultOrbitRadius);
+  ExpectNear("Orbit/Default restores the built-in look-at height",
+             harness.context.orbit_look_at_height.load(),
+             kDefaultOrbitLookAtHeight);
   ExpectNear("Orbit/Default keeps the tuned radius as custom",
              harness.Custom().orbit_radius_m, 6.5);
 
   harness.Click("group-orbit-mode-2");
   harness.Frame();
-  Expect("Orbit/On runs the orbit on the built-in framing",
-         harness.context.orbit_enabled.load());
-  ExpectNear("Orbit/On restores the built-in radius",
+  Expect("Orbit/Off turns the orbit off",
+         !harness.context.orbit_enabled.load());
+  ExpectNear("Orbit/Off restores the built-in radius",
              harness.context.orbit_radius.load(), kDefaultOrbitRadius);
-  Expect("Orbit/On restores the built-in HUD switch",
+  Expect("Orbit/Off restores the built-in HUD switch",
          harness.context.orbit_hide_ui.load());
 }
 

@@ -497,6 +497,8 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         context.orbit_radius.load(std::memory_order_acquire);
     orbit_config.camera_height_m =
         context.orbit_height.load(std::memory_order_acquire);
+    orbit_config.look_at_height_m =
+        context.orbit_look_at_height.load(std::memory_order_acquire);
     orbit_config.weave_amplitude_m =
         context.orbit_weave.load(std::memory_order_acquire);
     orbit_config.vertical_fov_degrees =
@@ -512,9 +514,11 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         context.orbit_shot.Update(elapsed, sample.car, sample.burnout,
                                   chase_view.position, sample.aspect_ratio);
     PublishOrbitDiagnostics(context, orbit.state, orbit.blend);
+    // The blend pivots around the same look-at point the orbit aims at, so the
+    // two heights stay independent all the way through the transition.
     view = nfs2015_chase::BlendShotAroundCarPivot(
         chase_view, orbit.view, sample.car, orbit.blend,
-        nfs2015_chase::kOrbitLookAtHeightM);
+        orbit_config.look_at_height_m);
   } else {
     // Disabling the feature must cut back to the exact chase pose instead of
     // leaving a latched orbit to resume at full blend when it is re-enabled.

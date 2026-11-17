@@ -122,12 +122,14 @@ struct CustomSettings final {
   double burnout_entry_speed{kDefaultBurnoutEntrySpeed};
   double burnout_hold_speed{kDefaultBurnoutHoldSpeed};
   std::uint32_t burnout_side_mode{kDefaultBurnoutSideMode};
-  // Parked orbit. The entry/exit timing stays in the model; its built-in
-  // default sits on Opposite because the group's Default is "off".
+  // Parked orbit. The entry/exit timing stays in the model. The eye height and
+  // the look-at height are two independent absolute heights above the car
+  // origin; their difference is the elevation angle.
   double orbit_entry_delay{kDefaultOrbitEntryDelay};
   double orbit_period{kDefaultOrbitPeriod};
   double orbit_radius_m{kDefaultOrbitRadius};
   double orbit_height_m{kDefaultOrbitHeight};
+  double orbit_look_at_height_m{kDefaultOrbitLookAtHeight};
   double orbit_weave{kDefaultOrbitWeave};
   double orbit_fov{kDefaultOrbitFov};
   double orbit_shake_strength{kDefaultOrbitShakeStrength};
@@ -252,9 +254,11 @@ struct LegacyGroupState final {
                                        : GroupMode::Custom;
     case SettingsGroup::Orbit:
       // The parked orbit never shipped in a released build, so no document can
-      // carry evidence of what the user had chosen for it: a document without
-      // orbitMode always means "off", and its numbers (if it happens to have
-      // any) still land in the custom block for a later switch to Custom.
+      // carry evidence of what the user had chosen for it. Default is the
+      // built-in state, which runs the orbit on the built-in numbers; a
+      // document without orbitMode therefore upgrades straight to the same
+      // behaviour a fresh install has. Its numbers (if it happens to have any)
+      // still land in the custom block for a later switch to Custom.
       return GroupMode::Default;
   }
   return GroupMode::Default;

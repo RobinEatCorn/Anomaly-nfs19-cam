@@ -685,7 +685,7 @@ struct GroupIdentity final {
 // feature on instead of off, so the button reads "On" rather than "Off".
 [[nodiscard]] constexpr bool GroupDefaultIsOff(
     const SettingsGroup group) noexcept {
-  return group == SettingsGroup::Burnout || group == SettingsGroup::Orbit;
+  return group == SettingsGroup::Burnout;
 }
 
 // The third state reads "Off" everywhere except the groups whose built-in
@@ -1160,8 +1160,8 @@ void DrawBurnoutGroup(const AnomalyUiServiceV1 *ui, Context &context,
   DrawBurnoutSideButtons(ui, context);
 }
 
-// The parked orbit. Default is off, so the group only opens its numbers on
-// Custom; Opposite runs the orbit on the built-in framing instead.
+// The parked orbit. Default already runs it, so the group only opens its
+// numbers on Custom; Opposite is the state that turns it off.
 void DrawOrbitGroup(const AnomalyUiServiceV1 *ui, Context &context,
                     const DisplayState &display) {
   ui->separator(ui->user);
@@ -1188,9 +1188,14 @@ void DrawOrbitGroup(const AnomalyUiServiceV1 *ui, Context &context,
                    &CustomSettings::orbit_radius_m, kMinimumOrbitRadius,
                    kMaximumOrbitRadius);
   DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_height",
-                   "Orbit height (m)", "chase-orbit-height",
+                   "Camera height (m)", "chase-orbit-height",
                    &CustomSettings::orbit_height_m, kMinimumOrbitHeight,
                    kMaximumOrbitHeight);
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit,
+                   "setting.orbit_look_at_height",
+                   "Look-at height (m)", "chase-orbit-look-at-height",
+                   &CustomSettings::orbit_look_at_height_m,
+                   kMinimumOrbitLookAtHeight, kMaximumOrbitLookAtHeight);
   DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_weave",
                    "Lateral weave (m)", "chase-orbit-weave",
                    &CustomSettings::orbit_weave, kMinimumOrbitWeave,

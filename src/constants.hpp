@@ -114,11 +114,11 @@ constexpr double kDefaultBurnoutHoldSpeed = 3.0;
 constexpr double kMinimumBurnoutHoldSpeed = 0.0;
 constexpr double kMaximumBurnoutHoldSpeed = 20.0;
 // Parked orbit defaults. After the car has been parked and untouched for the
-// entry delay, the camera circles it. The built-in default of the Orbit group
-// is *off* (group model rule: a group that changes the picture a lot starts
-// disabled), so Default keeps the feature off, Custom runs it on the custom
-// numbers below and Opposite runs it on these built-in numbers.
-constexpr bool kDefaultOrbitEnabled = false;
+// entry delay, the camera circles it. The feature is on out of the box, like
+// the slope follow and the drift front wheels: the group's Default runs it on
+// these built-in numbers, Custom runs it on the user's numbers, and Opposite
+// is the only state that turns it off.
+constexpr bool kDefaultOrbitEnabled = true;
 constexpr double kDefaultOrbitEntryDelay = 8.0;
 constexpr double kMinimumOrbitEntryDelay = 0.0;
 constexpr double kMaximumOrbitEntryDelay = 60.0;
@@ -133,6 +133,14 @@ constexpr double kMaximumOrbitRadius = 12.0;
 constexpr double kDefaultOrbitHeight = 1.83;
 constexpr double kMinimumOrbitHeight = 0.3;
 constexpr double kMaximumOrbitHeight = 3.0;
+// Where the camera looks, measured above the car origin along the body up axis.
+// Targeting the origin frames the tyres instead of the car, so the guide keeps
+// it 1.23 m up. The eye height above and the look-at height are independent
+// sliders; their difference sets the elevation angle and the 3D slant radius
+// stays at the orbit radius.
+constexpr double kDefaultOrbitLookAtHeight = 1.23;
+constexpr double kMinimumOrbitLookAtHeight = 0.3;
+constexpr double kMaximumOrbitLookAtHeight = 3.0;
 constexpr double kDefaultOrbitWeave = 1.0;
 constexpr double kMinimumOrbitWeave = 0.0;
 constexpr double kMaximumOrbitWeave = 3.0;
@@ -676,6 +684,7 @@ constexpr std::string_view kSettingsSchema = R"json(
     "orbitPeriod":{"type":"number","minimum":10.0,"maximum":600.0},
     "orbitRadius":{"type":"number","minimum":2.0,"maximum":12.0},
     "orbitHeight":{"type":"number","minimum":0.3,"maximum":3.0},
+    "orbitLookAtHeight":{"type":"number","minimum":0.3,"maximum":3.0},
     "orbitWeave":{"type":"number","minimum":0.0,"maximum":3.0},
     "orbitFov":{"type":"number","minimum":20.0,"maximum":70.0},
     "orbitShakeStrength":{"type":"number","minimum":0.0,"maximum":2.0},

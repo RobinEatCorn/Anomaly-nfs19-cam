@@ -956,6 +956,10 @@ struct DisplayState final {
   double orbit_period{kDefaultOrbitPeriod};
   double orbit_radius{kDefaultOrbitRadius};
   double orbit_height{kDefaultOrbitHeight};
+  // Where the orbit aims, above the car origin along the body up axis. The eye
+  // height above and this one are independent; their difference is the
+  // elevation angle.
+  double orbit_look_at_height{kDefaultOrbitLookAtHeight};
   double orbit_weave{kDefaultOrbitWeave};
   double orbit_fov{kDefaultOrbitFov};
   double orbit_shake_strength{kDefaultOrbitShakeStrength};
@@ -1474,6 +1478,7 @@ struct Context final {
   std::atomic<double> orbit_period{kDefaultOrbitPeriod};
   std::atomic<double> orbit_radius{kDefaultOrbitRadius};
   std::atomic<double> orbit_height{kDefaultOrbitHeight};
+  std::atomic<double> orbit_look_at_height{kDefaultOrbitLookAtHeight};
   std::atomic<double> orbit_weave{kDefaultOrbitWeave};
   std::atomic<double> orbit_fov{kDefaultOrbitFov};
   std::atomic<double> orbit_shake_strength{kDefaultOrbitShakeStrength};

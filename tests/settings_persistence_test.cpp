@@ -810,6 +810,7 @@ void CheckOrbitRoundTrip() {
   EditCustom(context, [](CustomSettings &custom) {
     custom.orbit_radius_m = 6.5;
     custom.orbit_height_m = 2.4;
+    custom.orbit_look_at_height_m = 0.8;
     custom.orbit_entry_delay = 5.0;
     custom.orbit_period = 90.0;
     custom.orbit_weave = 0.4;
@@ -825,6 +826,8 @@ void CheckOrbitRoundTrip() {
          host.document.find(",\"orbitMode\":1") != std::string::npos);
   Expect("the document stores the orbit radius",
          host.document.find("\"orbitRadius\":6.5") != std::string::npos);
+  Expect("the document stores the orbit look-at height",
+         host.document.find("\"orbitLookAtHeight\":0.8") != std::string::npos);
   Expect("the document stores the orbit HUD switch",
          host.document.find("\"orbitHideUi\":false") != std::string::npos);
   Expect("the document no longer stores a flat orbit enable key",
@@ -840,6 +843,8 @@ void CheckOrbitRoundTrip() {
              loaded.orbit_radius.load(), 6.5, 1e-9);
   ExpectNear("the effective orbit height follows the custom value",
              loaded.orbit_height.load(), 2.4, 1e-9);
+  ExpectNear("the effective orbit look-at height follows the custom value",
+             loaded.orbit_look_at_height.load(), 0.8, 1e-9);
   ExpectNear("the effective orbit period follows the custom value",
              loaded.orbit_period.load(), 90.0, 1e-9);
   ExpectNear("the effective orbit FOV follows the custom value",
@@ -855,11 +860,16 @@ void CheckOrbitRoundTrip() {
   ExpectNear("the custom orbit shake frequency survives",
              CustomCopy(loaded).orbit_shake_frequency, 6.0, 1e-9);
 
-  // Opposite runs the built-in framing; the custom block keeps the tuning.
+  // Opposite turns the orbit off and runs the built-in framing; the custom
+  // block keeps the tuning.
   SetMode(loaded, SettingsGroup::Orbit, GroupMode::Opposite);
+  Expect("orbit opposite switches it off", !loaded.orbit_enabled.load());
   ExpectNear("orbit opposite falls back to the built-in radius",
              loaded.orbit_radius.load(),
              nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  ExpectNear("orbit opposite falls back to the built-in look-at height",
+             loaded.orbit_look_at_height.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitLookAtHeight);
   Expect("orbit opposite falls back to the built-in HUD switch",
          loaded.orbit_hide_ui.load());
 }
@@ -887,8 +897,8 @@ void CheckVersion205Document() {
   // A 2.0.5 build never wrote the orbit numbers either.
   for (const char *key : {"orbitEntryDelay", "orbitPeriod", "orbitRadius",
                           "orbitHeight", "orbitWeave", "orbitFov",
-                          "orbitShakeStrength", "orbitShakeFrequency",
-                          "orbitHideUi"}) {
+                          "orbitLookAtHeight", "orbitShakeStrength",
+                          "orbitShakeFrequency", "orbitHideUi"}) {
     Expect("strip the orbit numbers", editor.RemoveKey(key));
   }
   editor.document = editor.SerializeDocument();
@@ -899,7 +909,9 @@ void CheckVersion205Document() {
   Expect("a 2.0.5 document loads", LoadSettings(loaded));
   Expect("the orbit lands on Default",
          GroupIs(loaded, SettingsGroup::Orbit, GroupMode::Default));
-  Expect("the orbit stays off", !loaded.orbit_enabled.load());
+  // Default is the built-in state, and the built-in state runs the orbit: a
+  // 2.0.5 document upgrades to the same behaviour a fresh install has.
+  Expect("the orbit runs on Default", loaded.orbit_enabled.load());
   ExpectNear("the orbit keeps its built-in radius",
              loaded.orbit_radius.load(),
              nfs2015_chase_cam::detail::kDefaultOrbitRadius);
@@ -922,7 +934,7 @@ void CheckUnknownKeysIgnored() {
     Context context;
     Bind(context, host);
     SetDefaults(context);
-    SetMode(context, SettingsGroup::Orbit, GroupMode::Opposite);
+    SetMode(context, SettingsGroup::Orbit, GroupMode::Custom);
     Expect("persist the orbit reference document",
            PersistSettings(context));
   }
@@ -946,7 +958,7 @@ void CheckUnknownKeysIgnored() {
   Bind(loaded, editor);
   Expect("a document with unknown keys loads", LoadSettings(loaded));
   Expect("the known orbit mode survives",
-         GroupIs(loaded, SettingsGroup::Orbit, GroupMode::Opposite));
+         GroupIs(loaded, SettingsGroup::Orbit, GroupMode::Custom));
   Expect("the known orbit mode still runs the orbit",
          loaded.orbit_enabled.load());
 }

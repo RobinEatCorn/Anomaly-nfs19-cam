@@ -551,6 +551,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.orbit_radius.load(std::memory_order_acquire);
   context.display.orbit_height =
       context.orbit_height.load(std::memory_order_acquire);
+  context.display.orbit_look_at_height =
+      context.orbit_look_at_height.load(std::memory_order_acquire);
   context.display.orbit_weave =
       context.orbit_weave.load(std::memory_order_acquire);
   context.display.orbit_fov =

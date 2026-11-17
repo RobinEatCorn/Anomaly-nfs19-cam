@@ -300,6 +300,32 @@ void TestOrbitHeight() {
              std::sqrt(5.05 * 5.05 - 0.77 * 0.77), 1e-9);
 }
 
+void TestLookAtHeight() {
+  // The look-at height is an independent knob: it moves the pivot the camera
+  // circles and aims at, while the eye height and the slant radius stay put.
+  Fixture fixture;
+  fixture.config.camera_height_m = 2.4;
+  fixture.config.look_at_height_m = 0.6;
+  fixture.shot.SetConfig(fixture.config);
+  fixture.EnterOrbit();
+
+  const CarBasis basis = MakeCarBasis(fixture.car.yaw, fixture.car.pitch);
+  const Vec3 offset = OrbitOffset(fixture.last.view, fixture.car, 0.6);
+  const double vertical = Dot(offset, basis.up);
+  ExpectNear("look-at override puts the pivot 0.6 m up",
+             Dot(Sub(fixture.last.view.target, fixture.car.position),
+                 basis.up),
+             0.6, 0.05);
+  ExpectNear("look-at override keeps the camera height above the origin",
+             0.6 + vertical, 2.4, 1e-9);
+  ExpectNear("look-at override keeps the slant radius", Length(offset), 5.05,
+             1e-9);
+  // asin((2.4 - 0.6) / 5.05) = 20.881 degrees: the two heights, not a stored
+  // angle, decide the elevation.
+  ExpectNear("look-at override sets the elevation from the two heights",
+             std::asin(vertical / 5.05) * kDegreesPerRadian, 20.881457, 1e-6);
+}
+
 void TestConstantAngularRate() {
   Fixture fixture;
   fixture.EnterOrbit();
@@ -567,6 +593,7 @@ int main() {
   TestEntryDuration();
   TestGeometryAndAngles();
   TestOrbitHeight();
+  TestLookAtHeight();
   TestConstantAngularRate();
   TestWeaveTrack();
   TestWeaveDisplacement();
