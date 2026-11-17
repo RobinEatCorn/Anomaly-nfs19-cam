@@ -27,6 +27,7 @@
 // body instead of rotating the shot into the ground.
 
 #include "car_sample.hpp"
+#include "shot_blend.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -157,69 +158,14 @@ struct BurnoutShotResult final {
          kDegreesPerRadian;
 }
 
+// The shot-pose helpers now live in shot_blend.hpp so the parked orbit can
+// share them. The using-declarations keep every existing call site (and the
+// burnout tests) working unchanged.
 namespace burnout_shot_detail {
 
-[[nodiscard]] inline double Finite(const double value,
-                                   const double fallback) noexcept {
-  return std::isfinite(value) ? value : fallback;
-}
-
-[[nodiscard]] inline bool FiniteVec(const Vec3 value) noexcept {
-  return std::isfinite(value.x) && std::isfinite(value.y) &&
-         std::isfinite(value.z);
-}
-
-[[nodiscard]] inline Vec3 SafeVec(const Vec3 value,
-                                  const Vec3 fallback = {}) noexcept {
-  return FiniteVec(value) ? value : fallback;
-}
-
-// Rotate one direction toward another by the shortest path. Opposite vectors
-// have no unique shortest path, so pick a stable perpendicular axis; this only
-// happens for a pathological caller and keeps the result finite.
-[[nodiscard]] inline Vec3 SlerpDirection(Vec3 from, Vec3 to,
-                                         const double t) noexcept {
-  from = Normalize(from);
-  to = Normalize(to);
-  const double cosine = Clamp(Dot(from, to), -1.0, 1.0);
-  if (cosine > 0.9995) {
-    return Normalize(Add(Mul(from, 1.0 - t), Mul(to, t)));
-  }
-  if (cosine < -0.9995) {
-    Vec3 axis = std::fabs(from.z) < 0.9
-                    ? Cross(from, Vec3{0.0, 0.0, 1.0})
-                    : Cross(from, Vec3{0.0, 1.0, 0.0});
-    if (Length(axis) < 1e-9) {
-      axis = Cross(from, Vec3{1.0, 0.0, 0.0});
-    }
-    axis = Normalize(axis);
-    const double angle = kPi * t;
-    return Normalize(Add(Mul(from, std::cos(angle)),
-                         Mul(axis, std::sin(angle))));
-  }
-  const double angle = std::acos(cosine);
-  const double sine = std::sin(angle);
-  if (std::fabs(sine) < 1e-9) {
-    return from;
-  }
-  return Normalize(
-      Add(Mul(from, std::sin((1.0 - t) * angle) / sine),
-          Mul(to, std::sin(t * angle) / sine)));
-}
-
-[[nodiscard]] inline Vec3 OrthonormalUp(Vec3 up, const Vec3 forward,
-                                        const Vec3 fallback) noexcept {
-  up = Sub(up, Mul(forward, Dot(up, forward)));
-  if (Length(up) < 1e-9) {
-    up = Sub(fallback, Mul(forward, Dot(fallback, forward)));
-  }
-  if (Length(up) < 1e-9) {
-    up = std::fabs(forward.z) < 0.9 ? Vec3{0.0, 0.0, 1.0}
-                                    : Vec3{1.0, 0.0, 0.0};
-    up = Sub(up, Mul(forward, Dot(up, forward)));
-  }
-  return Normalize(up);
-}
+using shot_blend_detail::Finite;
+using shot_blend_detail::OrthonormalUp;
+using shot_blend_detail::SafeVec;
 
 }  // namespace burnout_shot_detail
 
@@ -487,12 +433,10 @@ class BurnoutShot final {
   double time_{};
 };
 
-// Blend the chase view and the shot view around a car-local pivot. The shot is
-// not a straight lerp: NFS uses EULER_ORBIT, so the eye travels in cylindrical
-// coordinates around the rear quarter. The look direction uses a slerp and the
-// up vector is re-orthogonalised, keeping the blend free of the usual
-// target-length/pitch pops. WheelSpin has Roll 0.0 and no DUTCH controller, so
-// its visible tilt recovery is this one orbit/euler blend, not a roll spring.
+// Blend the chase view and the burnout shot around the car-local pivot. The
+// EULER_ORBIT implementation is shared with the parked orbit (shot_blend.hpp);
+// this wrapper only supplies the burnout pivot height so the existing call
+// sites and the burnout acceptance tests keep their exact behaviour.
 //
 // `blend == 0` returns `chase` bit-for-bit (no normalisation), and `blend == 1`
 // returns `shot` bit-for-bit; only the interior takes the orbit path.
@@ -500,72 +444,7 @@ class BurnoutShot final {
     const CameraState& chase, const CameraState& shot, const CarState& car,
     const double blend, const double pivot_height_m =
                              kBurnoutOrbitPivotHeightM) noexcept {
-  const double t = Clamp(burnout_shot_detail::Finite(blend, 0.0), 0.0, 1.0);
-  if (t <= 0.0) {
-    return chase;
-  }
-  if (t >= 1.0) {
-    return shot;
-  }
-
-  using namespace burnout_shot_detail;
-  const Vec3 car_position = SafeVec(car.position);
-  const double yaw = Finite(car.yaw, 0.0);
-  const double pitch = Finite(car.pitch, 0.0);
-  const CarBasis basis = MakeCarBasis(yaw, pitch);
-  const Vec3 pivot =
-      Add(car_position, Mul(basis.up, (std::max)(0.0, pivot_height_m)));
-
-  struct Cylindrical final {
-    double radius{};
-    double theta{};
-    double height{};
-  };
-  const auto to_cylindrical = [&](const Vec3 point) {
-    const Vec3 offset = Sub(point, pivot);
-    const double x = Dot(offset, basis.forward);
-    const double y = Dot(offset, basis.right);
-    return Cylindrical{std::hypot(x, y), std::atan2(y, x),
-                       Dot(offset, basis.up)};
-  };
-
-  const Cylindrical from = to_cylindrical(chase.position);
-  const Cylindrical to = to_cylindrical(shot.position);
-  const double radius = Lerp(from.radius, to.radius, t);
-  const double theta = from.theta + WrapPi(to.theta - from.theta) * t;
-  const double height = Lerp(from.height, to.height, t);
-  const Vec3 position =
-      Add(Add(pivot, Add(Mul(basis.forward, radius * std::cos(theta)),
-                         Mul(basis.right, radius * std::sin(theta)))),
-          Mul(basis.up, height));
-
-  Vec3 chase_direction = Sub(chase.target, chase.position);
-  Vec3 shot_direction = Sub(shot.target, shot.position);
-  if (Length(chase_direction) < 1e-9) {
-    chase_direction = ForwardFromYaw(yaw);
-  }
-  if (Length(shot_direction) < 1e-9) {
-    shot_direction = ForwardFromYaw(yaw);
-  }
-  const Vec3 direction =
-      SlerpDirection(chase_direction, shot_direction, t);
-
-  Vec3 up = Normalize(Add(Mul(chase.up, 1.0 - t), Mul(shot.up, t)));
-  up = OrthonormalUp(up, direction,
-                     Length(shot.up) > 1e-9 ? shot.up : basis.up);
-
-  CameraState result;
-  result.position = position;
-  result.target = Add(position, direction);
-  result.up = up;
-  result.fov_y_degrees = Lerp(chase.fov_y_degrees, shot.fov_y_degrees, t);
-  result.roll = Lerp(chase.roll, shot.roll, t);
-  result.roll_degrees = result.roll * kDegreesPerRadian;
-  result.pitch_degrees =
-      std::asin(Clamp(direction.z, -1.0, 1.0)) * kDegreesPerRadian;
-  result.yaw_degrees =
-      std::atan2(direction.y, direction.x) * kDegreesPerRadian;
-  return result;
+  return BlendShotAroundCarPivot(chase, shot, car, blend, pivot_height_m);
 }
 
 }  // namespace nfs2015_chase

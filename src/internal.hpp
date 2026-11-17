@@ -236,6 +236,16 @@ void PublishRouteBModelPose(Context &context,
                             std::int64_t now_ns) noexcept;
 void UpdateCamera(Context &context, double dt) noexcept;
 
+// --- orbit_ui.cpp ---------------------------------------------------------
+// Game-thread backend for PLAN-nfs2015-orbit-hide-ui.md TG-14. Resolution and
+// ProcessEvent calls only run on the Game tick. Stop runs in the Lifecycle
+// domain, so it persists a recovery marker for the next Game tick/generation
+// rather than calling ProcessEvent from a non-Game thread.
+void LoadOrbitUiMarker(Context &context) noexcept;
+void ResetOrbitUi(Context &context) noexcept;
+void UpdateOrbitUiHide(Context &context) noexcept;
+void RestoreOrbitUiOnStop(Context &context) noexcept;
+
 // --- view_mode_cycle.cpp --------------------------------------------------
 // Task group 0 of PLAN-zkey-phase2-h1.md: one log-only detour on
 // HTPlayerController::ToggleSwitchCameraViewMode. Every entry point here is

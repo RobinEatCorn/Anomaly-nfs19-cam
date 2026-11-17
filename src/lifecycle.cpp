@@ -30,6 +30,15 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
       host, ANOMALY_CORE_SERVICE_V1_ID, ANOMALY_CORE_SERVICE_V1_VERSION);
   context->config = Query<AnomalyConfigServiceV1>(
       host, ANOMALY_CONFIG_SERVICE_V1_ID, ANOMALY_CONFIG_SERVICE_V1_VERSION);
+  // Optional private storage for the orbit HUD crash/unload recovery marker.
+  context->storage = Query<AnomalyStorageServiceV1>(
+      host, ANOMALY_STORAGE_SERVICE_V1_ID,
+      ANOMALY_STORAGE_SERVICE_V1_VERSION);
+  context->scheduler = Query<AnomalySchedulerServiceV1>(
+      host, ANOMALY_SCHEDULER_SERVICE_V1_ID,
+      ANOMALY_SCHEDULER_SERVICE_V1_VERSION);
+  context->input = Query<AnomalyInputServiceV1>(
+      host, ANOMALY_INPUT_SERVICE_V1_ID, ANOMALY_INPUT_SERVICE_V1_VERSION);
   context->json = Query<AnomalyJsonServiceV1>(
       host, ANOMALY_JSON_SERVICE_V1_ID, ANOMALY_JSON_SERVICE_V1_VERSION);
   context->ui = Query<AnomalyUiServiceV1>(
@@ -96,6 +105,9 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
     delete context;
     return Status(ANOMALY_STATUS_V1_FAILED, "camera settings are invalid");
   }
+  // If a previous generation hid the HUD and failed to restore it from its
+  // on_stop thread, the marker schedules a Game-thread restore on this load.
+  LoadOrbitUiMarker(*context);
   *plugin_context = context;
   return anomaly::sdk::Ok();
 }
@@ -163,6 +175,7 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
     context->hook_target.store(view_point_target, std::memory_order_release);
   }
   ResetMotion(*context);
+  ResetOrbitUi(*context);
   context->wheel_steer = WheelSteerState{};
   context->vehicle_present_last = false;
   context->last_vehicle_present_time = 0.0;
@@ -264,6 +277,7 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   context->game_offset_last_ns = 0;
   context->car_ring.Clear();
   PublishInactive(*context);
+  RestoreOrbitUiOnStop(*context);
   ReleaseProbeSubscription(*context);
   ReleaseSettingsWindow(*context);
   ReleaseHook(*context);
@@ -305,7 +319,13 @@ void ANOMALY_CALL Unload(void *plugin_context) {
   if (context == nullptr) {
     return;
   }
-  static_cast<void>(Stop(context, 0));
+  // The Host calls on_stop before on_unload. If Start was reached, that Stop
+  // already released the hooks and wrote the orbit HUD marker. Calling Stop a
+  // second time here used to run RestoreOrbitUiOnStop with an empty state and
+  // overwrite that marker with "visible", defeating startup recovery.
+  if (context->started.load(std::memory_order_acquire)) {
+    static_cast<void>(Stop(context, 0));
+  }
   ReleaseSettingsSchema(*context);
   delete context;
 }
@@ -412,6 +432,7 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
     context->camera_ms_last =
         static_cast<double>(NowNanoseconds() - camera_begin_ns) * 1e-6;
     context->camera_cost.Add(context->camera_ms_last);
+    UpdateOrbitUiHide(*context);
     // Probe: read-only reconnaissance, one Game tick at a time. It runs after
     // UpdateCamera so the yaw it compares is this tick's sample.
     RunProbe(*context, dt);

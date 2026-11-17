@@ -25,11 +25,16 @@ namespace nfs2015_chase {
 // Burnout state published by the Game tick. `active` is the already-filtered
 // gameplay condition; `left`/`right` are the per-rear-wheel flags and
 // `intensity` is the smoothed 0..1 strength used by the shot animation.
-// Phase 1 only consumes this struct; the sample-ring plumbing is Phase 2.
+// `input_active` is a separate, unfiltered fact: any of throttle/brake/
+// steering/handbrake is deflected. The parked-orbit model uses it to decide
+// whether the car is really parked; it is deliberately not derived from
+// `active` because a burnout is an input, not a parked car.
 struct BurnoutSample final {
   bool active{};
   bool left{};
   bool right{};
+  // True when the driver is touching any of the four vehicle inputs.
+  bool input_active{};
   double intensity{};
   double throttle{};
   double handbrake{};
@@ -103,11 +108,12 @@ struct CarSample final {
   result.camera_height_m =
       Lerp(from.camera_height_m, to.camera_height_m, t);
   // Burnout facts are event flags plus a smoothed strength. A boolean halfway
-  // between true and false is meaningless, so active/left/right come from the
-  // newer sample; the continuous values are safe to interpolate.
+  // between true and false is meaningless, so active/left/right/input_active
+  // come from the newer sample; the continuous values are safe to interpolate.
   result.burnout.active = to.burnout.active;
   result.burnout.left = to.burnout.left;
   result.burnout.right = to.burnout.right;
+  result.burnout.input_active = to.burnout.input_active;
   result.burnout.intensity =
       Lerp(from.burnout.intensity, to.burnout.intensity, t);
   result.burnout.throttle =

@@ -27,6 +27,7 @@ anomaly_add_plugin(nfs2015_chase_cam
             src/sdk_support.cpp
             src/game_tick.cpp
             src/presenter.cpp
+            src/orbit_ui.cpp
             src/display.cpp
             src/lifecycle.cpp
             src/hooks.cpp
@@ -110,6 +111,44 @@ if(NFS2015_CHASE_CAM_BUILD_TESTS)
             -static -static-libgcc -static-libstdc++)
     endif()
     add_test(NAME nfs2015_burnout_shot_model COMMAND nfs2015_burnout_shot_test)
+
+    add_executable(nfs2015_orbit_shot_test tests/orbit_shot_test.cpp)
+    target_include_directories(nfs2015_orbit_shot_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(MSVC)
+        target_compile_options(nfs2015_orbit_shot_test PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+    elseif(MINGW)
+        target_link_options(nfs2015_orbit_shot_test PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME nfs2015_orbit_shot_model COMMAND nfs2015_orbit_shot_test)
+
+    add_executable(nfs2015_orbit_handheld_test tests/orbit_handheld_test.cpp)
+    target_include_directories(nfs2015_orbit_handheld_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(MSVC)
+        target_compile_options(nfs2015_orbit_handheld_test PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+    elseif(MINGW)
+        target_link_options(nfs2015_orbit_handheld_test PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME nfs2015_orbit_handheld_model
+        COMMAND nfs2015_orbit_handheld_test)
+
+    add_executable(nfs2015_orbit_ui_hide_test tests/orbit_ui_hide_test.cpp)
+    target_include_directories(nfs2015_orbit_ui_hide_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(MSVC)
+        target_compile_options(nfs2015_orbit_ui_hide_test PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+    elseif(MINGW)
+        target_link_options(nfs2015_orbit_ui_hide_test PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME nfs2015_orbit_ui_hide_model
+        COMMAND nfs2015_orbit_ui_hide_test)
 
     add_executable(nfs2015_wheel_steer_test tests/wheel_steer_test.cpp)
     target_include_directories(nfs2015_wheel_steer_test PRIVATE

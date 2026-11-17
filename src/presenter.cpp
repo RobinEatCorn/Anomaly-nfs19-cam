@@ -70,6 +70,73 @@ void PublishPresenterPose(Context &context, const double location[3],
                                         std::memory_order_release);
 }
 
+// Publish the render-side orbit facts for the Game-tick diagnostics snapshot.
+// All fields are relaxed atomics, so this is safe while holding the presenter
+// lock. A phase change also emits one INFO line, matching the burnout sample's
+// transition log style without logging every frame.
+void PublishOrbitDiagnostics(
+    Context &context, const nfs2015_chase::OrbitShotState &state,
+    const double blend) noexcept {
+  const auto mode = static_cast<std::uint32_t>(state.mode);
+  context.presenter_orbit_mode.store(mode, std::memory_order_relaxed);
+  context.presenter_orbit_hold_seconds.store(state.hold_time,
+                                             std::memory_order_relaxed);
+  context.presenter_orbit_time.store(state.time, std::memory_order_relaxed);
+  context.presenter_orbit_phase0_degrees.store(
+      state.phase0 * nfs2015_chase::kDegreesPerRadian,
+      std::memory_order_relaxed);
+  context.presenter_orbit_speed_mps.store(state.speed_mps,
+                                          std::memory_order_relaxed);
+  context.presenter_orbit_input.store(state.input,
+                                      std::memory_order_relaxed);
+  context.presenter_orbit_shake_x_m.store(state.shake_x_m,
+                                          std::memory_order_relaxed);
+  context.presenter_orbit_shake_y_m.store(state.shake_y_m,
+                                          std::memory_order_relaxed);
+  if (blend > 0.0) {
+    context.presenter_orbit_blend.store(blend, std::memory_order_relaxed);
+  } else if (context.presenter_orbit_blend.load(
+                 std::memory_order_relaxed) != 0.0) {
+    context.presenter_orbit_blend.store(0.0, std::memory_order_relaxed);
+  }
+  if (context.presenter_orbit_logged_mode == mode) {
+    return;
+  }
+  context.presenter_orbit_logged_mode = mode;
+  char message[288]{};
+  std::snprintf(
+      message, sizeof(message),
+      "nfs2015 chase cam: orbit state=%s blend=%.2f hold=%.2fs time=%.2fs "
+      "phase0=%.1f in=%d speed=%.2f shake=(%.3f,%.3f)",
+      nfs2015_chase::OrbitPhaseName(state.mode), blend, state.hold_time,
+      state.time, state.phase0 * nfs2015_chase::kDegreesPerRadian,
+      state.input ? 1 : 0, state.speed_mps, state.shake_x_m,
+      state.shake_y_m);
+  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
+}
+
+void PublishOrbitReset(Context &context) noexcept {
+  context.orbit_shot.Reset();
+  context.presenter_orbit_mode.store(
+      static_cast<std::uint32_t>(nfs2015_chase::OrbitPhase::kIdle),
+      std::memory_order_relaxed);
+  context.presenter_orbit_blend.store(0.0, std::memory_order_relaxed);
+  context.presenter_orbit_hold_seconds.store(0.0, std::memory_order_relaxed);
+  context.presenter_orbit_time.store(0.0, std::memory_order_relaxed);
+  context.presenter_orbit_phase0_degrees.store(0.0,
+                                               std::memory_order_relaxed);
+  context.presenter_orbit_speed_mps.store(0.0, std::memory_order_relaxed);
+  context.presenter_orbit_input.store(false, std::memory_order_relaxed);
+  context.presenter_orbit_shake_x_m.store(0.0, std::memory_order_relaxed);
+  context.presenter_orbit_shake_y_m.store(0.0, std::memory_order_relaxed);
+  if (context.presenter_orbit_logged_mode == 0U) {
+    return;
+  }
+  context.presenter_orbit_logged_mode = 0U;
+  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+      std::string_view("nfs2015 chase cam: orbit state=Idle (reset)"));
+}
+
 [[nodiscard]] bool ReadPresenterPose(const Context &context, double location[3],
                                      double rotation[3], float *lens,
                                      bool *fov_enabled,
@@ -209,6 +276,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     context.burnout_shot.Reset();
     context.presenter_burnout_blend.store(0.0, std::memory_order_relaxed);
     context.presenter_burnout_side.store(1, std::memory_order_relaxed);
+    PublishOrbitReset(context);
     return false;
   }
 
@@ -365,14 +433,26 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     }
   }
 
+  // Entering or leaving the chase slot bumps the view epoch. Drop the orbit so
+  // returning from first person (or a cutscene) cannot resume a latched clock.
+  const std::uint64_t view_epoch =
+      context.view_epoch.load(std::memory_order_acquire);
+  if (context.presenter_initialized &&
+      context.presenter_view_epoch != view_epoch) {
+    PublishOrbitReset(context);
+  }
+  context.presenter_view_epoch = view_epoch;
+
   if (!context.presenter_initialized || context.presenter_epoch != sample.epoch ||
       !context.chase.initialized()) {
     context.chase.Reset(sample.car);
     context.burnout_shot.Reset();
     context.presenter_burnout_blend.store(0.0, std::memory_order_relaxed);
     context.presenter_burnout_side.store(1, std::memory_order_relaxed);
+    PublishOrbitReset(context);
     context.presenter_initialized = true;
     context.presenter_epoch = sample.epoch;
+    context.presenter_view_epoch = view_epoch;
     context.presenter_last_ns = now_ns;
   }
 
@@ -399,13 +479,55 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   const nfs2015_chase::CameraState chase_view =
       context.chase.Update(elapsed, sample.car);
 
+  // Parked orbit: advance on the same render clock and place it under the
+  // burnout shot. The orbit consumes the chase pose as its entry reference,
+  // so the 2 s entry starts from what the player is already looking at. A zero
+  // blend returns `chase_view` bit-for-bit, so an idle orbit changes nothing.
+  nfs2015_chase::CameraState view = chase_view;
+  const bool orbit_enabled =
+      context.orbit_enabled.load(std::memory_order_acquire);
+  if (orbit_enabled) {
+    nfs2015_chase::OrbitShotConfig orbit_config =
+        context.orbit_shot.config();
+    orbit_config.entry_delay =
+        context.orbit_entry_delay.load(std::memory_order_acquire);
+    orbit_config.period_seconds =
+        context.orbit_period.load(std::memory_order_acquire);
+    orbit_config.radius_m =
+        context.orbit_radius.load(std::memory_order_acquire);
+    orbit_config.camera_height_m =
+        context.orbit_height.load(std::memory_order_acquire);
+    orbit_config.weave_amplitude_m =
+        context.orbit_weave.load(std::memory_order_acquire);
+    orbit_config.vertical_fov_degrees =
+        context.orbit_fov.load(std::memory_order_acquire);
+    orbit_config.handheld_strength =
+        context.orbit_shake_strength.load(std::memory_order_acquire);
+    orbit_config.handheld_frequency_hz =
+        context.orbit_shake_frequency.load(std::memory_order_acquire);
+    orbit_config.slope_follow =
+        context.slope_follow.load(std::memory_order_acquire);
+    context.orbit_shot.SetConfig(orbit_config);
+    const nfs2015_chase::OrbitShotResult orbit =
+        context.orbit_shot.Update(elapsed, sample.car, sample.burnout,
+                                  chase_view.position, sample.aspect_ratio);
+    PublishOrbitDiagnostics(context, orbit.state, orbit.blend);
+    view = nfs2015_chase::BlendShotAroundCarPivot(
+        chase_view, orbit.view, sample.car, orbit.blend,
+        nfs2015_chase::kOrbitLookAtHeightM);
+  } else {
+    // Disabling the feature must cut back to the exact chase pose instead of
+    // leaving a latched orbit to resume at full blend when it is re-enabled.
+    PublishOrbitReset(context);
+  }
+
   // Phase 3/4: advance the burnout shot on the same render clock and blend
-  // its pose into the chase view before publishing anything. The shot consumes
-  // the same anchored car sample as the chase, so the wheel stays attached to
-  // the rendered chassis. A zero blend returns the chase view exactly.
+  // its pose into the current view before publishing anything. The shot
+  // consumes the same anchored car sample as the chase, so the wheel stays
+  // attached to the rendered chassis. Burnout is the outer layer: it takes the
+  // orbit-blended pose as its base and can take over completely.
   const bool burnout_enabled =
       context.burnout_enabled.load(std::memory_order_acquire);
-  nfs2015_chase::CameraState view = chase_view;
   if (burnout_enabled) {
     nfs2015_chase::BurnoutShotConfig shot_config =
         context.burnout_shot.config();
@@ -443,7 +565,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
                                           std::memory_order_relaxed);
     context.presenter_burnout_side.store(burnout.side,
                                          std::memory_order_relaxed);
-    view = nfs2015_chase::BlendBurnoutCamera(chase_view, burnout.view,
+    view = nfs2015_chase::BlendBurnoutCamera(view, burnout.view,
                                              sample.car, burnout.blend);
   } else {
     // Disabling the feature must cut back to the exact chase pose instead of

@@ -425,6 +425,8 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
     // Byte 0 is therefore the low byte of a float, not a handbrake candidate;
     // keep it visible as a legacy cross-check, but resolve the handbrake from
     // byte 12 only. The old byte-0 fallback is intentionally gone.
+    probe.brake_pedal_known =
+        ReadBurnoutFloat(input, 8, probe.brake_pedal);
     probe.handbrake12_known =
         ReadBurnoutBool(input, 12, probe.handbrake12);
     probe.handbrake0_known = ReadBurnoutBool(input, 0, probe.handbrake0);
@@ -457,6 +459,7 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
                 probe.input_raw_size);
     probe.last_input_raw_size = probe.input_raw_size;
   } else {
+    probe.brake_pedal_known = false;
     probe.handbrake_known = false;
     probe.handbrake12_known = false;
     probe.handbrake0_known = false;
@@ -515,6 +518,8 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
   signals.player_throttle = probe.player_throttle;
   signals.brake_known = probe.brake_known;
   signals.brake = probe.brake;
+  signals.brake_pedal_known = probe.brake_pedal_known;
+  signals.brake_pedal = probe.brake_pedal;
   signals.steering_known = probe.steering_known;
   signals.steering = probe.steering;
   // Wheel indices 2 and 3 are the rear pair on this car (Phase 0). The exact
@@ -630,6 +635,10 @@ constexpr double kBurnoutHoldSeconds = 0.28;
 constexpr double kBurnoutIntensityAttack = 12.0;
 constexpr double kBurnoutIntensityRelease = 8.0;
 constexpr double kBurnoutFallbackThrottle = 0.15;
+// A parked car must have all four vehicle inputs released. The threshold is
+// deliberately larger than stick drift and smaller than a real press; the
+// orbit model consumes the resulting boolean, not the raw values.
+constexpr double kInputActiveThreshold = 0.05;
 
 // Turn the latest reflected facts into one CarSample::burnout. This is the
 // only place the Game tick applies policy: the ground/speed gates, the short
@@ -699,6 +708,16 @@ constexpr double kBurnoutFallbackThrottle = 0.15;
   sample.steering = signals.steering_known
                         ? nfs2015_chase::Clamp(signals.steering, -1.0, 1.0)
                         : 0.0;
+  // GetVehicleBrake is not the pedal: in this game it reads 1.0 while the car
+  // is coasting or parked with no input. Use BrakeInput from GetInputInfo
+  // instead, and leave it out of the gate when that reflection is unavailable.
+  sample.input_active =
+      (throttle_known && throttle > kInputActiveThreshold) ||
+      (signals.brake_pedal_known &&
+       signals.brake_pedal > kInputActiveThreshold) ||
+      (signals.steering_known &&
+       std::fabs(signals.steering) > kInputActiveThreshold) ||
+      (signals.handbrake_known && signals.handbrake);
   sample.speed_mps = std::isfinite(forward_speed) ? forward_speed : 0.0;
 
   if (!state.have_last_log || state.last_log_active != sample.active ||

@@ -54,8 +54,8 @@ usage() {
       --fresh             删除构建树后重新 configure（SDK 换路径时用）
       --clean             先 clean 再全量重编（保留构建树与缓存）
       --configure-only    只 configure，不编译
-      --no-tests          不构建相机模型验收夹具（nfs2015_chase_cam_test.exe）
-      --run-tests         跑验收夹具；WSL2 直接运行 PE，纯 Linux 用 wine
+      --no-tests          不构建验收夹具（chase / burnout / orbit / handheld / wheel steer / orbit UI hide / settings 三套）
+      --run-tests         跑全部验收夹具；WSL2 直接运行 PE，纯 Linux 用 wine
       --no-verify         跳过 plugin.dll 的导入/导出校验
       --install DIR       构建后安装到游戏根目录（<DIR>/Anomaly/plugins/robineatcorn.nfs2015-chase-cam）
                           WSL 里可以直接写 Windows 路径，如 D:/Games/NTE
@@ -336,18 +336,32 @@ fi
 
 if [[ $RUN_TESTS -eq 1 ]]; then
     info "验收夹具"
-    if [[ -n "$runner" ]]; then
-        "$runner" "$BUILD_DIR/nfs2015_chase_cam_test.exe"
-    else
-        "$BUILD_DIR/nfs2015_chase_cam_test.exe"
-    fi
+    test_exes=(
+        nfs2015_chase_cam_test
+        nfs2015_burnout_shot_test
+        nfs2015_orbit_shot_test
+        nfs2015_orbit_handheld_test
+        nfs2015_wheel_steer_test
+        nfs2015_orbit_ui_hide_test
+        nfs2015_settings_groups_test
+        nfs2015_settings_persistence_test
+        nfs2015_settings_panel_test
+    )
+    for test_exe in "${test_exes[@]}"; do
+        printf '  %s\n' "$test_exe"
+        if [[ -n "$runner" ]]; then
+            "$runner" "$BUILD_DIR/$test_exe.exe"
+        else
+            "$BUILD_DIR/$test_exe.exe"
+        fi
+    done
 fi
 
 # ---------------------------------------------------------------- 结果
 size="$(du -h "$dll" | cut -f1)"
 ok "完成：$package_dir"
 printf '  plugin.dll  %s，PE32+ x86-64\n' "$size"
-printf '  验收夹具    %s\n' "$BUILD_DIR/nfs2015_chase_cam_test.exe"
+printf '  验收夹具    %s（chase / burnout / orbit / handheld / wheel steer / orbit UI hide / settings groups / persistence / panel）\n' "$BUILD_DIR"
 cat <<EOF
 
 下一步

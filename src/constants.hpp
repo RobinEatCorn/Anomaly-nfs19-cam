@@ -113,6 +113,41 @@ constexpr double kMaximumBurnoutEntrySpeed = 10.0;
 constexpr double kDefaultBurnoutHoldSpeed = 3.0;
 constexpr double kMinimumBurnoutHoldSpeed = 0.0;
 constexpr double kMaximumBurnoutHoldSpeed = 20.0;
+// Parked orbit defaults. The effect is on by default (plan Q1): after the car
+// has been parked and untouched for the entry delay, the camera circles it.
+constexpr bool kDefaultOrbitEnabled = true;
+constexpr double kDefaultOrbitEntryDelay = 8.0;
+constexpr double kMinimumOrbitEntryDelay = 0.0;
+constexpr double kMaximumOrbitEntryDelay = 60.0;
+constexpr double kDefaultOrbitPeriod = 60.0;
+constexpr double kMinimumOrbitPeriod = 10.0;
+constexpr double kMaximumOrbitPeriod = 600.0;
+constexpr double kDefaultOrbitRadius = 5.05;
+constexpr double kMinimumOrbitRadius = 2.0;
+constexpr double kMaximumOrbitRadius = 12.0;
+// Camera height above the car origin. The default reproduces the guide's
+// 6.8 degree elevation at the 5.05 m radius (look-at height 1.23 m).
+constexpr double kDefaultOrbitHeight = 1.83;
+constexpr double kMinimumOrbitHeight = 0.3;
+constexpr double kMaximumOrbitHeight = 3.0;
+constexpr double kDefaultOrbitWeave = 1.0;
+constexpr double kMinimumOrbitWeave = 0.0;
+constexpr double kMaximumOrbitWeave = 3.0;
+// Vertical FOV: 45 degrees is about 72 degrees horizontal at 16:9.
+constexpr double kDefaultOrbitFov = 45.0;
+constexpr double kMinimumOrbitFov = 20.0;
+constexpr double kMaximumOrbitFov = 70.0;
+// Handheld look-at noise. The UI range is narrower than the model's internal
+// 0.5..30 Hz guard: 2..8 Hz is the useful "handheld vs too fast" band.
+constexpr double kDefaultOrbitShakeStrength = 1.0;
+constexpr double kMinimumOrbitShakeStrength = 0.0;
+constexpr double kMaximumOrbitShakeStrength = 2.0;
+constexpr double kDefaultOrbitShakeFrequency = 5.0;
+// Hide the game HUD during the parked orbit. The runtime resolves the
+// W_OverallUILayout API; this switch is exposed in the settings panel later.
+constexpr bool kDefaultOrbitHideUi = true;
+constexpr double kMinimumOrbitShakeFrequency = 2.0;
+constexpr double kMaximumOrbitShakeFrequency = 8.0;
 // Slope following. The UI exposes only the master switch and the composition
 // strength; the gradient scalars stay in the settings file.
 constexpr double kDefaultSlopeStrength = 1.0;
@@ -633,6 +668,16 @@ constexpr std::string_view kSettingsSchema = R"json(
     "burnoutSideMode":{"type":"integer","minimum":0,"maximum":3},
     "burnoutEntrySpeed":{"type":"number","minimum":0.0,"maximum":10.0},
     "burnoutHoldSpeed":{"type":"number","minimum":0.0,"maximum":20.0},
+    "orbitEnabled":{"type":"boolean"},
+    "orbitHideUi":{"type":"boolean"},
+    "orbitEntryDelay":{"type":"number","minimum":0.0,"maximum":60.0},
+    "orbitPeriod":{"type":"number","minimum":10.0,"maximum":600.0},
+    "orbitRadius":{"type":"number","minimum":2.0,"maximum":12.0},
+    "orbitHeight":{"type":"number","minimum":0.3,"maximum":3.0},
+    "orbitWeave":{"type":"number","minimum":0.0,"maximum":3.0},
+    "orbitFov":{"type":"number","minimum":20.0,"maximum":70.0},
+    "orbitShakeStrength":{"type":"number","minimum":0.0,"maximum":2.0},
+    "orbitShakeFrequency":{"type":"number","minimum":2.0,"maximum":8.0},
     "wheelSteerEnabled":{"type":"boolean"},
     "wheelSteerEntrySpeedKmh":{"type":"number","minimum":20.0,"maximum":160.0},
     "wheelSteerMaxDegrees":{"type":"number","minimum":20.0,"maximum":50.0},

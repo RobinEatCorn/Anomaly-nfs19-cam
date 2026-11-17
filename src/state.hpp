@@ -21,6 +21,8 @@
 #include "chase_cam.hpp"
 #include "latency_window.hpp"
 #include "localization.hpp"
+#include "orbit_shot.hpp"
+#include "orbit_ui_hide.hpp"
 #include "wheel_steer.hpp"
 
 #include <array>
@@ -213,6 +215,11 @@ struct BurnoutProbeState final {
   double throttle{};
   bool brake_known{};
   double brake{};
+  // BrakeInput from GetInputInfo's HTVehicleInputInfo (float @8). Unlike
+  // GetVehicleBrake, which reads 1.0 while coasting at rest, this is the actual
+  // pedal value used to decide whether the car is parked.
+  bool brake_pedal_known{};
+  double brake_pedal{};
   bool steering_known{};
   double steering{};
   bool skid_known{};
@@ -943,9 +950,38 @@ struct DisplayState final {
   std::uint32_t burnout_side_mode{kDefaultBurnoutSideMode};
   double burnout_entry_speed{kDefaultBurnoutEntrySpeed};
   double burnout_hold_speed{kDefaultBurnoutHoldSpeed};
+  bool orbit_enabled{kDefaultOrbitEnabled};
+  bool orbit_hide_ui{kDefaultOrbitHideUi};
+  double orbit_entry_delay{kDefaultOrbitEntryDelay};
+  double orbit_period{kDefaultOrbitPeriod};
+  double orbit_radius{kDefaultOrbitRadius};
+  double orbit_height{kDefaultOrbitHeight};
+  double orbit_weave{kDefaultOrbitWeave};
+  double orbit_fov{kDefaultOrbitFov};
+  double orbit_shake_strength{kDefaultOrbitShakeStrength};
+  double orbit_shake_frequency{kDefaultOrbitShakeFrequency};
   double burnout_shot_blend{};
   int burnout_shot_side{1};
   std::uint64_t burnout_shot_fallbacks{};
+  double orbit_blend{};
+  nfs2015_chase::OrbitPhase orbit_state{nfs2015_chase::OrbitPhase::kIdle};
+  nfs2015_chase::OrbitUiHidePhase orbit_ui_phase{
+      nfs2015_chase::OrbitUiHidePhase::kIdle};
+  bool orbit_ui_was_hidden{};
+  bool orbit_ui_hidden{};
+  bool orbit_ui_intervened{};
+  bool orbit_ui_readback_supported{};
+  bool orbit_ui_readback_visible{};
+  std::uint32_t orbit_ui_hide_requests{};
+  std::uint32_t orbit_ui_restore_requests{};
+  std::uint32_t orbit_ui_errors{};
+  double orbit_hold_seconds{};
+  double orbit_time{};
+  double orbit_phase0_degrees{};
+  bool orbit_input{};
+  double orbit_speed_mps{};
+  double orbit_shake_x_m{};
+  double orbit_shake_y_m{};
   bool slope_follow{true};
   double slope_strength{kDefaultSlopeStrength};
   bool roll_only_in_drift{true};
@@ -1106,6 +1142,8 @@ struct BurnoutSignals final {
   double player_throttle{};
   bool brake_known{};
   double brake{};
+  bool brake_pedal_known{};
+  double brake_pedal{};
   bool steering_known{};
   double steering{};
   bool left_known{};
@@ -1251,10 +1289,102 @@ struct ViewModeState final {
   bool entry_pending_logged{};
 };
 
+// Game-thread-only runtime cache for the parked-orbit HUD hide. The pure
+// OrbitUiHide machine owns Q2 semantics; this struct owns the guest handles,
+// the object-registry scan and the readback targets. None of it is touched by
+// the render thread or by the settings UI.
+struct OrbitUiRuntimeState final {
+  nfs2015_chase::OrbitUiHide machine{};
+
+  AnomalyGenerationHandleV1 layout_class{};
+  AnomalyGenerationHandleV1 hide_all_layer{};
+  AnomalyGenerationHandleV1 revert_layer_show{};
+  AnomalyGenerationHandleV1 get_render_opacity{};
+  AnomalyGenerationHandleV1 set_render_opacity{};
+  AnomalyGenerationHandleV1 set_render_translation{};
+  AnomalyGenerationHandleV1 layout{};
+  std::array<AnomalyGenerationHandleV1, 4> readback{};
+  // The path queries can resolve the class's CDO WidgetTree. Only handles
+  // after the live layout are safe to animate; the CDO entries are read-only
+  // path candidates.
+  std::array<bool, 4> readback_live{};
+  // GameLayer_Stack is the menu/game layer; GameplayMain_Stack is the HUD.
+  // ESC only reveals the former, so the game's own HUD hide animation cannot
+  // replay over an already hidden HUD.
+  std::array<bool, 4> readback_menu{};
+  std::uint32_t readback_count{};
+
+  // Game-thread opacity ramp. HideAllLayer/RevertLayerShow flip the layer
+  // RenderOpacity immediately; the game's ESC menu instead fades the main form.
+  // Interpolate the live stack opacity for the same short, simple transition,
+  // then let the native function commit the final state.
+  struct Fade final {
+    bool active{};
+    bool hiding{};
+    double start{};
+    double duration{};
+    float from{};
+    float to{};
+  } fade;
+  // ESC reveals the menu layer after a full RevertLayerShow. Reassert the
+  // HUD-hidden/menu-visible split for a few frames because the game's own ESC
+  // handler also animates the HUD.
+  double menu_hold_until{};
+  // False after the opacity-only path is available: orbit hides only the HUD
+  // layer and leaves the menu layer live, so F1/F2/B/C/ESC can open their UIs
+  // on the first press. True only when SetRenderOpacity is unavailable and we
+  // fall back to HideAllLayer.
+  bool full_layer_hide{};
+
+  std::uint32_t layout_name_id{};
+  std::uint32_t layout_scan_index{};
+  std::uint32_t layout_scan_count{};
+  std::uint32_t readback_scan_index{};
+  std::uint32_t readback_scan_count{};
+
+  std::uint64_t generation{};
+  bool layout_scanning{};
+  bool layout_resolved{};
+  bool readback_scanning{};
+  bool readback_ready{};
+  bool readback_paths_tried{};
+
+  // A marker survives a plugin unload. The next generation uses it to restore
+  // a HUD that the previous generation hid but could not restore from the
+  // non-Game-thread on_stop callback.
+  bool startup_restore_pending{};
+  bool startup_restore_logged{};
+  double next_startup_restore{};
+  bool marker_error_logged{};
+  AnomalyGenerationHandleV1 marker_clear_task{};
+
+  // The presenter resets the orbit whenever the chase slot is left and
+  // re-entered. Track that generation too: a HUD hidden before a view
+  // transition must not survive into the new view.
+  std::uint64_t view_epoch{};
+  bool view_epoch_initialized{};
+
+  bool services_unavailable_logged{};
+  bool resolve_failed_logged{};
+  bool readback_unavailable_logged{};
+  bool last_invoke_ok{true};
+
+  double next_resolve{};
+  nfs2015_chase::OrbitUiHidePhase logged_phase{
+      nfs2015_chase::OrbitUiHidePhase::kIdle};
+};
+
 struct Context final {
   nfs2015_chase_cam::Localizer localizer;
   const AnomalyCoreServiceV1 *core{};
   const AnomalyConfigServiceV1 *config{};
+  // Optional plugin-private storage, used only for the orbit HUD recovery
+  // marker. It is optional because older hosts need not expose storage.
+  const AnomalyStorageServiceV1 *storage{};
+  const AnomalySchedulerServiceV1 *scheduler{};
+  // Optional input service: ESC must open the phone menu even while the orbit
+  // owns the HUD. `was_pressed` is polled on the Game tick.
+  const AnomalyInputServiceV1 *input{};
   const AnomalyJsonServiceV1 *json{};
   const AnomalyUiServiceV1 *ui{};
   const AnomalyWindowServiceV1 *window{};
@@ -1336,6 +1466,18 @@ struct Context final {
   std::atomic<std::uint32_t> burnout_side_mode{kDefaultBurnoutSideMode};
   std::atomic<double> burnout_entry_speed{kDefaultBurnoutEntrySpeed};
   std::atomic<double> burnout_hold_speed{kDefaultBurnoutHoldSpeed};
+  // Parked-orbit settings. Entry/exit durations stay in the model; the orbit
+  // height and framing values are exposed because the user can feel them.
+  std::atomic_bool orbit_enabled{kDefaultOrbitEnabled};
+  std::atomic_bool orbit_hide_ui{kDefaultOrbitHideUi};
+  std::atomic<double> orbit_entry_delay{kDefaultOrbitEntryDelay};
+  std::atomic<double> orbit_period{kDefaultOrbitPeriod};
+  std::atomic<double> orbit_radius{kDefaultOrbitRadius};
+  std::atomic<double> orbit_height{kDefaultOrbitHeight};
+  std::atomic<double> orbit_weave{kDefaultOrbitWeave};
+  std::atomic<double> orbit_fov{kDefaultOrbitFov};
+  std::atomic<double> orbit_shake_strength{kDefaultOrbitShakeStrength};
+  std::atomic<double> orbit_shake_frequency{kDefaultOrbitShakeFrequency};
   std::atomic_bool slope_follow{true};
   std::atomic<double> slope_strength{kDefaultSlopeStrength};
   std::atomic<double> slope_max_gradient_degrees{
@@ -1433,6 +1575,10 @@ struct Context final {
   // Written under a seqlock: odd while a write is in progress, even when the
   // snapshot is complete.
   std::atomic<std::uint64_t> view_sequence{};
+  // Bumped when the chase slot is left or re-entered. The render thread
+  // compares it with its own copy and drops a latched shot, so returning from
+  // first person or a cutscene does not resume an orbit immediately.
+  std::atomic<std::uint64_t> view_epoch{};
   std::atomic_bool view_active{};
   std::atomic<bool> view_fov_enabled{true};
   // `view_car_location` is the published camera anchor. The detour computes
@@ -1459,6 +1605,10 @@ struct Context final {
   // Phase 3: render-clock burnout shot state. It is advanced and read only
   // while presenter_lock is held, alongside the chase model.
   nfs2015_chase::BurnoutShot burnout_shot{};
+  // Parked-orbit state. Like the burnout shot it is advanced and read only
+  // while presenter_lock is held, alongside the chase model.
+  nfs2015_chase::OrbitShot orbit_shot{};
+  OrbitUiRuntimeState orbit_ui{};
   std::uint32_t configured_preset{0};
   bool chase_initialized{};
   // T2: the chase model runs on the render clock, so the Game tick only writes
@@ -1469,6 +1619,9 @@ struct Context final {
   std::atomic_flag presenter_lock = ATOMIC_FLAG_INIT;
   std::int64_t presenter_last_ns{};
   std::uint64_t presenter_epoch{};
+  std::uint64_t presenter_view_epoch{};
+  // Last orbit phase a transition log was emitted for (render thread only).
+  std::uint32_t presenter_orbit_logged_mode{};
   bool presenter_initialized{};
   std::int64_t presenter_pose_ns{};
   std::atomic<std::uint64_t> presenter_pose_sequence{};
@@ -1489,6 +1642,17 @@ struct Context final {
   std::atomic<double> presenter_burnout_blend{};
   std::atomic<int> presenter_burnout_side{1};
   std::atomic<std::uint64_t> presenter_burnout_fallbacks{};
+  // Parked-orbit diagnostics. Written on the render thread, read by the
+  // Game-tick display snapshot. The mode is the numeric OrbitPhase value.
+  std::atomic<double> presenter_orbit_blend{};
+  std::atomic<std::uint32_t> presenter_orbit_mode{};
+  std::atomic<double> presenter_orbit_hold_seconds{};
+  std::atomic<double> presenter_orbit_time{};
+  std::atomic<double> presenter_orbit_phase0_degrees{};
+  std::atomic<double> presenter_orbit_speed_mps{};
+  std::atomic_bool presenter_orbit_input{};
+  std::atomic<double> presenter_orbit_shake_x_m{};
+  std::atomic<double> presenter_orbit_shake_y_m{};
   std::atomic<std::int64_t> sample_interval_ns{};
   // Running mean of the Game tick interval. The presenter looks back this far
   // times kSampleDelayFactor, which is more than one interval, so the sample

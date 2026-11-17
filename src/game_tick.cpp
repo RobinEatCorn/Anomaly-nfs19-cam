@@ -506,6 +506,9 @@ void PublishInactive(Context &context) noexcept {
   context.view_sequence.store(sequence + 1U, std::memory_order_release);
   context.view_active.store(false, std::memory_order_release);
   context.view_sequence.store(sequence + 2U, std::memory_order_release);
+  // The render thread uses this to drop any latched shot: the next activation
+  // is a fresh entry, not a continuation of the pose that was left behind.
+  context.view_epoch.fetch_add(1U, std::memory_order_relaxed);
   // Re-entering the camera must not blend from the view that was active
   // before the player stopped driving.
   NoteViewSnap(context, kSnapReasonInactive);
@@ -517,6 +520,11 @@ void PublishInactive(Context &context) noexcept {
 }
 
 void ActivateView(Context &context, const bool fov_enabled) noexcept {
+  if (!context.last_view_active) {
+    // Entering the chase slot is a fresh view, even if the model kept running;
+    // a latched orbit must not reappear after a first-person session.
+    context.view_epoch.fetch_add(1U, std::memory_order_relaxed);
+  }
   context.last_view_active = true;
   context.last_fov_enabled = fov_enabled;
   context.view_active.store(true, std::memory_order_release);

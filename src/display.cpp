@@ -539,12 +539,63 @@ void UpdateDisplay(Context &context) noexcept {
       context.burnout_entry_speed.load(std::memory_order_acquire);
   context.display.burnout_hold_speed =
       context.burnout_hold_speed.load(std::memory_order_acquire);
+  context.display.orbit_enabled =
+      context.orbit_enabled.load(std::memory_order_acquire);
+  context.display.orbit_hide_ui =
+      context.orbit_hide_ui.load(std::memory_order_acquire);
+  context.display.orbit_entry_delay =
+      context.orbit_entry_delay.load(std::memory_order_acquire);
+  context.display.orbit_period =
+      context.orbit_period.load(std::memory_order_acquire);
+  context.display.orbit_radius =
+      context.orbit_radius.load(std::memory_order_acquire);
+  context.display.orbit_height =
+      context.orbit_height.load(std::memory_order_acquire);
+  context.display.orbit_weave =
+      context.orbit_weave.load(std::memory_order_acquire);
+  context.display.orbit_fov =
+      context.orbit_fov.load(std::memory_order_acquire);
+  context.display.orbit_shake_strength =
+      context.orbit_shake_strength.load(std::memory_order_acquire);
+  context.display.orbit_shake_frequency =
+      context.orbit_shake_frequency.load(std::memory_order_acquire);
   context.display.burnout_shot_blend =
       context.presenter_burnout_blend.load(std::memory_order_relaxed);
   context.display.burnout_shot_side =
       context.presenter_burnout_side.load(std::memory_order_relaxed);
   context.display.burnout_shot_fallbacks =
       context.presenter_burnout_fallbacks.load(std::memory_order_relaxed);
+  context.display.orbit_blend =
+      context.presenter_orbit_blend.load(std::memory_order_relaxed);
+  context.display.orbit_state =
+      static_cast<nfs2015_chase::OrbitPhase>(
+          context.presenter_orbit_mode.load(std::memory_order_relaxed));
+  const nfs2015_chase::OrbitUiHideState &orbit_ui =
+      context.orbit_ui.machine.state();
+  context.display.orbit_ui_phase = orbit_ui.phase;
+  context.display.orbit_ui_was_hidden = orbit_ui.was_hidden;
+  context.display.orbit_ui_hidden = orbit_ui.hidden_by_us;
+  context.display.orbit_ui_intervened = orbit_ui.intervened;
+  context.display.orbit_ui_readback_supported = orbit_ui.readback_supported;
+  context.display.orbit_ui_readback_visible = orbit_ui.last_visible;
+  context.display.orbit_ui_hide_requests = orbit_ui.hide_requests;
+  context.display.orbit_ui_restore_requests = orbit_ui.restore_requests;
+  context.display.orbit_ui_errors = orbit_ui.errors;
+  context.display.orbit_hold_seconds =
+      context.presenter_orbit_hold_seconds.load(std::memory_order_relaxed);
+  context.display.orbit_time =
+      context.presenter_orbit_time.load(std::memory_order_relaxed);
+  context.display.orbit_phase0_degrees =
+      context.presenter_orbit_phase0_degrees.load(
+          std::memory_order_relaxed);
+  context.display.orbit_speed_mps =
+      context.presenter_orbit_speed_mps.load(std::memory_order_relaxed);
+  context.display.orbit_input =
+      context.presenter_orbit_input.load(std::memory_order_relaxed);
+  context.display.orbit_shake_x_m =
+      context.presenter_orbit_shake_x_m.load(std::memory_order_relaxed);
+  context.display.orbit_shake_y_m =
+      context.presenter_orbit_shake_y_m.load(std::memory_order_relaxed);
   context.display.slope_follow =
       context.slope_follow.load(std::memory_order_acquire);
   context.display.slope_strength =
