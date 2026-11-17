@@ -20,6 +20,71 @@ close-up；松开按键或车辆开始移动后平滑回到 chase。
 特写使用独立的水平 FOV、震动和侧别（自动/左后/右后/居中），进入/退出/起步回正时间可在设置里调整。
 `BurnoutShot` 只在渲染时钟上推进，并与现有 route B / presenter pose 使用同一个混合 view。
 
+## 停车环绕
+
+停车环绕是设置面板新增的第 8 个组，内置默认是 **关闭**；把该组切到 **开启** 或
+**自定义** 后可用。车辆停稳、松开油门/刹车/转向/手刹约 **8 秒**后，相机用 **2 秒**从当前
+追车视角进入环绕，以 **5.05 m** 半径、默认 **1.83 m** 机位高度绕车（等效旧的 **6.8°**
+仰角），注视点位于车原点上方 **1.23 m**；默认 **60 秒/圈**，并叠加参考素材的 0→**+1 m**
+切向 weave（15/45 秒达峰值）。任一驾驶输入或车辆重新移动会在 **1 秒**内平滑退出；重新激活
+视角、离开载具或车辆消失会直接重置。
+
+环绕在追车之后、烧胎特写之前应用。烧胎特写仍然是最外层镜头，触发时可以完全接管环绕。
+
+三态语义与“烧胎特写”一致：**默认** = 关闭，不进入环绕；**开启** = 用内置数值运行；
+**自定义** = 运行并展开下面这些滑杆：
+
+| 滑杆 | 键 | 默认 | 范围 | 含义 |
+|---|---|---:|---:|---|
+| 进入延迟 | `orbitEntryDelay` | `8.0` | 0–60s | 停稳后进入环绕的等待时间 |
+| 环绕周期 | `orbitPeriod` | `60.0` | 10–600s | 环绕一圈的时间 |
+| 环绕半径 | `orbitRadius` | `5.05` | 2–12m | 环绕半径；到注视点的 3D 距离 |
+| 环绕高度 | `orbitHeight` | `1.83` | 0.3–3.0m | 相机相对车原点的高度；升高时水平半径缩短 |
+| 横向摆动 | `orbitWeave` | `1.0` | 0–3m | 切向横向摆动幅度 |
+| 视野 | `orbitFov` | `45.0` | 20–70° | 垂直 FOV；16:9 下约 72° 水平 |
+| 手持抖动强度 | `orbitShakeStrength` | `1.0` | 0–2 | 手持注视点抖动强度；0 关闭 |
+| 手持抖动频率 | `orbitShakeFrequency` | `5.0` | 2–8 Hz | 手持抖动频率 |
+| 隐藏游戏 UI | `orbitHideUi` | 开 | 开/关 | 环绕进入/保持时隐藏游戏 HUD |
+
+`orbitHeight` 是沿车身 up 轴、从车原点算起的机位高度。调整时保持到注视点的 5.05 m 3D
+半径，所以升高机位会缩短水平半径；默认 1.83 m 约等于 6.8° 仰角。
+
+环绕模型本身全程使用绝对米，不读 `cameraDistanceM` / `cameraHeightM`，也不读旧的
+`cameraScale`。但“机位几何”的两个滑杆是在**最终位姿**上做按轴缩放，所以把它们调离默认值时，
+环绕的半径/高度会按同一比例一起缩放；这与旧版 `cameraScale` 的作用方式相同，默认值下
+两项因子恰为 1.0，不影响环绕。
+
+环绕还叠加一层 5 Hz 的手持注视点噪声：只让注视点轻微游移，机位本身保持平滑，默认竖直
+±0.05 m、水平 ±0.011 m。`orbitShakeStrength` 控制强度，`orbitShakeFrequency` 控制频率；
+幅度随进入/退出混合淡入淡出，烧胎特写仍然是最外层镜头，不会叠加环绕抖动。手感太尖先把
+强度减半，太飘把频率降到 3–4 Hz。
+
+**没有任何历史配置需要迁移**：停车环绕从未在发布版本中出现过，所以插件不读旧的扁平
+`orbitEnabled`，也不从文档里的数值反推模式；文档里没有 `orbitMode` 时一律按“默认”
+（关闭）处理，其余 7 组的行为完全不变。诊断面板的 `Parked orbit` 行显示
+`state / blend / hold / clock / phase0 / input / speed / shake`，`Orbit UI hide`
+行显示 `phase / was / hidden / int / rb / req / err`；状态切换会打一条 INFO 日志。
+环绕不做镜头碰撞；该组在“默认”时的输出与未启用该功能时逐位一致。
+
+### 环绕时隐藏 HUD
+
+`orbitHideUi` 默认开启。进入环绕过渡的第一帧，插件只把 HUD 层
+`GameLayer_Stack` 淡出并轻微下移；菜单层 `GameplayMain_Stack` 保持可见，所以
+F1/F2/F3/F4/F5/B/C/ESC 第一次按下就能打开界面。退出环绕过渡开始的第一帧 HUD
+开始淡入并在过渡期间回位；菜单关闭后 HUD 继续隐藏。关闭该开关时环绕仍然运行，
+但 HUD 保持显示。
+
+这是 HUD-only 隐藏：不隐藏 Anomaly 自己的窗口，也不改变游戏菜单层。第一人称、
+拍照/过场相机接管、离开载具、关闭环绕或插件停止等路径会恢复 HUD。插件 Stop
+运行在 Anomaly 的 Lifecycle 线程，不能直接调用 Game 线程的 ProcessEvent，因此
+停止时的恢复走下一次游戏 tick 或下次插件启动的 recovery marker；若
+`SetRenderOpacity` 不可用，会回退到 `HideAllLayer`/`RevertLayerShow`（这时菜单层
+也会一起隐藏）。
+
+实机验收表、构图调整建议和已知差异见
+[REPORT-parking-orbit-cam.md](REPORT-parking-orbit-cam.md)；HUD 隐藏的详细验收和
+边界见 [REPORT-orbit-hide-ui.md](REPORT-orbit-hide-ui.md)。
+
 ## 安装
 
 把下面的地址添加到 Runtime 的 **Plugins > 第三方插件 > 添加插件源**，应用后到
@@ -144,6 +209,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
+├── RELEASE-NOTES-2.0.6.md 停车环绕、第 8 组设置
 ├── RELEASE-NOTES-2.0.5.md 设置分组、米制机位、漂移前轮、车体朝向
 ├── RELEASE-NOTES-2.0.4.md Z 键三档视角循环（追车/第三人称/第一人称）
 ├── RELEASE-NOTES-2.0.3.md NFS 漂移前轮反打（低速门槛/平滑交接）
@@ -151,11 +217,17 @@ rotation  = NFS 模型的 pitch / yaw / roll
 ├── RELEASE-NOTES-2.0.1.md 闪屏/重影修复说明
 ├── RELEASE-NOTES-2.0.0.md 2.7.0 适配与迁移说明
 ├── REPORT-phase2-h1.md   Z 键三档循环：实现、验收矩阵与已知限制
+├── REPORT-parking-orbit-cam.md 停车环绕：构建、回归与实机验收清单
+├── REPORT-orbit-hide-ui.md 环绕时隐藏 HUD：实现、验收与边界
+├── REPORT-orbit-hide-ui-probe.md HUD 隐藏的探针与 API 可用性排查
 ├── mingw.cmake           MinGW-w64 交叉编译工具链文件
 ├── build-mingw.sh        一键交叉编译 / 校验 / 打包 / 安装（Linux、WSL）
 ├── plugin.cpp            薄入口：只填 AnomalyPluginDescriptorV1 的函数表
 ├── src/                  插件的全部实现（见下节「源码布局」）
 ├── chase_cam.hpp         NFS 2015 相机模型（两个预设）
+├── orbit_shot.hpp        停车环绕模型（几何、weave、状态机）
+├── orbit_ui_hide.hpp     HUD 隐藏纯状态机（进入/保持/退出与干预）
+├── shot_blend.hpp        镜头之间围绕车身 pivot 的混合
 ├── view_blend.hpp        渲染帧插值
 ├── localization.hpp      插件自己的本地化 helper（不依赖宿主内部头文件）
 ├── locales/zh-CN.json    中文文案
@@ -180,7 +252,8 @@ rotation  = NFS 模型的 pitch / yaw / roll
 | `src/sdk_support.cpp` | `Status`/`Bytes`/`Query`/`*Ready`/`Read`/`Write`/`Log`/`Note*` |
 | `src/lifecycle.cpp` | `Load`/`Start`/`Stop`/`Unload`/`Update` 五个 ABI 回调 |
 | `src/game_tick.cpp` | `QueryPlayer`、运动学积分、偏航来源选择 |
-| `src/presenter.cpp` | T2 presenter 的 seqlock 写入与 `UpdateCamera` |
+| `src/presenter.cpp` | T2 presenter 的 seqlock 写入与 `UpdateCamera`（含环绕与特写分层） |
+| `src/orbit_ui.cpp` | 环绕 HUD 的 Game 线程解析、透明度/位移动画与恢复 |
 | `src/display.cpp` | `UpdateDisplay` 与三条诊断日志 |
 | `src/hooks.cpp` | 渲染侧四个 detour 与签名解析、安装、释放 |
 | `src/camera_detour.cpp` | 相机 `view point` 主 detour |
@@ -191,7 +264,7 @@ rotation  = NFS 模型的 pitch / yaw / roll
 | `src/wheel_steer.cpp` | 漂移前轮反打 |
 | `src/burnout.cpp` | 烧胎探查与镜头信号 |
 | `src/ahud_probe.cpp` | AHUD 帧探针 |
-| `src/settings.cpp` | 设置校验、持久化、默认值、七组的有效值解析 |
+| `src/settings.cpp` | 设置校验、持久化、默认值、八组的有效值解析 |
 | `src/settings_groups.hpp` | 分组枚举、三态模式、自定义值快照与旧配置推断 |
 | `src/ui.cpp` | `Draw`、分组设置面板与诊断面板 |
 
@@ -233,7 +306,7 @@ cmake --build build.mingw
 ./build-mingw.sh                        # -> build.mingw/package/robineatcorn.nfs2015-chase-cam
 ./build-mingw.sh --zip                  # 另出 dist/Nfs2015ChaseCam-<version>.zip
 ./build-mingw.sh --install D:/Games/NTE # 装到 <game>/Anomaly/plugins/robineatcorn.nfs2015-chase-cam
-./build-mingw.sh --run-tests            # 跑验收夹具；WSL2 直接运行，纯 Linux 用 wine
+./build-mingw.sh --run-tests            # 跑全部 9 个验收夹具；WSL2 直接运行，纯 Linux 用 wine
 ./verify-release.sh --allow-missing-host-tools  # 发布前检查包/ZIP/清单
 ./build-mingw.sh --help                 # 全部选项
 ```
@@ -272,6 +345,9 @@ WSL2 里可以用 Linux `ctest` 直接执行交叉编译出的 Windows 夹具。
 
 ```sh
 ctest --test-dir build.mingw --output-on-failure
+# 只跑停车环绕模型、HUD 隐藏状态机与设置分组
+ctest --test-dir build.mingw -R orbit --output-on-failure
+ctest --test-dir build.mingw -R settings --output-on-failure
 pkg="$(wslpath -w build.mingw/package/robineatcorn.nfs2015-chase-cam)"
 anomaly-plugin validate "$pkg"
 anomaly-test-host --plugin "$pkg" --reload 10 --ticks 60
@@ -327,7 +403,7 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 
 ### 设置面板
 
-窗口按 **基础类型 + 三态模式** 组织：默认只显示 7 个组标题和模式按钮，点“自定义”才展开该组的
+窗口按 **基础类型 + 三态模式** 组织：默认只显示 8 个组标题和模式按钮，点“自定义”才展开该组的
 滑杆。顶部保留全局项：启用相机、预设（NFS 2015 / 电影化重建）、恢复默认值；锚点来源、锁定游戏
 相机强度、4 个诊断开关和诊断计数收在默认折叠的 **高级** 里。
 
@@ -340,14 +416,16 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 | 坡度跟随 | 默认 / 自定义 / 关闭 | 坡度构图强度 |
 | 漂移前轮 | 默认 / 自定义 / 关闭 | 准入速度、最大角、增益、采样点、滑移角、转速、force turn 时长 |
 | 烧胎特写 | 默认 / 自定义 / 开启 | 特写 FOV、震动、进入/退出/起步时序、进入/保持速度、侧别 |
+| 停车环绕 | 默认 / 自定义 / 开启 | 进入延迟、周期、半径、高度、weave、FOV、手持抖动强度/频率、隐藏 HUD |
 
 三态的含义：
 
 - **默认**：使用插件内置常量（与预设无关），这一组不画任何滑杆。
 - **自定义**：使用这一组自己的数值，并把该功能强制打开（例如“漂移前轮”选自定义会重新启用
   反打，即使上一态是关闭）。只有这个状态显示滑杆。
-- **关闭 / 开启**：保留内置数值，只翻转开关。除“烧胎特写”外第三态都叫“关闭”；烧胎的内置
-  默认是关，所以它的第三态叫“开启”。“机位几何”“镜头弹簧”没有关闭态，“NFS 镜头”没有自定义态。
+- **关闭 / 开启**：保留内置数值，只翻转开关。“烧胎特写”和“停车环绕”的内置默认是关，
+  所以它们的第三态叫“开启”；其余组都叫“关闭”。“机位几何”“镜头弹簧”没有关闭态，
+  “NFS 镜头”没有自定义态。
 
 切换模式不会清掉这一组的自定义数值：切到“默认”或“关闭”后数值仍留在设置文件里，切回
 “自定义”立即恢复。只有“恢复默认值”会把所有模式归零并清空自定义数值。
@@ -362,10 +440,16 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
   烧胎关着 → “默认”，数值与内置常量不同 → “自定义”。开关优先于数值，所以“功能关着但参数被
   调过”推断为“默认”，参数保留但不会把功能重新打开。
 - **参数键保存自定义值，开关键保存生效值**：所以旧版本插件读新文件时，看到的开关行为与新版
-  一致；同一个文件也能被新旧版本来回读写。
+  一致；同一个文件也能被新旧版本来回读写。**停车环绕是唯一的例外**：它从未发布，所以
+  不写也不读扁平 `orbitEnabled`，模式只由 `orbitMode` 决定。
 
 模式字段是 `nfsLensMode`、`rigMode`、`springsMode`、`dynamicsMode`、`slopeMode`、
-`wheelSteerMode`、`burnoutMode`，取值 0 = 默认、1 = 自定义、2 = 反向（关闭/开启）。
+`wheelSteerMode`、`burnoutMode`、`orbitMode`，取值 0 = 默认、1 = 自定义、
+2 = 反向（关闭/开启）。新增组只能追加在末尾：枚举值和键序是存储契约。
+
+**停车环绕不做历史推断**：文档里没有 `orbitMode`（例如 2.0.5 写的文档）时，这一组一律
+按“默认”（关闭）处理，文档里即使带着 orbit 数值也不会把功能打开；其余 7 组的模式与推断
+规则完全不变。
 
 ### Z 键视角循环
 
@@ -522,6 +606,12 @@ hook lease。
 `C px` 是定位渲染相位、帧长和锚点问题的常驻探针。它们只读取计数和样本，不参与相机计算；
 排查结束后可以忽略，不需要为了正常使用关闭。
 
+停车环绕有自己的两条状态行：`Parked orbit` 显示
+`state / blend / hold / clock / phase0 / input / speed / shake`，`Orbit UI hide` 显示
+`phase / was / hidden / int / rb / req / err`。前者能区分“停稳但还没进入”“正在环绕”
+“正在退出”；后者的 `rb` 是 `SetRenderOpacity` 读回是否可用，`req` 是隐藏/恢复请求数，
+`err` 是失败次数。两者的模式切换都会打一条 INFO 日志，不刷屏。
+
 Z 键循环的状态只写日志、不占窗口（计划要求本功能不新增设置/诊断项）：
 
 ```text
@@ -616,7 +706,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 ## 发布
 
 `manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
-`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.5`。ID 一旦发布就不应再变。
+`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.6`。ID 一旦发布就不应再变。
 
 发布门禁、离线/实机测试矩阵、产物哈希和回滚步骤记录在
 [RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。完整发布前至少完成两个不同地图、
@@ -629,7 +719,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 
    ```powershell
    Compress-Archive -Path .\build\package\robineatcorn.nfs2015-chase-cam\* `
-     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.5.zip -Force
+     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.6.zip -Force
    ```
 
    WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`；
@@ -638,9 +728,9 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
 
    ```sh
-   gh release create v2.0.5 dist/Nfs2015ChaseCam-2.0.5.zip \
-     --title "NFS 2015 Chase Cam 2.0.5" \
-     --notes-file RELEASE-NOTES-2.0.5.md
+   gh release create v2.0.6 dist/Nfs2015ChaseCam-2.0.6.zip \
+     --title "NFS 2015 Chase Cam 2.0.6" \
+     --notes-file RELEASE-NOTES-2.0.6.md
    ```
 
 5. 最后更新 `pluginmaster.json` 的 `Version` 与 `DownloadLinkInstall` / `DownloadLinkUpdate`，
