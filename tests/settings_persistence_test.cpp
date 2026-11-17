@@ -34,7 +34,7 @@ using nfs2015_chase_cam::detail::SettingsGroup;
 
 const char *const kModeKeys[kSettingsGroupCount] = {
     "nfsLensMode", "rigMode",        "springsMode", "dynamicsMode",
-    "slopeMode",   "wheelSteerMode", "burnoutMode"};
+    "slopeMode",   "wheelSteerMode", "burnoutMode", "orbitMode"};
 
 void Fail(const char *label, const char *detail) {
   std::fprintf(stderr, "FAIL %s: %s\n", label, detail);
@@ -800,6 +800,157 @@ void CheckOffWins() {
              loaded.roll_scale.load(), 0.5);
 }
 
+void CheckOrbitRoundTrip() {
+  // The orbit is the eighth group. Its Default is "off", so a document that
+  // carries the mode has to bring the framing numbers back with it.
+  FakeHost host;
+  Context context;
+  Bind(context, host);
+  SetDefaults(context);
+  EditCustom(context, [](CustomSettings &custom) {
+    custom.orbit_radius_m = 6.5;
+    custom.orbit_height_m = 2.4;
+    custom.orbit_entry_delay = 5.0;
+    custom.orbit_period = 90.0;
+    custom.orbit_weave = 0.4;
+    custom.orbit_fov = 50.0;
+    custom.orbit_shake_strength = 1.5;
+    custom.orbit_shake_frequency = 6.0;
+    custom.orbit_hide_ui = false;
+  });
+  SetMode(context, SettingsGroup::Orbit, GroupMode::Custom);
+  Expect("persist a document with the orbit on Custom",
+         PersistSettings(context));
+  Expect("the document stores orbitMode",
+         host.document.find(",\"orbitMode\":1") != std::string::npos);
+  Expect("the document stores the orbit radius",
+         host.document.find("\"orbitRadius\":6.5") != std::string::npos);
+  Expect("the document stores the orbit HUD switch",
+         host.document.find("\"orbitHideUi\":false") != std::string::npos);
+  Expect("the document no longer stores a flat orbit enable key",
+         host.document.find("\"orbitEnabled\"") == std::string::npos);
+
+  Context loaded;
+  Bind(loaded, host);
+  Expect("load the orbit document", LoadSettings(loaded));
+  Expect("the orbit mode survives",
+         GroupIs(loaded, SettingsGroup::Orbit, GroupMode::Custom));
+  Expect("the orbit is on again", loaded.orbit_enabled.load());
+  ExpectNear("the effective orbit radius follows the custom value",
+             loaded.orbit_radius.load(), 6.5, 1e-9);
+  ExpectNear("the effective orbit height follows the custom value",
+             loaded.orbit_height.load(), 2.4, 1e-9);
+  ExpectNear("the effective orbit period follows the custom value",
+             loaded.orbit_period.load(), 90.0, 1e-9);
+  ExpectNear("the effective orbit FOV follows the custom value",
+             loaded.orbit_fov.load(), 50.0, 1e-9);
+  Expect("the effective orbit HUD switch follows the custom value",
+         !loaded.orbit_hide_ui.load());
+  ExpectNear("the custom orbit entry delay survives",
+             CustomCopy(loaded).orbit_entry_delay, 5.0, 1e-9);
+  ExpectNear("the custom orbit weave survives",
+             CustomCopy(loaded).orbit_weave, 0.4, 1e-9);
+  ExpectNear("the custom orbit shake strength survives",
+             CustomCopy(loaded).orbit_shake_strength, 1.5, 1e-9);
+  ExpectNear("the custom orbit shake frequency survives",
+             CustomCopy(loaded).orbit_shake_frequency, 6.0, 1e-9);
+
+  // Opposite runs the built-in framing; the custom block keeps the tuning.
+  SetMode(loaded, SettingsGroup::Orbit, GroupMode::Opposite);
+  ExpectNear("orbit opposite falls back to the built-in radius",
+             loaded.orbit_radius.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  Expect("orbit opposite falls back to the built-in HUD switch",
+         loaded.orbit_hide_ui.load());
+}
+
+void CheckVersion205Document() {
+  // A 2.0.5 document has the seven mode keys and no orbitMode. The orbit must
+  // land on Default (off) and every other group must keep the mode it states.
+  FakeHost host;
+  {
+    Context context;
+    Bind(context, host);
+    SetDefaults(context);
+    SetMode(context, SettingsGroup::Rig, GroupMode::Custom);
+    EditCustom(context, [](CustomSettings &custom) {
+      custom.camera_distance_m = 6.4;
+    });
+    ApplyGroup(context, SettingsGroup::Rig);
+    SetMode(context, SettingsGroup::Burnout, GroupMode::Opposite);
+    Expect("persist the 2.0.6 reference document", PersistSettings(context));
+  }
+  FakeHost editor;
+  Expect("parse the reference document", editor.ParseDocument(host.document));
+  Expect("strip orbitMode to make it look like 2.0.5",
+         editor.RemoveKey("orbitMode"));
+  // A 2.0.5 build never wrote the orbit numbers either.
+  for (const char *key : {"orbitEntryDelay", "orbitPeriod", "orbitRadius",
+                          "orbitHeight", "orbitWeave", "orbitFov",
+                          "orbitShakeStrength", "orbitShakeFrequency",
+                          "orbitHideUi"}) {
+    Expect("strip the orbit numbers", editor.RemoveKey(key));
+  }
+  editor.document = editor.SerializeDocument();
+  editor.has_document = true;
+
+  Context loaded;
+  Bind(loaded, editor);
+  Expect("a 2.0.5 document loads", LoadSettings(loaded));
+  Expect("the orbit lands on Default",
+         GroupIs(loaded, SettingsGroup::Orbit, GroupMode::Default));
+  Expect("the orbit stays off", !loaded.orbit_enabled.load());
+  ExpectNear("the orbit keeps its built-in radius",
+             loaded.orbit_radius.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  Expect("the rig mode is unchanged",
+         GroupIs(loaded, SettingsGroup::Rig, GroupMode::Custom));
+  ExpectNear("the rig numbers are unchanged",
+             loaded.camera_distance_m.load(), 6.4, 1e-9);
+  Expect("the burnout mode is unchanged",
+         GroupIs(loaded, SettingsGroup::Burnout, GroupMode::Opposite));
+  ExpectNear("the burnout numbers are unchanged",
+             loaded.burnout_fov.load(),
+             nfs2015_chase_cam::detail::kDefaultBurnoutFov);
+}
+
+void CheckUnknownKeysIgnored() {
+  // A document written by a newer build may carry keys this build does not
+  // know. They are ignored: the rest of the document still loads.
+  FakeHost host;
+  {
+    Context context;
+    Bind(context, host);
+    SetDefaults(context);
+    SetMode(context, SettingsGroup::Orbit, GroupMode::Opposite);
+    Expect("persist the orbit reference document",
+           PersistSettings(context));
+  }
+  FakeHost editor;
+  Expect("parse the orbit reference document",
+         editor.ParseDocument(host.document));
+  // The fake host can only edit keys that exist, so splice the unknown ones in
+  // front of the closing brace. A newer build would have written them this way.
+  std::string document = editor.SerializeDocument();
+  Expect("the reference document is an object",
+         document.size() > 1 && document.back() == '}');
+  document.insert(document.size() - 1,
+                  ",\"interiorMode\":1,\"orbitYawBias\":12.0");
+  Expect("the unknown keys are in the document",
+         document.find("\"interiorMode\":1") != std::string::npos &&
+             document.find("\"orbitYawBias\":12.0") != std::string::npos);
+  editor.document = document;
+  editor.has_document = true;
+
+  Context loaded;
+  Bind(loaded, editor);
+  Expect("a document with unknown keys loads", LoadSettings(loaded));
+  Expect("the known orbit mode survives",
+         GroupIs(loaded, SettingsGroup::Orbit, GroupMode::Opposite));
+  Expect("the known orbit mode still runs the orbit",
+         loaded.orbit_enabled.load());
+}
+
 void CheckBadModes(FakeHost &tuned_host) {
   // An out-of-range mode is treated as missing: the numbers still describe the
   // intent, so the geometry comes back as Custom.
@@ -845,6 +996,9 @@ int main() {
   CheckLegacyGeometryMigration(host);
   CheckDowngradeClamp();
   CheckOffWins();
+  CheckOrbitRoundTrip();
+  CheckVersion205Document();
+  CheckUnknownKeysIgnored();
   CheckBadModes(host);
   std::printf("\nall settings persistence checks passed\n");
   return 0;

@@ -203,6 +203,31 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                       display.burnout_shot_fallbacks));
     DrawStatusLine(ui, localizer, "diag.burnout_shot", "Burnout shot",
                    line);
+    // The parked orbit publishes its own state machine next to the burnout
+    // shot, so the panel can tell "parked but not entered" from "orbiting".
+    std::snprintf(
+        line, sizeof(line),
+        "%s  blend %.2f  hold %.1fs  t %.1fs  phase0 %.1f  in %c  v %.2f"
+        "  shake=(%.3f,%.3f)",
+        nfs2015_chase::OrbitPhaseName(display.orbit_state),
+        display.orbit_blend, display.orbit_hold_seconds, display.orbit_time,
+        display.orbit_phase0_degrees, display.orbit_input ? '1' : '0',
+        display.orbit_speed_mps, display.orbit_shake_x_m,
+        display.orbit_shake_y_m);
+    DrawStatusLine(ui, localizer, "diag.orbit", "Parked orbit", line);
+    std::snprintf(
+        line, sizeof(line),
+        "phase=%s was=%d hidden=%d int=%d rb=%s/%d req=%u/%u err=%u",
+        nfs2015_chase::OrbitUiHidePhaseName(display.orbit_ui_phase),
+        display.orbit_ui_was_hidden ? 1 : 0,
+        display.orbit_ui_hidden ? 1 : 0,
+        display.orbit_ui_intervened ? 1 : 0,
+        display.orbit_ui_readback_supported ? "yes" : "no",
+        display.orbit_ui_readback_visible ? 1 : 0,
+        display.orbit_ui_hide_requests,
+        display.orbit_ui_restore_requests,
+        display.orbit_ui_errors);
+    DrawStatusLine(ui, localizer, "diag.orbit_ui", "Orbit UI hide", line);
     DrawStatusLine(
         ui, localizer, "diag.burnout_signal", "Burnout flag",
         display.burnout_probe_is_burnout_known
@@ -615,11 +640,11 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
 
 // --- grouped settings panel -------------------------------------------------
 //
-// Seven base types, each one title plus one mode row: Default uses the built-in
-// numbers, Custom opens the group's own numbers and forces the feature on, and
-// Opposite keeps the defaults but flips the switch (or, where the default is
-// off, turns it on). Only Custom opens detail controls, which is what keeps the
-// default window short.
+// Eight base types, each one title plus one mode row: Default uses the
+// built-in numbers, Custom opens the group's own numbers and forces the
+// feature on, and Opposite keeps the defaults but flips the switch (or, where
+// the default is off, turns it on). Only Custom opens detail controls, which
+// is what keeps the default window short.
 //
 // A group's custom numbers are kept while it is on Default or Opposite, so a
 // switch back to Custom restores them; only "restore defaults" clears them.
@@ -650,12 +675,21 @@ struct GroupIdentity final {
       return {"group.wheel_steer", "Drift front wheels", "wheel-steer"};
     case SettingsGroup::Burnout:
       return {"group.burnout", "Burnout close-up", "burnout"};
+    case SettingsGroup::Orbit:
+      return {"group.orbit", "Parked orbit", "orbit"};
   }
   return {"group.rig", "Camera geometry", "rig"};
 }
 
-// The third state reads "Off" everywhere except the burnout close-up, whose
-// built-in default is off, so its opposite is "On".
+// The groups whose built-in default is *off*. Their third mode turns the
+// feature on instead of off, so the button reads "On" rather than "Off".
+[[nodiscard]] constexpr bool GroupDefaultIsOff(
+    const SettingsGroup group) noexcept {
+  return group == SettingsGroup::Burnout || group == SettingsGroup::Orbit;
+}
+
+// The third state reads "Off" everywhere except the groups whose built-in
+// default is off, where its opposite is "On".
 [[nodiscard]] const char *ModeTextKey(const SettingsGroup group,
                                       const GroupMode mode) noexcept {
   switch (mode) {
@@ -664,7 +698,7 @@ struct GroupIdentity final {
     case GroupMode::Custom:
       return "mode.custom";
     case GroupMode::Opposite:
-      return group == SettingsGroup::Burnout ? "mode.on" : "mode.off";
+      return GroupDefaultIsOff(group) ? "mode.on" : "mode.off";
   }
   return "mode.default";
 }
@@ -677,7 +711,7 @@ struct GroupIdentity final {
     case GroupMode::Custom:
       return "Custom";
     case GroupMode::Opposite:
-      return group == SettingsGroup::Burnout ? "On" : "Off";
+      return GroupDefaultIsOff(group) ? "On" : "Off";
   }
   return "Default";
 }
@@ -1126,6 +1160,62 @@ void DrawBurnoutGroup(const AnomalyUiServiceV1 *ui, Context &context,
   DrawBurnoutSideButtons(ui, context);
 }
 
+// The parked orbit. Default is off, so the group only opens its numbers on
+// Custom; Opposite runs the orbit on the built-in framing instead.
+void DrawOrbitGroup(const AnomalyUiServiceV1 *ui, Context &context,
+                    const DisplayState &display) {
+  ui->separator(ui->user);
+  if (!DrawGroupHeader(ui, context, display, SettingsGroup::Orbit)) {
+    return;
+  }
+  ui->text(ui->user,
+           StringView(context.localizer.Text(
+               "setting.orbit_summary",
+               "After the car is parked and untouched for the entry delay, the "
+               "camera circles it; Custom opens the framing, the handheld "
+               "shake and the HUD switch.")));
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit,
+                   "setting.orbit_entry_delay", "Entry delay (s)",
+                   "chase-orbit-entry-delay",
+                   &CustomSettings::orbit_entry_delay,
+                   kMinimumOrbitEntryDelay, kMaximumOrbitEntryDelay);
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_period",
+                   "Orbit period (s/rev)", "chase-orbit-period",
+                   &CustomSettings::orbit_period, kMinimumOrbitPeriod,
+                   kMaximumOrbitPeriod);
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_radius",
+                   "Orbit radius (m)", "chase-orbit-radius",
+                   &CustomSettings::orbit_radius_m, kMinimumOrbitRadius,
+                   kMaximumOrbitRadius);
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_height",
+                   "Orbit height (m)", "chase-orbit-height",
+                   &CustomSettings::orbit_height_m, kMinimumOrbitHeight,
+                   kMaximumOrbitHeight);
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_weave",
+                   "Lateral weave (m)", "chase-orbit-weave",
+                   &CustomSettings::orbit_weave, kMinimumOrbitWeave,
+                   kMaximumOrbitWeave);
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_fov",
+                   "Vertical FOV (16:9 ~72 horizontal)", "chase-orbit-fov",
+                   &CustomSettings::orbit_fov, kMinimumOrbitFov,
+                   kMaximumOrbitFov);
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit,
+                   "setting.orbit_shake_strength", "Handheld shake strength",
+                   "chase-orbit-shake-strength",
+                   &CustomSettings::orbit_shake_strength,
+                   kMinimumOrbitShakeStrength, kMaximumOrbitShakeStrength);
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit,
+                   "setting.orbit_shake_frequency",
+                   "Handheld shake frequency (Hz)",
+                   "chase-orbit-shake-frequency",
+                   &CustomSettings::orbit_shake_frequency,
+                   kMinimumOrbitShakeFrequency, kMaximumOrbitShakeFrequency);
+  DrawCustomCheckbox(ui, context, SettingsGroup::Orbit,
+                     "setting.orbit_hide_ui",
+                     "Hide game UI while orbiting", "chase-orbit-hide-ui",
+                     &CustomSettings::orbit_hide_ui);
+}
+
 // Advanced stays closed by default: it holds the anchor choice, the lock onto
 // the Game's camera, the diagnostic switches and the counters panel, none of
 // which is part of a base type.
@@ -1323,6 +1413,7 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
       DrawSlopeGroup(ui, *context, display);
       DrawWheelSteerGroup(ui, *context, display);
       DrawBurnoutGroup(ui, *context, display);
+      DrawOrbitGroup(ui, *context, display);
       DrawAdvancedGroup(ui, *context, display);
 
       ui->separator(ui->user);

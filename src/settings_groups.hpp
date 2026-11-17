@@ -1,6 +1,6 @@
 // The grouped settings model (PLAN-settings-ui-groups.md task group 1).
 //
-// Every exception the settings panel offers is one of seven groups. A group is
+// Every exception the settings panel offers is one of eight groups. A group is
 // either on its built-in defaults, on its own custom numbers, or on the
 // opposite of its default switch; the group's enable flags are derived from
 // that mode instead of being edited one by one. The values the engine reads
@@ -23,9 +23,13 @@ enum class SettingsGroup : std::uint32_t {
   Slope = 4,
   WheelSteer = 5,
   Burnout = 6,
+  // Appended last on purpose: the numbers are the stored JSON values and the
+  // panel order, so inserting a group anywhere else would change the meaning
+  // of an existing document.
+  Orbit = 7,
 };
 
-constexpr std::size_t kSettingsGroupCount = 7;
+constexpr std::size_t kSettingsGroupCount = 8;
 
 // The numbers are the stored JSON values; a saved document keeps its meaning
 // only while they stay stable.
@@ -49,6 +53,7 @@ enum class GroupMode : std::uint32_t {
     case SettingsGroup::Slope:
     case SettingsGroup::WheelSteer:
     case SettingsGroup::Burnout:
+    case SettingsGroup::Orbit:
       return true;
   }
   return false;
@@ -117,6 +122,17 @@ struct CustomSettings final {
   double burnout_entry_speed{kDefaultBurnoutEntrySpeed};
   double burnout_hold_speed{kDefaultBurnoutHoldSpeed};
   std::uint32_t burnout_side_mode{kDefaultBurnoutSideMode};
+  // Parked orbit. The entry/exit timing stays in the model; its built-in
+  // default sits on Opposite because the group's Default is "off".
+  double orbit_entry_delay{kDefaultOrbitEntryDelay};
+  double orbit_period{kDefaultOrbitPeriod};
+  double orbit_radius_m{kDefaultOrbitRadius};
+  double orbit_height_m{kDefaultOrbitHeight};
+  double orbit_weave{kDefaultOrbitWeave};
+  double orbit_fov{kDefaultOrbitFov};
+  double orbit_shake_strength{kDefaultOrbitShakeStrength};
+  double orbit_shake_frequency{kDefaultOrbitShakeFrequency};
+  bool orbit_hide_ui{kDefaultOrbitHideUi};
 };
 
 // ---------------------------------------------------------------------------
@@ -234,6 +250,12 @@ struct LegacyGroupState final {
       }
       return BurnoutOnDefaults(custom) ? GroupMode::Opposite
                                        : GroupMode::Custom;
+    case SettingsGroup::Orbit:
+      // The parked orbit never shipped in a released build, so no document can
+      // carry evidence of what the user had chosen for it: a document without
+      // orbitMode always means "off", and its numbers (if it happens to have
+      // any) still land in the custom block for a later switch to Custom.
+      return GroupMode::Default;
   }
   return GroupMode::Default;
 }

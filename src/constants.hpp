@@ -113,9 +113,12 @@ constexpr double kMaximumBurnoutEntrySpeed = 10.0;
 constexpr double kDefaultBurnoutHoldSpeed = 3.0;
 constexpr double kMinimumBurnoutHoldSpeed = 0.0;
 constexpr double kMaximumBurnoutHoldSpeed = 20.0;
-// Parked orbit defaults. The effect is on by default (plan Q1): after the car
-// has been parked and untouched for the entry delay, the camera circles it.
-constexpr bool kDefaultOrbitEnabled = true;
+// Parked orbit defaults. After the car has been parked and untouched for the
+// entry delay, the camera circles it. The built-in default of the Orbit group
+// is *off* (group model rule: a group that changes the picture a lot starts
+// disabled), so Default keeps the feature off, Custom runs it on the custom
+// numbers below and Opposite runs it on these built-in numbers.
+constexpr bool kDefaultOrbitEnabled = false;
 constexpr double kDefaultOrbitEntryDelay = 8.0;
 constexpr double kMinimumOrbitEntryDelay = 0.0;
 constexpr double kMaximumOrbitEntryDelay = 60.0;
@@ -668,7 +671,6 @@ constexpr std::string_view kSettingsSchema = R"json(
     "burnoutSideMode":{"type":"integer","minimum":0,"maximum":3},
     "burnoutEntrySpeed":{"type":"number","minimum":0.0,"maximum":10.0},
     "burnoutHoldSpeed":{"type":"number","minimum":0.0,"maximum":20.0},
-    "orbitEnabled":{"type":"boolean"},
     "orbitHideUi":{"type":"boolean"},
     "orbitEntryDelay":{"type":"number","minimum":0.0,"maximum":60.0},
     "orbitPeriod":{"type":"number","minimum":10.0,"maximum":600.0},
@@ -692,7 +694,8 @@ constexpr std::string_view kSettingsSchema = R"json(
     "dynamicsMode":{"type":"integer","minimum":0,"maximum":2},
     "slopeMode":{"type":"integer","minimum":0,"maximum":2},
     "wheelSteerMode":{"type":"integer","minimum":0,"maximum":2},
-    "burnoutMode":{"type":"integer","minimum":0,"maximum":2}
+    "burnoutMode":{"type":"integer","minimum":0,"maximum":2},
+    "orbitMode":{"type":"integer","minimum":0,"maximum":2}
   }
 }
 )json";

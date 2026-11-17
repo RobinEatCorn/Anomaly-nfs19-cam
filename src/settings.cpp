@@ -163,6 +163,31 @@ bool WheelSteerSettingsValid(const double max_degrees, const double gain,
          sample_percent <= kMaximumWheelSteerSamplePercent;
 }
 
+bool OrbitSettingsValid(const double entry_delay, const double period,
+                        const double radius_m, const double height_m,
+                        const double weave, const double fov_degrees,
+                        const double shake_strength,
+                        const double shake_frequency) noexcept {
+  return std::isfinite(entry_delay) &&
+         entry_delay >= kMinimumOrbitEntryDelay &&
+         entry_delay <= kMaximumOrbitEntryDelay &&
+         std::isfinite(period) && period >= kMinimumOrbitPeriod &&
+         period <= kMaximumOrbitPeriod && std::isfinite(radius_m) &&
+         radius_m >= kMinimumOrbitRadius &&
+         radius_m <= kMaximumOrbitRadius && std::isfinite(height_m) &&
+         height_m >= kMinimumOrbitHeight &&
+         height_m <= kMaximumOrbitHeight && std::isfinite(weave) &&
+         weave >= kMinimumOrbitWeave && weave <= kMaximumOrbitWeave &&
+         std::isfinite(fov_degrees) && fov_degrees >= kMinimumOrbitFov &&
+         fov_degrees <= kMaximumOrbitFov &&
+         std::isfinite(shake_strength) &&
+         shake_strength >= kMinimumOrbitShakeStrength &&
+         shake_strength <= kMaximumOrbitShakeStrength &&
+         std::isfinite(shake_frequency) &&
+         shake_frequency >= kMinimumOrbitShakeFrequency &&
+         shake_frequency <= kMaximumOrbitShakeFrequency;
+}
+
 bool AppendText(char *&cursor, char *const end,
                 const std::string_view text) noexcept {
   if (text.size() > static_cast<std::size_t>(end - cursor)) {
@@ -255,6 +280,15 @@ bool PersistSettings(Context &context) noexcept {
   const double burnout_side_mode =
       static_cast<double>(custom.burnout_side_mode);
   const double burnout_entry_speed = custom.burnout_entry_speed;
+  const double orbit_entry_delay = custom.orbit_entry_delay;
+  const double orbit_period = custom.orbit_period;
+  const double orbit_radius_m = custom.orbit_radius_m;
+  const double orbit_height_m = custom.orbit_height_m;
+  const double orbit_weave = custom.orbit_weave;
+  const double orbit_fov = custom.orbit_fov;
+  const double orbit_shake_strength = custom.orbit_shake_strength;
+  const double orbit_shake_frequency = custom.orbit_shake_frequency;
+  const bool orbit_hide_ui = custom.orbit_hide_ui;
   // The model never runs the hold speed below the entry speed and the
   // validation below expects the pair in that order; store the clamped pair so
   // the document describes what the engine actually uses.
@@ -335,6 +369,10 @@ bool PersistSettings(Context &context) noexcept {
                                wheel_steer_force_turn_delay_seconds,
                                wheel_steer_entry_speed_kmh,
                                wheel_steer_sample_percent) ||
+      !OrbitSettingsValid(orbit_entry_delay, orbit_period, orbit_radius_m,
+                          orbit_height_m, orbit_weave, orbit_fov,
+                          orbit_shake_strength,
+                          orbit_shake_frequency) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
     // A UI write landed while the fields were being read; keep the revision
     // unpersisted so the next tick writes a coherent document.
@@ -437,6 +475,24 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, wheel_steer_force_turn_delay_seconds) &&
       AppendText(cursor, end, ",\"wheelSteerSamplePercent\":") &&
       AppendNumber(cursor, end, wheel_steer_sample_percent) &&
+      AppendText(cursor, end, ",\"orbitEntryDelay\":") &&
+      AppendNumber(cursor, end, orbit_entry_delay) &&
+      AppendText(cursor, end, ",\"orbitPeriod\":") &&
+      AppendNumber(cursor, end, orbit_period) &&
+      AppendText(cursor, end, ",\"orbitRadius\":") &&
+      AppendNumber(cursor, end, orbit_radius_m) &&
+      AppendText(cursor, end, ",\"orbitHeight\":") &&
+      AppendNumber(cursor, end, orbit_height_m) &&
+      AppendText(cursor, end, ",\"orbitWeave\":") &&
+      AppendNumber(cursor, end, orbit_weave) &&
+      AppendText(cursor, end, ",\"orbitFov\":") &&
+      AppendNumber(cursor, end, orbit_fov) &&
+      AppendText(cursor, end, ",\"orbitShakeStrength\":") &&
+      AppendNumber(cursor, end, orbit_shake_strength) &&
+      AppendText(cursor, end, ",\"orbitShakeFrequency\":") &&
+      AppendNumber(cursor, end, orbit_shake_frequency) &&
+      AppendText(cursor, end, ",\"orbitHideUi\":") &&
+      AppendText(cursor, end, orbit_hide_ui ? "true" : "false") &&
       AppendText(cursor, end, ",\"rollOnlyInDrift\":") &&
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
@@ -465,6 +521,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, mode_value(SettingsGroup::WheelSteer)) &&
       AppendText(cursor, end, ",\"burnoutMode\":") &&
       AppendNumber(cursor, end, mode_value(SettingsGroup::Burnout)) &&
+      AppendText(cursor, end, ",\"orbitMode\":") &&
+      AppendNumber(cursor, end, mode_value(SettingsGroup::Orbit)) &&
       AppendText(cursor, end, "}");
   if (!built) {
     return false;
@@ -652,6 +710,42 @@ void ApplyGroup(Context &context, const SettingsGroup group) noexcept {
             std::memory_order_release);
       }
       return;
+    case SettingsGroup::Orbit:
+      // Same shape as the burnout close-up: the built-in default is off, so
+      // Default keeps the orbit parked while Custom and Opposite both run it.
+      // Only Custom reads the custom numbers and the custom HUD switch.
+      context.orbit_enabled.store(mode != GroupMode::Default,
+                                  std::memory_order_release);
+      context.orbit_entry_delay.store(
+          use_custom ? custom.orbit_entry_delay : kDefaultOrbitEntryDelay,
+          std::memory_order_release);
+      context.orbit_period.store(
+          use_custom ? custom.orbit_period : kDefaultOrbitPeriod,
+          std::memory_order_release);
+      context.orbit_radius.store(
+          use_custom ? custom.orbit_radius_m : kDefaultOrbitRadius,
+          std::memory_order_release);
+      context.orbit_height.store(
+          use_custom ? custom.orbit_height_m : kDefaultOrbitHeight,
+          std::memory_order_release);
+      context.orbit_weave.store(
+          use_custom ? custom.orbit_weave : kDefaultOrbitWeave,
+          std::memory_order_release);
+      context.orbit_fov.store(
+          use_custom ? custom.orbit_fov : kDefaultOrbitFov,
+          std::memory_order_release);
+      context.orbit_shake_strength.store(
+          use_custom ? custom.orbit_shake_strength
+                     : kDefaultOrbitShakeStrength,
+          std::memory_order_release);
+      context.orbit_shake_frequency.store(
+          use_custom ? custom.orbit_shake_frequency
+                     : kDefaultOrbitShakeFrequency,
+          std::memory_order_release);
+      context.orbit_hide_ui.store(
+          use_custom ? custom.orbit_hide_ui : kDefaultOrbitHideUi,
+          std::memory_order_release);
+      return;
   }
 }
 
@@ -753,7 +847,7 @@ bool JsonObjectBoolean(const AnomalyJsonServiceV1 &json,
   return true;
 }
 
-// The seven integer keys added in PLAN-settings-ui-groups.md task group 2. They
+// The eight integer keys added in PLAN-settings-ui-groups.md task group 2. They
 // are optional: a document written before them has none, and the loader then
 // reconstructs each mode from the numbers and switches it does carry.
 constexpr const char *kGroupModeKeys[kSettingsGroupCount] = {
@@ -764,6 +858,7 @@ constexpr const char *kGroupModeKeys[kSettingsGroupCount] = {
     "slopeMode",
     "wheelSteerMode",
     "burnoutMode",
+    "orbitMode",
 };
 
 // Reads one group's mode. A value that is not an integer in [0, 2] counts as
@@ -937,6 +1032,15 @@ bool LoadSettings(Context &context) noexcept {
   bool diagnostic_skip_rotation = false;
   bool slope_follow = true;
   double slope_strength = kDefaultSlopeStrength;
+  double orbit_entry_delay = kDefaultOrbitEntryDelay;
+  double orbit_period = kDefaultOrbitPeriod;
+  double orbit_radius_m = kDefaultOrbitRadius;
+  double orbit_height_m = kDefaultOrbitHeight;
+  double orbit_weave = kDefaultOrbitWeave;
+  double orbit_fov = kDefaultOrbitFov;
+  double orbit_shake_strength = kDefaultOrbitShakeStrength;
+  double orbit_shake_frequency = kDefaultOrbitShakeFrequency;
+  bool orbit_hide_ui = kDefaultOrbitHideUi;
   double slope_max_gradient_degrees = kDefaultSlopeMaxGradientDegrees;
   double slope_up_look_at = kDefaultSlopeUpLookAt;
   double slope_up_rest = kDefaultSlopeUpRest;
@@ -1039,6 +1143,28 @@ bool LoadSettings(Context &context) noexcept {
                                       slope_follow));
   static_cast<void>(JsonObjectNumber(json, root, "slopeStrength",
                                      slope_strength));
+  // The orbit numbers are the group's custom layer, exactly like every other
+  // group's numbers. A document without them (2.0.5 and older) leaves the
+  // custom block on its built-in defaults, and without orbitMode the group
+  // itself stays on Default, so nothing switches on by accident.
+  static_cast<void>(JsonObjectNumber(json, root, "orbitEntryDelay",
+                                     orbit_entry_delay));
+  static_cast<void>(JsonObjectNumber(json, root, "orbitPeriod",
+                                     orbit_period));
+  static_cast<void>(JsonObjectNumber(json, root, "orbitRadius",
+                                     orbit_radius_m));
+  static_cast<void>(JsonObjectNumber(json, root, "orbitHeight",
+                                     orbit_height_m));
+  static_cast<void>(JsonObjectNumber(json, root, "orbitWeave",
+                                     orbit_weave));
+  static_cast<void>(
+      JsonObjectNumber(json, root, "orbitFov", orbit_fov));
+  static_cast<void>(JsonObjectNumber(json, root, "orbitShakeStrength",
+                                     orbit_shake_strength));
+  static_cast<void>(JsonObjectNumber(json, root, "orbitShakeFrequency",
+                                     orbit_shake_frequency));
+  static_cast<void>(JsonObjectBoolean(json, root, "orbitHideUi",
+                                      orbit_hide_ui));
   static_cast<void>(JsonObjectNumber(json, root, "slopeMaxGradientDegrees",
                                      slope_max_gradient_degrees));
   static_cast<void>(JsonObjectNumber(json, root, "slopeUpLookAt",
@@ -1074,7 +1200,10 @@ bool LoadSettings(Context &context) noexcept {
                                wheel_steer_rate_degrees_per_second,
                                wheel_steer_force_turn_delay_seconds,
                                wheel_steer_entry_speed_kmh,
-                               wheel_steer_sample_percent)) {
+                               wheel_steer_sample_percent) ||
+      !OrbitSettingsValid(orbit_entry_delay, orbit_period, orbit_radius_m,
+                          orbit_height_m, orbit_weave, orbit_fov,
+                          orbit_shake_strength, orbit_shake_frequency)) {
     return false;
   }
   context.enabled.store(enabled, std::memory_order_release);
@@ -1124,6 +1253,15 @@ bool LoadSettings(Context &context) noexcept {
   custom.burnout_hold_speed = burnout_hold_speed;
   custom.burnout_side_mode =
       static_cast<std::uint32_t>(burnout_side_mode_number);
+  custom.orbit_entry_delay = orbit_entry_delay;
+  custom.orbit_period = orbit_period;
+  custom.orbit_radius_m = orbit_radius_m;
+  custom.orbit_height_m = orbit_height_m;
+  custom.orbit_weave = orbit_weave;
+  custom.orbit_fov = orbit_fov;
+  custom.orbit_shake_strength = orbit_shake_strength;
+  custom.orbit_shake_frequency = orbit_shake_frequency;
+  custom.orbit_hide_ui = orbit_hide_ui;
   // A document with the mode keys states each mode; one without them states
   // the same thing through its numbers and the four enable switches, and the
   // inference reconstructs the mode so nothing changes on upgrade.

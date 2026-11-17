@@ -81,6 +81,15 @@ void CheckModeTable() {
                                                       GroupMode::Custom) &&
              nfs2015_chase_cam::detail::GroupModeAllowed(
                  SettingsGroup::Dynamics, GroupMode::Opposite));
+  Expect("orbit accepts all three",
+         nfs2015_chase_cam::detail::GroupModeAllowed(SettingsGroup::Orbit,
+                                                      GroupMode::Default) &&
+             nfs2015_chase_cam::detail::GroupModeAllowed(
+                 SettingsGroup::Orbit, GroupMode::Custom) &&
+             nfs2015_chase_cam::detail::GroupModeAllowed(
+                 SettingsGroup::Orbit, GroupMode::Opposite));
+  Expect("the group count grew to eight",
+         nfs2015_chase_cam::detail::kSettingsGroupCount == 8);
   Expect("unknown value normalizes to Default",
          NormalizeGroupMode(SettingsGroup::Rig, 99) == GroupMode::Default);
   Expect("impossible mode normalizes to Default",
@@ -114,6 +123,13 @@ void CheckDefaults(Context& context) {
   Expect("fresh slope follows", context.slope_follow.load());
   Expect("fresh wheel steer enabled", context.wheel_steer_enabled.load());
   Expect("fresh burnout disabled", !context.burnout_enabled.load());
+  Expect("fresh orbit disabled", !context.orbit_enabled.load());
+  ExpectNear("fresh orbit radius", context.orbit_radius.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  ExpectNear("fresh orbit height", context.orbit_height.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitHeight);
+  Expect("fresh orbit hides the HUD by default",
+         context.orbit_hide_ui.load());
   Expect("fresh dynamics roll scale on", context.roll_scale.load() == 1.0);
   Expect("fresh roll only in drift", context.roll_only_in_drift.load());
 }
@@ -268,6 +284,70 @@ void CheckBurnout(Context& context) {
              nfs2015_chase_cam::detail::kDefaultBurnoutHoldSpeed);
 }
 
+void CheckOrbit(Context& context) {
+  // Default is "off": the group changes the picture a lot, so it starts parked
+  // like the burnout close-up.
+  SetMode(context, SettingsGroup::Orbit, GroupMode::Default);
+  Expect("orbit default is off", !context.orbit_enabled.load());
+  ExpectNear("orbit default radius", context.orbit_radius.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  ExpectNear("orbit default FOV", context.orbit_fov.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitFov);
+  Expect("orbit default keeps the HUD switch on",
+         context.orbit_hide_ui.load());
+
+  EditCustom(context, [](CustomSettings& custom) {
+    custom.orbit_radius_m = 6.5;
+    custom.orbit_height_m = 2.4;
+    custom.orbit_entry_delay = 5.0;
+    custom.orbit_period = 90.0;
+    custom.orbit_weave = 0.4;
+    custom.orbit_fov = 50.0;
+    custom.orbit_shake_strength = 1.5;
+    custom.orbit_shake_frequency = 6.0;
+    custom.orbit_hide_ui = false;
+  });
+  SetMode(context, SettingsGroup::Orbit, GroupMode::Custom);
+  Expect("orbit custom forces it on", context.orbit_enabled.load());
+  ExpectNear("orbit custom radius", context.orbit_radius.load(), 6.5);
+  ExpectNear("orbit custom height", context.orbit_height.load(), 2.4);
+  ExpectNear("orbit custom entry delay", context.orbit_entry_delay.load(),
+             5.0);
+  ExpectNear("orbit custom period", context.orbit_period.load(), 90.0);
+  ExpectNear("orbit custom weave", context.orbit_weave.load(), 0.4);
+  ExpectNear("orbit custom FOV", context.orbit_fov.load(), 50.0);
+  ExpectNear("orbit custom shake strength",
+             context.orbit_shake_strength.load(), 1.5);
+  ExpectNear("orbit custom shake frequency",
+             context.orbit_shake_frequency.load(), 6.0);
+  Expect("orbit custom takes the HUD switch from the custom block",
+         !context.orbit_hide_ui.load());
+
+  SetMode(context, SettingsGroup::Orbit, GroupMode::Opposite);
+  Expect("orbit opposite runs it on", context.orbit_enabled.load());
+  ExpectNear("orbit opposite restores the built-in radius",
+             context.orbit_radius.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  ExpectNear("orbit opposite restores the built-in height",
+             context.orbit_height.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitHeight);
+  ExpectNear("orbit opposite restores the built-in period",
+             context.orbit_period.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitPeriod);
+  Expect("orbit opposite restores the built-in HUD switch",
+         context.orbit_hide_ui.load());
+  ExpectNear("orbit opposite does not rewrite the custom radius",
+             CustomCopy(context).orbit_radius_m, 6.5);
+
+  SetMode(context, SettingsGroup::Orbit, GroupMode::Default);
+  Expect("orbit back to default parks it", !context.orbit_enabled.load());
+  SetMode(context, SettingsGroup::Orbit, GroupMode::Custom);
+  ExpectNear("orbit custom values survived Default",
+             context.orbit_radius.load(), 6.5);
+  Expect("the orbit HUD switch survived Default",
+         !context.orbit_hide_ui.load());
+}
+
 void CheckRestoreDefaults(Context& context) {
   SetMode(context, SettingsGroup::Burnout, GroupMode::Custom);
   SetDefaults(context);
@@ -284,6 +364,11 @@ void CheckRestoreDefaults(Context& context) {
   ExpectNear("restore defaults clears the custom burnout FOV",
              CustomCopy(context).burnout_fov,
              nfs2015_chase_cam::detail::kDefaultBurnoutFov);
+  ExpectNear("restore defaults clears the custom orbit radius",
+             CustomCopy(context).orbit_radius_m,
+             nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  Expect("restore defaults turns the orbit off",
+         !context.orbit_enabled.load());
   Expect("restore defaults turns the FOV back on",
          context.fov_enabled.load());
   Expect("restore defaults turns the burnout off",
@@ -303,6 +388,7 @@ int main() {
   CheckSlope(context);
   CheckWheelSteer(context);
   CheckBurnout(context);
+  CheckOrbit(context);
   CheckRestoreDefaults(context);
   std::printf("\nall settings group checks passed\n");
   return 0;
