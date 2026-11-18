@@ -4,8 +4,10 @@
 //
 // The shot activates when the car has been standing still with no vehicle input
 // for a while, then circles the car on a 60 s revolution: radius 5.05 m,
-// elevation 6.8 degrees (or a configurable camera height), looking at the car
-// origin + 1.23 m, with a +-1 m tangential weave at t = 15 s and t = 45 s.
+// elevation 6.8 degrees (or a configurable camera height), looking at a pivot
+// 1.23 m above and 0.772 m ahead of the car origin (the asset's arm offset
+// s = (0, 1.2258, 0.7720)), with a +-1 m tangential weave at t = 15 s and
+// t = 45 s.
 // NFS 2015 authors the orbit on the Frostbite world +Y axis; in this plugin's
 // UE frame (+X forward, +Y right, +Z up) that is the car body's own vertical
 // axis, so the orbit follows the body pitch and keeps the horizon level.
@@ -44,6 +46,11 @@ namespace nfs2015_chase {
 // Reference geometry (guide section 3). The look-at point sits above the car
 // origin, not on it: targeting the origin frames the tyres instead of the car.
 inline constexpr double kOrbitLookAtHeightM = 1.23;
+// The reference arm is `B = T + M * (0, 1.2258, 0.7720)` (report 6B.19):
+// the pivot is 1.2258 m up and 0.7720 m along the car's forward axis from the
+// base T. The height is folded into kOrbitLookAtHeightM; this constant is the
+// forward part that the old guide geometry left out.
+inline constexpr double kOrbitPivotForwardM = 0.772;
 inline constexpr double kOrbitElevationDegrees = 6.8;
 
 // One line to flip if the orbit turns the wrong way in the reference footage.
@@ -88,6 +95,11 @@ struct OrbitShotConfig final {
   double camera_height_m{0.0};
   double elevation_degrees{kOrbitElevationDegrees};
   double look_at_height_m{kOrbitLookAtHeightM};
+  // Forward offset of the orbit pivot from the car origin, in the car body
+  // frame. The asset arm is `s = (right=0, up=1.2258, forward=0.7720)`; the
+  // old guide only carried the up component. Set to 0 for the legacy
+  // car-origin-centred orbit.
+  double pivot_forward_m{kOrbitPivotForwardM};
   double weave_amplitude_m{1.0};
   double vertical_fov_degrees{45.0};
 
@@ -369,7 +381,9 @@ class OrbitShot final {
           state_.phase0 =
               EntryPhase0(car, basis, current_camera,
                           (std::max)(0.0, Finite(config_.look_at_height_m,
-                                                 kOrbitLookAtHeightM)));
+                                                 kOrbitLookAtHeightM)),
+                          Finite(config_.pivot_forward_m,
+                                 kOrbitPivotForwardM));
           state_.mode = OrbitPhase::kEnter;
           have_damped_position_ = false;
           ResetNoise();
@@ -409,8 +423,11 @@ class OrbitShot final {
     const double look_at_height =
         (std::max)(0.0, Finite(config_.look_at_height_m,
                               kOrbitLookAtHeightM));
+    const double pivot_forward =
+        Finite(config_.pivot_forward_m, kOrbitPivotForwardM);
     const Vec3 pivot =
-        Add(SafeVec(car.position), Mul(basis.up, look_at_height));
+        Add(Add(SafeVec(car.position), Mul(basis.up, look_at_height)),
+            Mul(basis.forward, pivot_forward));
     const double radius =
         (std::max)(0.0, Finite(config_.radius_m, 5.05));
     const double camera_height = Finite(config_.camera_height_m, 0.0);
@@ -557,10 +574,11 @@ class OrbitShot final {
 
   [[nodiscard]] static double EntryPhase0(
       const CarState& car, const CarBasis& basis, const Vec3& current_camera,
-      const double look_at_height_m) noexcept {
+      const double look_at_height_m, const double pivot_forward_m) noexcept {
     using namespace orbit_shot_detail;
-    const Vec3 pivot = Add(SafeVec(car.position),
-                           Mul(basis.up, look_at_height_m));
+    const Vec3 pivot =
+        Add(Add(SafeVec(car.position), Mul(basis.up, look_at_height_m)),
+            Mul(basis.forward, pivot_forward_m));
     const Vec3 offset = Sub(SafeVec(current_camera), pivot);
     const double x = Dot(offset, basis.forward);
     const double y = Dot(offset, basis.right);

@@ -29,6 +29,7 @@ using nfs2015_chase::Dot;
 using nfs2015_chase::kBurnoutOrbitPivotHeightM;
 using nfs2015_chase::kDegreesPerRadian;
 using nfs2015_chase::kOrbitLookAtHeightM;
+using nfs2015_chase::kOrbitPivotForwardM;
 using nfs2015_chase::kPi;
 using nfs2015_chase::Length;
 using nfs2015_chase::MakeCarBasis;
@@ -98,7 +99,8 @@ void ExpectNear(const char* label, const double actual, const double expected,
 [[nodiscard]] Vec3 OrbitPivot(const CarState& car,
                               const double look_height) noexcept {
   const CarBasis basis = MakeCarBasis(car.yaw, car.pitch);
-  return Add(car.position, Mul(basis.up, look_height));
+  return Add(Add(car.position, Mul(basis.up, look_height)),
+             Mul(basis.forward, kOrbitPivotForwardM));
 }
 
 [[nodiscard]] Vec3 OrbitOffset(const CameraState& view, const CarState& car,
@@ -298,6 +300,25 @@ void TestOrbitHeight() {
   ExpectNear("height override shrinks the horizontal radius",
              Length(Sub(offset, Mul(basis.up, vertical))),
              std::sqrt(5.05 * 5.05 - 0.77 * 0.77), 1e-9);
+}
+
+void TestPivotForwardOffset() {
+  Fixture fixture;
+  fixture.config.handheld_strength = 0.0;
+  fixture.shot.SetConfig(fixture.config);
+  fixture.EnterOrbit();
+
+  const CarBasis basis = MakeCarBasis(fixture.car.yaw, fixture.car.pitch);
+  const Vec3 pivot = OrbitPivot(fixture.car, kOrbitLookAtHeightM);
+  const Vec3 from_car = Sub(pivot, fixture.car.position);
+  ExpectNear("6.1-7 pivot forward offset", Dot(from_car, basis.forward),
+             kOrbitPivotForwardM, 1e-9);
+  ExpectNear("6.1-7 pivot height", Dot(from_car, basis.up),
+             kOrbitLookAtHeightM, 1e-9);
+  ExpectNear("6.1-7 target is the shifted pivot",
+             Length(Sub(fixture.last.view.target, pivot)), 0.0, 1e-9);
+  ExpectNear("6.1-7 eye keeps the arm radius",
+             Length(Sub(fixture.last.view.position, pivot)), 5.05, 0.01);
 }
 
 void TestLookAtHeight() {
@@ -593,6 +614,7 @@ int main() {
   TestEntryDuration();
   TestGeometryAndAngles();
   TestOrbitHeight();
+  TestPivotForwardOffset();
   TestLookAtHeight();
   TestConstantAngularRate();
   TestWeaveTrack();
