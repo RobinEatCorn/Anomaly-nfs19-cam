@@ -25,9 +25,13 @@
 //     radius; enable it only if the real game shows anchor jitter.
 //
 // During the shot the eye stays smooth. A band-limited value-noise offset is
-// applied only to the look-at target (vertical 0.05 m, horizontal 0.011 m at
-// 5 Hz by default), matching the reference mode's handheld component. Its
-// amplitude is scaled by the entry/exit blend through shot_blend.hpp.
+// applied only to the look-at target. Runtime write-breakpoint evidence from
+// the retail orbit (2026-11-18, pose 0xE504B390, write 0x143FF13BC) shows the
+// active noise is Instance18: horizontal 0.020 m, vertical 0.070 m, 2 Hz base,
+// two octaves, persistence 0.5. Instance14 (0.011/0.05 m at 5 Hz, one octave)
+// is present in the asset but its live scale is 0 and it never writes the
+// orbit target, so do not copy it. The amplitude is scaled by the entry/exit
+// blend through shot_blend.hpp.
 //
 // Weave keys are the asset's 60 s TranslationX track, independent of the
 // configurable orbit period: `period_seconds` only changes the angular rate.
@@ -64,14 +68,18 @@ inline constexpr double kOrbitWeaveFirstPeakSeconds = 15.0;
 inline constexpr double kOrbitWeaveFirstZeroSeconds = 29.963;
 inline constexpr double kOrbitWeaveSecondPeakSeconds = 45.0;
 
-// Handheld look-at noise. The values are amplitudes, not peak-to-peak. The
-// reference mode uses a 5 Hz band (0.2 s between LCG values) and independent
-// LCG streams for the horizontal and vertical axes.
-inline constexpr double kOrbitHandheldHorizontalM = 0.011;
-inline constexpr double kOrbitHandheldVerticalM = 0.050;
-inline constexpr double kOrbitHandheldFrequencyHz = 5.0;
+// Handheld look-at noise. These are the Instance18 amplitudes, not
+// peak-to-peak: 0.02 m horizontal, 0.07 m vertical, 2 Hz base band, two
+// octaves, persistence (roughness) 0.5. The second octave runs at 4 Hz and is
+// weighted 0.5; the two bands use independent LCG streams per axis.
+inline constexpr double kOrbitHandheldHorizontalM = 0.020;
+inline constexpr double kOrbitHandheldVerticalM = 0.070;
+inline constexpr double kOrbitHandheldFrequencyHz = 2.0;
+inline constexpr double kOrbitHandheldRoughness = 0.5;
 inline constexpr std::uint32_t kOrbitHandheldSeedX = 0x1234u;
 inline constexpr std::uint32_t kOrbitHandheldSeedY = 0x5678u;
+inline constexpr std::uint32_t kOrbitHandheldSeedX2 = 0x9E3779B9u;
+inline constexpr std::uint32_t kOrbitHandheldSeedY2 = 0x85EBCA6Bu;
 
 struct OrbitShotConfig final {
   // 8.0 s of standing still, then 2.0 s into the orbit, 1.0 s back out.
@@ -107,6 +115,7 @@ struct OrbitShotConfig final {
   // clamped to the guide's 0.5..30 Hz band inside Update().
   double handheld_strength{1.0};
   double handheld_frequency_hz{kOrbitHandheldFrequencyHz};
+  double handheld_roughness{kOrbitHandheldRoughness};
 
   // Entry/hold speed gates, m/s. NFS starts the idle timer when the car is
   // effectively stationary; the same threshold is a safe hold threshold.
@@ -536,6 +545,10 @@ class OrbitShot final {
         noise_period_, 0.0, 0.0, 0.0, kOrbitHandheldSeedX};
     noise_y_ = orbit_shot_detail::ValueNoiseBand{
         noise_period_, 0.0, 0.0, 0.0, kOrbitHandheldSeedY};
+    noise_x_oct2_ = orbit_shot_detail::ValueNoiseBand{
+        noise_period_oct2_, 0.0, 0.0, 0.0, kOrbitHandheldSeedX2};
+    noise_y_oct2_ = orbit_shot_detail::ValueNoiseBand{
+        noise_period_oct2_, 0.0, 0.0, 0.0, kOrbitHandheldSeedY2};
     state_.shake_x_m = 0.0;
     state_.shake_y_m = 0.0;
   }
@@ -548,12 +561,19 @@ class OrbitShot final {
     if (period == noise_period_) {
       return;
     }
+    const double period2 = 0.5 * period;
     const double scale = period / noise_period_;
+    const double scale2 = period2 / noise_period_oct2_;
     noise_x_.t *= scale;
     noise_y_.t *= scale;
     noise_x_.period = period;
     noise_y_.period = period;
+    noise_x_oct2_.t *= scale2;
+    noise_y_oct2_.t *= scale2;
+    noise_x_oct2_.period = period2;
+    noise_y_oct2_.period = period2;
     noise_period_ = period;
+    noise_period_oct2_ = period2;
   }
 
   void UpdateHandheldNoise(const double dt) noexcept {
@@ -565,9 +585,19 @@ class OrbitShot final {
     }
     const double strength = (std::max)(
         0.0, orbit_shot_detail::Finite(config_.handheld_strength, 1.0));
-    // Advance even when strength is zero; only the returned offset is zero.
-    const double noise_x = orbit_shot_detail::ValueNoiseStep(noise_x_, dt);
-    const double noise_y = orbit_shot_detail::ValueNoiseStep(noise_y_, dt);
+    const double roughness = Clamp(
+        orbit_shot_detail::Finite(config_.handheld_roughness,
+                                  kOrbitHandheldRoughness),
+        0.0, 1.0);
+    // Advance both octaves even when strength is zero; only the returned
+    // offset is zero. Instance18 sums octave 1 + roughness * octave 2; the
+    // peak can therefore exceed the magnitude by (1 + roughness).
+    const double noise_x =
+        orbit_shot_detail::ValueNoiseStep(noise_x_, dt) +
+        roughness * orbit_shot_detail::ValueNoiseStep(noise_x_oct2_, dt);
+    const double noise_y =
+        orbit_shot_detail::ValueNoiseStep(noise_y_, dt) +
+        roughness * orbit_shot_detail::ValueNoiseStep(noise_y_oct2_, dt);
     state_.shake_x_m = kOrbitHandheldHorizontalM * strength * noise_x;
     state_.shake_y_m = kOrbitHandheldVerticalM * strength * noise_y;
   }
@@ -594,8 +624,11 @@ class OrbitShot final {
   Vec3 damped_position_{};
   bool have_damped_position_{};
   double noise_period_{1.0 / kOrbitHandheldFrequencyHz};
+  double noise_period_oct2_{0.5 / kOrbitHandheldFrequencyHz};
   orbit_shot_detail::ValueNoiseBand noise_x_{};
   orbit_shot_detail::ValueNoiseBand noise_y_{};
+  orbit_shot_detail::ValueNoiseBand noise_x_oct2_{};
+  orbit_shot_detail::ValueNoiseBand noise_y_oct2_{};
 };
 
 }  // namespace nfs2015_chase

@@ -21,10 +21,12 @@ using nfs2015_chase::CarState;
 using nfs2015_chase::Cross;
 using nfs2015_chase::Dot;
 using nfs2015_chase::kOrbitHandheldHorizontalM;
+using nfs2015_chase::kOrbitHandheldRoughness;
 using nfs2015_chase::kOrbitHandheldSeedX;
 using nfs2015_chase::kOrbitHandheldSeedY;
 using nfs2015_chase::kOrbitHandheldVerticalM;
 using nfs2015_chase::kOrbitLookAtHeightM;
+using nfs2015_chase::kOrbitPivotForwardM;
 using nfs2015_chase::Length;
 using nfs2015_chase::MakeCarBasis;
 using nfs2015_chase::Mul;
@@ -81,7 +83,8 @@ void ExpectNear(const char* label, const double actual, const double expected,
 
 [[nodiscard]] Vec3 OrbitPivot(const CarState& car) noexcept {
   const CarBasis basis = MakeCarBasis(car.yaw, car.pitch);
-  return Add(car.position, Mul(basis.up, kOrbitLookAtHeightM));
+  return Add(Add(car.position, Mul(basis.up, kOrbitLookAtHeightM)),
+             Mul(basis.forward, kOrbitPivotForwardM));
 }
 
 [[nodiscard]] noise::ValueNoiseBand MakeBand(
@@ -189,14 +192,17 @@ void TestBoundsAndSmoothness() {
     const double shake_y = fixture.last.state.shake_y_m;
     bounds_ok =
         bounds_ok &&
-        std::fabs(shake_x) <= kOrbitHandheldHorizontalM + 1e-9 &&
-        std::fabs(shake_y) <= kOrbitHandheldVerticalM + 1e-9;
+        std::fabs(shake_x) <=
+            kOrbitHandheldHorizontalM * (1.0 + kOrbitHandheldRoughness) +
+                1e-9 &&
+        std::fabs(shake_y) <=
+            kOrbitHandheldVerticalM * (1.0 + kOrbitHandheldRoughness) + 1e-9;
     maximum_x = (std::max)(maximum_x, std::fabs(shake_x));
     maximum_y = (std::max)(maximum_y, std::fabs(shake_y));
     if (have_previous) {
       smooth_ok = smooth_ok &&
-                  std::fabs(shake_x - previous_x) < 0.005 &&
-                  std::fabs(shake_y - previous_y) < 0.005;
+                  std::fabs(shake_x - previous_x) < 0.012 &&
+                  std::fabs(shake_y - previous_y) < 0.012;
     }
     previous_x = shake_x;
     previous_y = shake_y;
@@ -303,9 +309,13 @@ void TestLocalBasis() {
   ExpectNear("6.1-8 offset equals shake_y on local up", along_up,
              fixture.last.state.shake_y_m, 1e-9);
   Expect("6.1-8 horizontal stays inside its amplitude",
-         std::fabs(along_right) <= kOrbitHandheldHorizontalM + 1e-9);
+         std::fabs(along_right) <=
+             kOrbitHandheldHorizontalM * (1.0 + kOrbitHandheldRoughness) +
+                 1e-9);
   Expect("6.1-8 vertical stays inside its amplitude",
-         std::fabs(along_up) <= kOrbitHandheldVerticalM + 1e-9);
+         std::fabs(along_up) <=
+             kOrbitHandheldVerticalM * (1.0 + kOrbitHandheldRoughness) +
+                 1e-9);
 }
 
 void TestStrengthLinearity() {
