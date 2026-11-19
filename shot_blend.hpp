@@ -4,10 +4,12 @@
 //
 // Both cinematic shots in this plugin (the burnout wheel close-up and the
 // parked orbit) are authored in car space and then blended into the chase
-// camera. NFS 2015 uses EULER_ORBIT for those transitions: the eye travels on
-// a cylinder around a car-local pivot instead of along a straight line, the
-// look direction is slerped, and the up vector is re-orthogonalised. Keeping
-// that one implementation here means the two shots cannot drift apart.
+// camera. This header only consumes a 0..1 blend weight; it does not own the
+// transition timing. NFS 2015's parked-orbit entry is CUBIC_ORBIT and its exit
+// is EULER_ORBIT, but both are evaluated by OrbitShot before the weight gets
+// here. The geometry below is what the two shots share: the eye travels on a
+// cylinder around a car-local pivot instead of along a straight line, the look
+// direction is slerped, and the up vector is re-orthogonalised.
 //
 // This header is pure math: no SDK, no game state, no clock. It is extracted
 // verbatim from BurnoutShot so `BlendBurnoutCamera` stays bit-for-bit
