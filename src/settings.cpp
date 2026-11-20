@@ -339,6 +339,8 @@ bool PersistSettings(Context &context) noexcept {
       context.borrow_strength.load(std::memory_order_acquire);
   const std::uint32_t anchor_source =
       context.anchor_source.load(std::memory_order_acquire);
+  const bool borrow_fallback =
+      context.borrow_fallback.load(std::memory_order_acquire);
   const bool diagnostic_skip_position =
       context.diagnostic_skip_position.load(std::memory_order_acquire);
   const bool diagnostic_skip_rotation =
@@ -507,6 +509,8 @@ bool PersistSettings(Context &context) noexcept {
       AppendText(cursor, end, diagnostic_flat_pose ? "true" : "false") &&
       AppendText(cursor, end, ",\"borrowStrength\":") &&
       AppendNumber(cursor, end, borrow_strength) &&
+      AppendText(cursor, end, ",\"borrowFallback\":") &&
+      AppendText(cursor, end, borrow_fallback ? "true" : "false") &&
       AppendText(cursor, end, ",\"anchorSource\":") &&
       AppendNumber(cursor, end, static_cast<double>(anchor_source)) &&
       AppendText(cursor, end, ",\"diagnosticZeroLag\":") &&
@@ -788,6 +792,8 @@ void SetDefaults(Context &context) noexcept {
   context.diagnostic_skip_position.store(false, std::memory_order_release);
   context.diagnostic_skip_rotation.store(false, std::memory_order_release);
   context.borrow_strength.store(1.0, std::memory_order_release);
+  context.borrow_fallback.store(kDefaultBorrowFallback,
+                                std::memory_order_release);
   context.anchor_source.store(kAnchorSourceDefault, std::memory_order_release);
   {
     std::scoped_lock lock(context.custom_settings_mutex);
@@ -1040,6 +1046,7 @@ bool LoadSettings(Context &context) noexcept {
   bool diagnostic_flat_pose = false;
   bool diagnostic_zero_lag = false;
   double borrow_strength = 1.0;
+  bool borrow_fallback = kDefaultBorrowFallback;
   double anchor_source_number = static_cast<double>(kAnchorSourceDefault);
   bool diagnostic_skip_position = false;
   bool diagnostic_skip_rotation = false;
@@ -1145,6 +1152,8 @@ bool LoadSettings(Context &context) noexcept {
                                       diagnostic_flat_pose));
   static_cast<void>(JsonObjectNumber(json, root, "borrowStrength",
                                      borrow_strength));
+  static_cast<void>(JsonObjectBoolean(json, root, "borrowFallback",
+                                      borrow_fallback));
   static_cast<void>(JsonObjectNumber(json, root, "anchorSource",
                                      anchor_source_number));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticZeroLag",
@@ -1319,6 +1328,7 @@ bool LoadSettings(Context &context) noexcept {
   context.borrow_strength.store(
       nfs2015_chase::Clamp(borrow_strength, 0.0, 1.0),
       std::memory_order_release);
+  context.borrow_fallback.store(borrow_fallback, std::memory_order_release);
   context.anchor_source.store(
       std::isfinite(anchor_source_number) && anchor_source_number >= 0.0 &&
               anchor_source_number <= 3.0 &&

@@ -1236,6 +1236,18 @@ void DrawAdvancedGroup(const AnomalyUiServiceV1 *ui, Context &context,
   if (!context.advanced_open) {
     return;
   }
+  const auto advanced_checkbox = [&](const char *key, const char *fallback,
+                                     const char *widget_key,
+                                     const bool value,
+                                     std::atomic<bool> &target) {
+    const std::string label =
+        context.localizer.Label(key, fallback, widget_key);
+    int checked = value ? 1 : 0;
+    if (ui->checkbox(ui->user, StringView(label), &checked) != 0) {
+      target.store(checked != 0, std::memory_order_release);
+      MarkSettingsDirty(context);
+    }
+  };
   ui->text(ui->user,
            StringView(context.localizer.Text("setting.anchor_source",
                                              "Anchor source")));
@@ -1267,19 +1279,15 @@ void DrawAdvancedGroup(const AnomalyUiServiceV1 *ui, Context &context,
         std::memory_order_release);
     MarkSettingsDirty(context);
   }
+  // Off by default. A stale snapshot used to fall back to the borrow estimate
+  // for a single frame, and that estimate can sit metres away from the rendered
+  // car, so the car jumps in frame while the background does not move. Keeping
+  // the tick sample is continuous and needs no second estimator.
+  advanced_checkbox("setting.borrow_fallback",
+                    "Fall back to the Game camera when the anchor is stale",
+                    "chase-borrow-fallback", display.borrow_fallback,
+                    context.borrow_fallback);
 
-  const auto advanced_checkbox = [&](const char *key, const char *fallback,
-                                     const char *widget_key,
-                                     const bool value,
-                                     std::atomic<bool> &target) {
-    const std::string label =
-        context.localizer.Label(key, fallback, widget_key);
-    int checked = value ? 1 : 0;
-    if (ui->checkbox(ui->user, StringView(label), &checked) != 0) {
-      target.store(checked != 0, std::memory_order_release);
-      MarkSettingsDirty(context);
-    }
-  };
   advanced_checkbox("setting.diagnostic_flat_pose",
                     "Diagnostic: position and yaw only", "chase-flat-pose",
                     display.diagnostic_flat_pose,

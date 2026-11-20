@@ -610,6 +610,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.diagnostic_zero_lag.load(std::memory_order_acquire);
   context.display.borrow_strength =
       context.borrow_strength.load(std::memory_order_acquire);
+  context.display.borrow_fallback =
+      context.borrow_fallback.load(std::memory_order_acquire);
   context.display.diagnostic_skip_position =
       context.diagnostic_skip_position.load(std::memory_order_acquire);
   context.display.diagnostic_skip_rotation =

@@ -302,6 +302,8 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         sample.car.position.z * 100.0};
     const double borrow_strength =
         context.borrow_strength.load(std::memory_order_relaxed);
+    const bool borrow_fallback =
+        context.borrow_fallback.load(std::memory_order_relaxed);
     const std::uint32_t anchor_source =
         context.anchor_source.load(std::memory_order_relaxed);
     double raw_est_cm[3]{};
@@ -391,28 +393,47 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         context.render_x.anchor_fallbacks.fetch_add(
             1, std::memory_order_relaxed);
       }
-      const double borrow_dt =
-          context.game_offset_last_ns == 0
-              ? 0.0
-              : static_cast<double>(now_ns - context.game_offset_last_ns) * 1e-9;
-      context.game_offset_last_ns = now_ns;
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        const double offset = game_eye_cm[axis] - our_car_cm[axis];
-        if (!context.game_offset_valid) {
-          context.game_offset_cm[axis] = offset;
-        } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
-          constexpr double kGameOffsetRate = 3.3;
-          const double blend =
-              1.0 - std::exp(-kGameOffsetRate * borrow_dt);
-          context.game_offset_cm[axis] +=
-              (offset - context.game_offset_cm[axis]) * blend;
+      if (!borrow_fallback && anchor_source != kAnchorSourceBorrow) {
+        // The snapshot is missing or older than the freshness window, and the
+        // borrow estimate is not allowed as a substitute. Switching estimators
+        // for one frame puts the eye wherever the game camera happened to be,
+        // which can be metres away: the car jumps in frame and the background
+        // does not, exactly the shape of the reported twitch. Keep the tick
+        // sample instead; during the stall that made the snapshot stale the
+        // tick is frozen too, so this is continuous rather than a jump.
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          raw_est_cm[axis] = our_car_cm[axis];
         }
-        raw_est_cm[axis] =
-            game_eye_cm[axis] - context.game_offset_cm[axis];
+        context.game_offset_valid = false;
+        context.game_offset_last_ns = 0;
+        context.render_x.last_used.store(kAnchorStateDisabled,
+                                         std::memory_order_relaxed);
+      } else {
+        const double borrow_dt =
+            context.game_offset_last_ns == 0
+                ? 0.0
+                : static_cast<double>(now_ns -
+                                      context.game_offset_last_ns) *
+                      1e-9;
+        context.game_offset_last_ns = now_ns;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          const double offset = game_eye_cm[axis] - our_car_cm[axis];
+          if (!context.game_offset_valid) {
+            context.game_offset_cm[axis] = offset;
+          } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
+            constexpr double kGameOffsetRate = 3.3;
+            const double blend =
+                1.0 - std::exp(-kGameOffsetRate * borrow_dt);
+            context.game_offset_cm[axis] +=
+                (offset - context.game_offset_cm[axis]) * blend;
+          }
+          raw_est_cm[axis] =
+              game_eye_cm[axis] - context.game_offset_cm[axis];
+        }
+        context.game_offset_valid = true;
+        context.render_x.last_used.store(kAnchorStateBorrow,
+                                         std::memory_order_relaxed);
       }
-      context.game_offset_valid = true;
-      context.render_x.last_used.store(kAnchorStateBorrow,
-                                       std::memory_order_relaxed);
     }
 
     // `borrow_strength` still interpolates between the plain tick sample and

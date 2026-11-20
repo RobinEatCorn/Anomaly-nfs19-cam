@@ -163,6 +163,7 @@
     "diag.flow": "W 相机速度跳变",
     "diag.frame_pacing": "T 帧长 ms",
     "setting.borrow_strength": "锚定强度（0 = 纯模型，1 = 完全锚定）",
+    "setting.borrow_fallback": "锚点快照过期时退回游戏相机（borrow）估计",
     "setting.anchor_source": "锚点来源",
     "anchor.x": "X 锚定",
     "anchor.borrow": "borrow 估计",

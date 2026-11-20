@@ -992,6 +992,7 @@ struct DisplayState final {
   bool diagnostic_flat_pose{};
   bool diagnostic_zero_lag{};
   double borrow_strength{};
+  bool borrow_fallback{kDefaultBorrowFallback};
   bool diagnostic_skip_position{};
   bool diagnostic_skip_rotation{};
 
@@ -1522,6 +1523,10 @@ struct Context final {
   // the plain NFS model anchored to the Game-tick sample; at one the model is
   // anchored to the Game's drawn car position.
   std::atomic<double> borrow_strength{1.0};
+  // Whether a stale snapshot may fall back to the borrow estimate. Off keeps
+  // one estimator for the whole frame, so a hitch cannot move the eye for one
+  // frame and put the car in a different place on screen.
+  std::atomic_bool borrow_fallback{kDefaultBorrowFallback};
   // Which position source feeds the anchor: X (detour-time `root+280`), the
   // borrow estimate, or the plain tick sample. The X path falls back to borrow
   // when the build gate is closed, so the camera never depends on it.

@@ -608,6 +608,14 @@ constexpr std::uint32_t kAnchorSourceModel = 2;
 // the character is not in a vehicle.
 constexpr std::uint32_t kAnchorSourceVehicle = 3;
 constexpr std::uint32_t kAnchorSourceDefault = kAnchorSourceVehicle;
+// Whether a stale or missing X/Vehicle snapshot may fall back to the old
+// game-camera borrow estimate. Off by default: a hitch longer than the snapshot
+// age used to switch estimators for one frame, and the borrow estimate can sit
+// metres away from the rendered car, which reads as the car twitching forward
+// and back while the background stays put. Holding the tick sample is
+// continuous, and during a hitch the tick sample is frozen too, so it is the
+// safer of the two.
+constexpr bool kDefaultBorrowFallback = false;
 
 // What the panel reports. These are also what the detour publishes as the
 // anchor it actually used this frame.
@@ -660,6 +668,7 @@ constexpr std::string_view kSettingsSchema = R"json(
     "rollOnlyInDrift":{"type":"boolean"},
     "anchorSource":{"type":"integer","minimum":0,"maximum":3},
     "borrowStrength":{"type":"number","minimum":0.0,"maximum":1.0},
+    "borrowFallback":{"type":"boolean"},
     "diagnosticFlatPose":{"type":"boolean"},
     "diagnosticZeroLag":{"type":"boolean"},
     "diagnosticSkipPosition":{"type":"boolean"},

@@ -491,6 +491,14 @@ void CheckDefaultsDocument(FakeHost &host) {
              nfs2015_chase_cam::detail::kDefaultCameraHeightM);
   Expect("loaded defaults keep the burnout off",
          !loaded.burnout_enabled.load());
+  // The fallback is off out of the box: the reported twitch came from a hitched
+  // frame swapping the anchor to the borrow estimate for one frame.
+  Expect("loaded defaults keep the borrow fallback off",
+         !loaded.borrow_fallback.load());
+  loaded.borrow_fallback.store(true, std::memory_order_release);
+  RestoreDefaults(loaded);
+  Expect("restore defaults switches the borrow fallback back off",
+         !loaded.borrow_fallback.load());
 }
 
 void CheckRoundTrip(FakeHost &host) {
@@ -517,11 +525,16 @@ void CheckRoundTrip(FakeHost &host) {
   SetMode(context, SettingsGroup::Slope, GroupMode::Custom);
   SetMode(context, SettingsGroup::WheelSteer, GroupMode::Custom);
   SetMode(context, SettingsGroup::Burnout, GroupMode::Custom);
+  // The fallback switch is a plain top-level boolean, not part of a group, so it
+  // has to round trip on its own.
+  context.borrow_fallback.store(true, std::memory_order_release);
   Expect("persist a tuned document", PersistSettings(context));
 
   Context loaded;
   Bind(loaded, host);
   Expect("load the tuned document", LoadSettings(loaded));
+  Expect("the borrow fallback survives the document",
+         loaded.borrow_fallback.load());
   Expect("the lens mode survives",
          GroupIs(loaded, SettingsGroup::NfsLens, GroupMode::Opposite));
   Expect("the rig mode survives",
