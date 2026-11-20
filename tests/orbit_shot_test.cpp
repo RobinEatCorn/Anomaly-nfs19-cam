@@ -36,7 +36,11 @@ using nfs2015_chase::MakeCarBasis;
 using nfs2015_chase::Mul;
 using nfs2015_chase::Normalize;
 using nfs2015_chase::OrbitPhase;
+using nfs2015_chase::kOrbitTargetSwayRightM;
+using nfs2015_chase::kOrbitTargetSwayUpM;
 using nfs2015_chase::OrbitShot;
+using nfs2015_chase::OrbitTargetSwayX;
+using nfs2015_chase::OrbitTargetSwayY;
 using nfs2015_chase::OrbitShotConfig;
 using nfs2015_chase::OrbitShotResult;
 using nfs2015_chase::OrbitWeave;
@@ -172,6 +176,12 @@ struct Fixture final {
   explicit Fixture(const double pitch = 0.0, const double weave = 0.0) noexcept
       : car(MakeCar(pitch)) {
     config.weave_amplitude_m = weave;
+    // This fixture pins the geometry and the state machine, so both look-at
+    // layers are off unless a test turns them on: the camera weave stays at 0,
+    // and the low-frequency target sway (Instance279) is off as well. Keeping
+    // them off means a geometry assertion never has to guess which layer moved
+    // the target; the layers get their own explicit setups.
+    config.target_sway = 0.0;
     shot.SetConfig(config);
     camera = BehindCamera(car);
   }
@@ -347,6 +357,197 @@ void TestLookAtHeight() {
              std::asin(vertical / 5.05) * kDegreesPerRadian, 20.881457, 1e-6);
 }
 
+// The reference framing this plan adopts (Q1). These numbers are what the
+// game's default parked orbit reproduces; every one of them is still a slider,
+// so a failure here means the *default* drifted, not the model.
+void TestReferenceDefaults() {
+  const OrbitShotConfig defaults{};
+  ExpectNear("default radius", defaults.radius_m, 5.05, 0.0);
+  ExpectNear("default look-at height", defaults.look_at_height_m, 1.23, 0.0);
+  ExpectNear("default pivot forward offset", defaults.pivot_forward_m, 0.772,
+             0.0);
+  ExpectNear("default vertical fov", defaults.vertical_fov_degrees, 28.0,
+             0.0);
+  ExpectNear("default look-at sway", defaults.target_sway, 1.0, 0.0);
+  ExpectNear("default noise frequency", defaults.handheld_frequency_hz, 2.0,
+             0.0);
+
+  Fixture fixture;
+  fixture.config.handheld_strength = 0.0;
+  fixture.shot.SetConfig(fixture.config);
+  fixture.EnterOrbit();
+
+  const CarBasis basis = MakeCarBasis(fixture.car.yaw, fixture.car.pitch);
+  const Vec3 pivot = OrbitPivot(fixture.car, kOrbitLookAtHeightM);
+  const Vec3 pivot_from_car = Sub(pivot, fixture.car.position);
+  const Vec3 eye_from_car =
+      Sub(fixture.last.view.position, fixture.car.position);
+  const Vec3 offset = Sub(fixture.last.view.position, pivot);
+  ExpectNear("reference |eye - pivot|", Length(offset), 5.05, 0.01);
+  ExpectNear("reference pivot height above the car origin",
+             Dot(pivot_from_car, basis.up), 1.23, 0.01);
+  ExpectNear("reference pivot forward offset",
+             Dot(pivot_from_car, basis.forward), 0.772, 0.01);
+  // The camera height is what the presenter always overrides with: 1.23 m of
+  // pivot plus the 0.6 m of arm that the geometry leaves after `asin((1.83 -
+  // 1.23) / 5.05)`. The three numbers only work as a set.
+  ExpectNear("reference camera height above the car origin",
+             Dot(eye_from_car, basis.up), 1.83, 0.01);
+  ExpectNear("reference elevation",
+             std::asin(Dot(offset, basis.up) / Length(offset)) *
+                 kDegreesPerRadian,
+             6.8, 0.2);
+  ExpectNear("reference vertical fov", fixture.last.view.fov_y_degrees, 28.0,
+             1e-12);
+}
+
+// Instance192 / Instance188 land on these keys every 15 s. The published value
+// goes through a 1 s first-order damper, so it lags the raw track by up to
+// tau * slope; the check is therefore "close to the key and same sign", which
+// is what distinguishes the asset curve from any other shape.
+void TestTargetSwayKeys() {
+  Fixture fixture;
+  fixture.config.handheld_strength = 0.0;
+  fixture.config.target_sway = 1.0;
+  fixture.shot.SetConfig(fixture.config);
+  fixture.EnterOrbit();
+
+  struct Key final {
+    double t;
+    double x;
+    double y;
+  };
+  // Normalised track to metres: X * 1.0, Y * 0.3.
+  const Key keys[] = {{0.0, 0.0, -0.3},    {15.0, 0.0, 0.0},
+                      {22.5, 1.0, -0.15},  {30.0, 0.0, -0.3},
+                      {37.5, -1.0, -0.15}, {45.0, 0.0, 0.0}};
+  // The first orbit frame is seeded with the raw track instead of crawling in
+  // from zero, so t = 0 is exact.
+  ExpectNear("sway at t=0 is seeded with the raw key",
+             fixture.last.state.target_sway_y_m, -0.3, 1e-12);
+  ExpectNear("sway at t=0 keeps x at the raw key",
+             fixture.last.state.target_sway_x_m, 0.0, 1e-12);
+
+  // The asset track itself is exact: these two functions are the published
+  // curves, so a mismatch here means the key table drifted.
+  double done = 0.0;
+  for (const Key& key : keys) {
+    char label[64]{};
+    std::snprintf(label, sizeof(label), "track X at t=%.1f s", key.t);
+    ExpectNear(label, OrbitTargetSwayX(key.t) * kOrbitTargetSwayRightM, key.x,
+               1e-12);
+    std::snprintf(label, sizeof(label), "track Y at t=%.1f s", key.t);
+    ExpectNear(label, OrbitTargetSwayY(key.t) * kOrbitTargetSwayUpM, key.y,
+               1e-12);
+  }
+
+  // The published state follows that curve through the 1 s damper, so it lags
+  // by at most tau * max|d/dt| = 1 s * 0.15 m/s on X and 1 s * 0.03 m/s on Y.
+  // Those bounds are a known lag, not slack for a wrong shape: any other curve
+  // would be off by whole metres at the +-1 m keys.
+  for (const Key& key : keys) {
+    fixture.AdvanceSeconds(key.t - done);
+    done = key.t;
+    char label[64]{};
+    std::snprintf(label, sizeof(label), "damped sway X at t=%.1f s", key.t);
+    ExpectNear(label, fixture.last.state.target_sway_x_m, key.x, 0.18);
+    std::snprintf(label, sizeof(label), "damped sway Y at t=%.1f s", key.t);
+    ExpectNear(label, fixture.last.state.target_sway_y_m, key.y, 0.05);
+  }
+
+  // A full 60 s loop returns to the t = 0 key, and the damped track never
+  // swings outside the key envelope (Catmull-Rom on this table does not
+  // overshoot, and the damper can only shrink the excursion). Start from a
+  // fresh shot so the sample covers exactly one period.
+  Fixture sweep;
+  sweep.config.handheld_strength = 0.0;
+  sweep.config.target_sway = 1.0;
+  sweep.shot.SetConfig(sweep.config);
+  sweep.EnterOrbit();
+  constexpr double dt = 1.0 / 240.0;
+  double min_x = 1.0e9;
+  double max_x = -1.0e9;
+  double min_y = 1.0e9;
+  double max_y = -1.0e9;
+  for (int frame = 0; frame < 60 * 240; ++frame) {
+    sweep.AdvanceFrames(1, dt);
+    min_x = (std::min)(min_x, sweep.last.state.target_sway_x_m);
+    max_x = (std::max)(max_x, sweep.last.state.target_sway_x_m);
+    min_y = (std::min)(min_y, sweep.last.state.target_sway_y_m);
+    max_y = (std::max)(max_y, sweep.last.state.target_sway_y_m);
+  }
+  ExpectNear("sway wraps back to the t=0 key at 60 s",
+             sweep.last.state.target_sway_y_m, -0.3, 0.05);
+  ExpectNear("sway wraps back to a level right offset at 60 s",
+             sweep.last.state.target_sway_x_m, 0.0, 0.05);
+  Expect("sway X stays inside its +-1 m keys", min_x >= -1.0 && max_x <= 1.0);
+  Expect("sway Y stays inside its 0..-0.3 m keys", min_y >= -0.3 && max_y <= 0.0);
+  Expect("sway X uses both sides of the track", min_x < -0.8 && max_x > 0.8);
+}
+
+// With both look-at layers off the target is the pivot bit-for-bit: that is
+// what keeps `target_sway == 0` a true off switch rather than a tiny offset.
+void TestTargetSwayZero() {
+  Fixture fixture;
+  fixture.config.handheld_strength = 0.0;
+  fixture.config.target_sway = 0.0;
+  fixture.shot.SetConfig(fixture.config);
+  fixture.EnterOrbit();
+
+  const Vec3 pivot = OrbitPivot(fixture.car, kOrbitLookAtHeightM);
+  bool same_target = true;
+  bool exact_state = true;
+  for (int frame = 0; frame < 60 * 60; ++frame) {
+    fixture.AdvanceFrames(1);
+    same_target = same_target && fixture.last.view.target.x == pivot.x &&
+                  fixture.last.view.target.y == pivot.y &&
+                  fixture.last.view.target.z == pivot.z;
+    exact_state = exact_state &&
+                  fixture.last.state.target_sway_x_m == 0.0 &&
+                  fixture.last.state.target_sway_y_m == 0.0;
+  }
+  Expect("sway 0: target is the pivot bit-for-bit", same_target);
+  Expect("sway 0: the state stays at exact zero", exact_state);
+}
+
+// The sway layer only ever moves the look-at point. The eye, up and FOV must
+// stay bit-for-bit identical, otherwise the orbit radius would wobble.
+void TestTargetSwayDoesNotMoveEye() {
+  Fixture off;
+  off.config.handheld_strength = 0.0;
+  off.config.target_sway = 0.0;
+  off.shot.SetConfig(off.config);
+
+  Fixture on;
+  on.config.handheld_strength = 0.0;
+  on.config.target_sway = 1.0;
+  on.shot.SetConfig(on.config);
+
+  off.EnterOrbit();
+  on.EnterOrbit();
+  bool same_position = true;
+  bool same_up_fov = true;
+  bool target_differs = false;
+  for (int frame = 0; frame < 60 * 60; ++frame) {
+    off.AdvanceFrames(1);
+    on.AdvanceFrames(1);
+    same_position = same_position &&
+                    off.last.view.position.x == on.last.view.position.x &&
+                    off.last.view.position.y == on.last.view.position.y &&
+                    off.last.view.position.z == on.last.view.position.z;
+    same_up_fov = same_up_fov && off.last.view.up.x == on.last.view.up.x &&
+                  off.last.view.up.y == on.last.view.up.y &&
+                  off.last.view.up.z == on.last.view.up.z &&
+                  off.last.view.fov_y_degrees == on.last.view.fov_y_degrees;
+    target_differs =
+        target_differs ||
+        Length(Sub(off.last.view.target, on.last.view.target)) > 1e-4;
+  }
+  Expect("sway leaves the eye bit-for-bit", same_position);
+  Expect("sway leaves up and fov bit-for-bit", same_up_fov);
+  Expect("sway moves only the target", target_differs);
+}
+
 void TestConstantAngularRate() {
   Fixture fixture;
   fixture.EnterOrbit();
@@ -480,6 +681,11 @@ void TestInputClearsHoldTimer() {
 
 void TestSlopeFollow() {
   Fixture fixture(/*pitch=*/0.14);
+  // The roll noise is the only thing that may tilt the horizon, so it is off
+  // here: "slope adds no roll" has to hold exactly. The noise itself is pinned
+  // by the handheld fixture.
+  fixture.config.handheld_strength = 0.0;
+  fixture.shot.SetConfig(fixture.config);
   fixture.EnterOrbit();
   const CarBasis basis = MakeCarBasis(fixture.car.yaw, fixture.car.pitch);
   const Vec3 offset =
@@ -578,13 +784,68 @@ void TestExitFreezesAndResumesClock() {
 
 void TestReset() {
   Fixture fixture;
+  // Turn the low-frequency sway on for this one: the reset must clear the new
+  // layers, not just the state machine.
+  fixture.config.target_sway = 1.0;
+  fixture.shot.SetConfig(fixture.config);
   fixture.EnterOrbit();
   fixture.AdvanceSeconds(5.0);
+  Expect("the layers are live before the reset",
+         fixture.last.state.target_sway_y_m != 0.0 &&
+             fixture.last.state.roll_noise_degrees != 0.0);
   fixture.shot.Reset();
   const auto& state = fixture.shot.state();
   Expect("Reset clears the shot",
          state.mode == OrbitPhase::kIdle && state.hold_time == 0.0 &&
              state.phase == 0.0 && state.time == 0.0 && !state.latched);
+  // PublishOrbitReset() relies on this: after a reset the diagnostics and the
+  // pose must show nothing left from the previous shot.
+  Expect("Reset clears both look-at layers and the roll noise",
+         state.shake_x_m == 0.0 && state.shake_y_m == 0.0 &&
+             state.target_sway_x_m == 0.0 &&
+             state.target_sway_y_m == 0.0 &&
+             state.roll_noise_degrees == 0.0);
+}
+
+// The parked orbit no longer pins roll at zero: it carries the Instance16 ROLL
+// noise and depends on BlendShotAroundCarPivot to fade it in and out. Pin the
+// two ends (bit-for-bit) and the interior (the linear lerp the camera applies).
+void TestRollNoiseFadesWithTheBlend() {
+  Fixture fixture;
+  fixture.EnterOrbit();
+  bool have_noise = false;
+  for (int frame = 0; frame < 240 && !have_noise; ++frame) {
+    fixture.AdvanceFrames(1);
+    have_noise = fixture.last.view.roll_degrees != 0.0;
+  }
+  Expect("the orbit carries the Instance16 roll noise", have_noise);
+  const CameraState shot = fixture.last.view;
+  Expect("the orbit's roll scalar matches its degrees",
+         shot.roll == shot.roll_degrees * nfs2015_chase::kRadiansPerDegree);
+
+  // Blending works in radians and recomputes roll_degrees from the result, so
+  // the base needs a consistent pair. SyntheticBaseView deliberately carries a
+  // slightly inconsistent one (0.01 rad vs 0.57 deg) to keep its other checks
+  // readable; rebuild it here so the expectation below is about the lerp, not
+  // about that 0.003 degree mismatch.
+  CameraState base = SyntheticBaseView();
+  base.roll_degrees = 0.57;
+  base.roll = base.roll_degrees * nfs2015_chase::kRadiansPerDegree;
+  const double blend = 0.5;
+  const CameraState mid = BlendShotAroundCarPivot(base, shot, fixture.car,
+                                                  blend, kOrbitLookAtHeightM);
+  ExpectNear("the blend lerps the roll noise", mid.roll_degrees,
+             base.roll_degrees +
+                 (shot.roll_degrees - base.roll_degrees) * blend,
+             1e-9);
+  Expect("blend 0 drops the roll noise exactly",
+         BlendShotAroundCarPivot(base, shot, fixture.car, 0.0,
+                                 kOrbitLookAtHeightM)
+                 .roll_degrees == base.roll_degrees);
+  Expect("blend 1 keeps the roll noise exactly",
+         BlendShotAroundCarPivot(base, shot, fixture.car, 1.0,
+                                 kOrbitLookAtHeightM)
+                 .roll_degrees == shot.roll_degrees);
 }
 
 void TestFiniteOnBadInputs() {
@@ -616,6 +877,10 @@ int main() {
   TestOrbitHeight();
   TestPivotForwardOffset();
   TestLookAtHeight();
+  TestReferenceDefaults();
+  TestTargetSwayKeys();
+  TestTargetSwayZero();
+  TestTargetSwayDoesNotMoveEye();
   TestConstantAngularRate();
   TestWeaveTrack();
   TestWeaveDisplacement();
@@ -627,6 +892,7 @@ int main() {
   TestBlendEdges();
   TestExitFreezesAndResumesClock();
   TestReset();
+  TestRollNoiseFadesWithTheBlend();
   TestFiniteOnBadInputs();
   std::printf("all parked orbit shot tests passed\n");
   return 0;

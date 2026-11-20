@@ -131,6 +131,9 @@ struct CustomSettings final {
   double orbit_height_m{kDefaultOrbitHeight};
   double orbit_look_at_height_m{kDefaultOrbitLookAtHeight};
   double orbit_weave{kDefaultOrbitWeave};
+  // Look-at low-frequency sway scale (Instance279). 0 disables the layer; the
+  // camera weave above and this one are independent sliders on purpose.
+  double orbit_target_sway{kDefaultOrbitTargetSway};
   double orbit_fov{kDefaultOrbitFov};
   double orbit_shake_strength{kDefaultOrbitShakeStrength};
   double orbit_shake_frequency{kDefaultOrbitShakeFrequency};

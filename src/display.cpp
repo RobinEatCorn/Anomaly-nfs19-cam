@@ -555,6 +555,8 @@ void UpdateDisplay(Context &context) noexcept {
       context.orbit_look_at_height.load(std::memory_order_acquire);
   context.display.orbit_weave =
       context.orbit_weave.load(std::memory_order_acquire);
+  context.display.orbit_target_sway =
+      context.orbit_target_sway.load(std::memory_order_acquire);
   context.display.orbit_fov =
       context.orbit_fov.load(std::memory_order_acquire);
   context.display.orbit_shake_strength =
@@ -598,6 +600,15 @@ void UpdateDisplay(Context &context) noexcept {
       context.presenter_orbit_shake_x_m.load(std::memory_order_relaxed);
   context.display.orbit_shake_y_m =
       context.presenter_orbit_shake_y_m.load(std::memory_order_relaxed);
+  context.display.orbit_target_sway_x_m =
+      context.presenter_orbit_target_sway_x_m.load(
+          std::memory_order_relaxed);
+  context.display.orbit_target_sway_y_m =
+      context.presenter_orbit_target_sway_y_m.load(
+          std::memory_order_relaxed);
+  context.display.orbit_roll_noise_degrees =
+      context.presenter_orbit_roll_noise_degrees.load(
+          std::memory_order_relaxed);
   context.display.slope_follow =
       context.slope_follow.load(std::memory_order_acquire);
   context.display.slope_strength =

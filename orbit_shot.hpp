@@ -24,14 +24,41 @@
 //     leaves tau unsolved and the acceptance numbers require a stable 5.05 m
 //     radius; enable it only if the real game shows anchor jitter.
 //
-// During the shot the eye stays smooth. A band-limited value-noise offset is
-// applied only to the look-at target. Runtime write-breakpoint evidence from
-// the retail orbit (2026-11-18, pose 0xE504B390, write 0x143FF13BC) shows the
-// active noise is Instance18: horizontal 0.020 m, vertical 0.070 m, 2 Hz base,
-// two octaves, persistence 0.5. Instance14 (0.011/0.05 m at 5 Hz, one octave)
-// is present in the asset but its live scale is 0 and it never writes the
-// orbit target, so do not copy it. The amplitude is scaled by the entry/exit
-// blend through shot_blend.hpp.
+// During the shot the eye stays smooth. Three look-at layers ride on top of the
+// geometry above, each with its own evidence level:
+//
+//   * Target noise (A-grade). A band-limited value-noise offset applied only to
+//     the look-at point. Runtime write-breakpoint evidence from the retail
+//     orbit (2026-11-18, pose 0xE504B390, write 0x143FF13BC) shows the active
+//     controller is Instance18: horizontal 0.020 m, vertical 0.070 m, 2 Hz
+//     base, two octaves, persistence 0.5. Instance14 (0.011/0.05 m at 5 Hz,
+//     one octave) is present in the asset but its live scale is 0 and it never
+//     writes the orbit target, so do not copy it.
+//   * Target low-frequency sway (B-grade). `Instance192` (right, +-1) and
+//     `Instance188` (up, 0..-0.3) drive `Instance279`, and `Instance279` is the
+//     only input of `Instance25`'s TARGET reaction, which adds onto pose+0x10 -
+//     the same field the noise above writes. The tracks and the 1.0 s damper
+//     (`Instance127`, DampTime 1.0) are read off the asset; the amplitude
+//     `Instance279` finally emits was never measured, so the metres below are
+//     the asset keys rather than a runtime output, and the layer is a slider.
+//   * Roll noise (A-grade). `Instance16` is a ROLL NoiseController: magnitude
+//     0.7 degrees, frequency 2 Hz, two octaves, roughness 0.1. The decompiled
+//     controller adds `noise1d * magnitude.x` into pose+0x64 and a 30 s retail
+//     capture lands in -0.71..+0.68 degrees, so this one is closed. It shares
+//     the handheld strength slider, so strength 0 keeps the horizon level.
+//
+// The camera's tangential weave (`weave_amplitude_m`) stays as it was: the
+// asset's `Instance74` is a TransformPartPropertyTrackData TranslationX in the
+// 60 s sequence, the asset graph shows it never reaches `Instance25`'s target
+// reaction, and whether it moves the camera arm is still open (B/C-grade). It
+// is neither proven nor disproven, so it remains a separately adjustable
+// approximation.
+//
+// The asset's 30 Hz layer is deliberately not implemented. A 60 Hz capture of
+// the retail orbit shows no 0.1 m signature - the band is buried at about
+// 0.013 m - so adding it would invent motion.
+//
+// Every layer is scaled by the entry/exit blend through shot_blend.hpp.
 //
 // Weave keys are the asset's 60 s TranslationX track, independent of the
 // configurable orbit period: `period_seconds` only changes the angular rate.
@@ -81,6 +108,47 @@ inline constexpr std::uint32_t kOrbitHandheldSeedY = 0x5678u;
 inline constexpr std::uint32_t kOrbitHandheldSeedX2 = 0x9E3779B9u;
 inline constexpr std::uint32_t kOrbitHandheldSeedY2 = 0x85EBCA6Bu;
 
+// Look-at low-frequency sway (`Instance279`, B-grade: the tracks and the damper
+// are read off the asset, the output amplitude was never measured). The key
+// tables below are stored normalised - Instance192 in +-1, Instance188 in -1..0
+// - and the two amplitude constants turn them into metres. 60 s period, so the
+// sway rides the same clock as the camera weave.
+inline constexpr double kOrbitTargetSwayDampSeconds = 1.0;
+inline constexpr double kOrbitTargetSwayPeriodSeconds = 60.0;
+inline constexpr double kOrbitTargetSwayRightM = 1.0;
+inline constexpr double kOrbitTargetSwayUpM = 0.3;
+
+// Instance192 right track, normalised: 0 / 15 / 22.5 / 30 / 37.5 / 45 s map to
+// 0 / 0 / +1 / 0 / -1 / 0, and the track wraps back to 0 at 60 s.
+inline constexpr int kOrbitTargetSwayXKeyCount = 6;
+inline constexpr double kOrbitTargetSwayXTimes[kOrbitTargetSwayXKeyCount] = {
+    0.0, 15.0, 22.5, 30.0, 37.5, 45.0};
+inline constexpr double kOrbitTargetSwayXValues[kOrbitTargetSwayXKeyCount] = {
+    0.0, 0.0, 1.0, 0.0, -1.0, 0.0};
+
+// Instance188 up track, normalised: 0 / 15 / 30 / 45 s map to -1 / 0 / -1 / 0,
+// and the track wraps back to -1 at 60 s.
+inline constexpr int kOrbitTargetSwayYKeyCount = 4;
+inline constexpr double kOrbitTargetSwayYTimes[kOrbitTargetSwayYKeyCount] = {
+    0.0, 15.0, 30.0, 45.0};
+inline constexpr double kOrbitTargetSwayYValues[kOrbitTargetSwayYKeyCount] = {
+    -1.0, 0.0, -1.0, 0.0};
+
+// Vertical FOV of the parked orbit. The chase preset authors 43 degrees and the
+// orbit controller subtracts 15, so the runtime value is 28.
+inline constexpr double kOrbitVerticalFovDegrees = 28.0;
+
+// Roll noise (`Instance16`, A-grade): magnitude 0.7 degrees, 2 Hz, two octaves,
+// roughness 0.1. The second band runs at 4 Hz and is weighted 0.1. The band
+// frequency follows the handheld slider, so the two constants must agree.
+inline constexpr double kOrbitRollNoiseDegrees = 0.7;
+inline constexpr double kOrbitRollNoiseFrequencyHz = 2.0;
+inline constexpr double kOrbitRollNoiseRoughness = 0.1;
+inline constexpr std::uint32_t kOrbitRollSeed = 0xA5A5A5A5u;
+inline constexpr std::uint32_t kOrbitRollSeed2 = 0x5A5A5A5Au;
+static_assert(kOrbitRollNoiseFrequencyHz == kOrbitHandheldFrequencyHz,
+              "the roll noise shares the handheld frequency slider");
+
 struct OrbitShotConfig final {
   // 8.0 s of standing still, then 2.0 s into the orbit, 1.0 s back out.
   double entry_delay{8.0};
@@ -109,7 +177,15 @@ struct OrbitShotConfig final {
   // car-origin-centred orbit.
   double pivot_forward_m{kOrbitPivotForwardM};
   double weave_amplitude_m{1.0};
-  double vertical_fov_degrees{45.0};
+  // Look-at low-frequency sway scale, 0 disables the layer. 1.0 keeps the
+  // asset keys (+-1 m along the camera's right, 0..-0.3 m along its up) as
+  // they are; the settings slider allows 0..2. B-grade: see OrbitTargetSwayX
+  // and OrbitTargetSwayY for what is known and what is not.
+  double target_sway{1.0};
+  // Vertical FOV. 28 degrees is the runtime value (43 authored, minus the
+  // controller's 15); the settings slider can still pick anything between 20
+  // and 70.
+  double vertical_fov_degrees{kOrbitVerticalFovDegrees};
 
   // Handheld look-at noise. Strength 0 disables the effect; the frequency is
   // clamped to the guide's 0.5..30 Hz band inside Update().
@@ -171,6 +247,13 @@ struct OrbitShotState final {
   // so diagnostics and tests can read the exact values used for the target.
   double shake_x_m{};
   double shake_y_m{};
+  // Low-frequency target sway after the strength scale and the 1 s damper, in
+  // metres along the camera's local right / up. Deliberately separate from the
+  // noise above: the two layers have independent sliders.
+  double target_sway_x_m{};
+  double target_sway_y_m{};
+  // Roll noise for this frame in degrees, after the shared strength scale.
+  double roll_noise_degrees{};
 };
 
 struct OrbitShotResult final {
@@ -198,6 +281,75 @@ namespace orbit_shot_detail {
 [[nodiscard]] inline double Smooth01(double u) noexcept {
   u = Clamp(u, 0.0, 1.0);
   return u * u * (3.0 - 2.0 * u);
+}
+
+// Periodic Catmull-Rom over a keyed track. `times` must be strictly increasing
+// and live in [0, period); the segment after the last key wraps to key 0 shifted
+// by +period, so every key has a left and a right neighbour. Tangents are
+// central differences divided by the real key spacing (non-uniform Catmull-Rom),
+// which keeps the asset's mixed 7.5 s / 15 s spacing C1 without the extra
+// overshoot the uniform form produces. The result is clamped because the asset
+// keys are the extremes and an interpolating spline can still leave them.
+[[nodiscard]] inline double SamplePeriodicKeyedTrack(
+    const double* times, const double* values, const int count,
+    const double period, const double time_seconds, const double low,
+    const double high) noexcept {
+  if (times == nullptr || values == nullptr || count <= 0) {
+    return 0.0;
+  }
+  if (count == 1) {
+    return Clamp(Finite(values[0], 0.0), low, high);
+  }
+  const double span = (std::max)(1e-6, Finite(period, 60.0));
+  double t = std::fmod(Finite(time_seconds, 0.0), span);
+  if (t < 0.0) {
+    t += span;
+  }
+  // Largest key index whose time is <= t; everything past the last key is the
+  // wrap segment that ends at key 0 plus one period.
+  int i = 0;
+  for (int k = 1; k < count; ++k) {
+    if (t < times[k]) {
+      break;
+    }
+    i = k;
+  }
+  const int j = (i + 1) % count;
+  const int p = (i + count - 1) % count;
+  const int n = (j + 1) % count;
+  // Put every neighbour on the same unwrapped timeline as key i. `times` only
+  // covers [0, period), so a neighbour that sits on the other side of the wrap
+  // has to be shifted by whole periods until it is on the right side of its
+  // reference key. Doing it with loops instead of index tests keeps the
+  // three-key and two-key tracks correct as well.
+  const double t_i = times[i];
+  double t_j = times[j];
+  while (t_j <= t_i) {
+    t_j += span;
+  }
+  double t_p = times[p];
+  while (t_p >= t_i) {
+    t_p -= span;
+  }
+  double t_n = times[n];
+  while (t_n <= t_j) {
+    t_n += span;
+  }
+  const double v_i = Finite(values[i], 0.0);
+  const double v_j = Finite(values[j], 0.0);
+  const double v_p = Finite(values[p], 0.0);
+  const double v_n = Finite(values[n], 0.0);
+  const double h = (std::max)(1e-9, t_j - t_i);
+  const double u = Clamp((t - t_i) / h, 0.0, 1.0);
+  const double m_i = (v_j - v_p) / (std::max)(1e-9, t_j - t_p);
+  const double m_j = (v_n - v_i) / (std::max)(1e-9, t_n - t_i);
+  const double u2 = u * u;
+  const double u3 = u2 * u;
+  const double value = (2.0 * u3 - 3.0 * u2 + 1.0) * v_i +
+                       (u3 - 2.0 * u2 + u) * h * m_i +
+                       (-2.0 * u3 + 3.0 * u2) * v_j +
+                       (u3 - u2) * h * m_j;
+  return Clamp(Finite(value, v_i), low, high);
 }
 
 // One axis of the guide's single-octave value-noise band. `prev`/`cur` start
@@ -275,6 +427,30 @@ struct ValueNoiseBand final {
   return 1.0 - orbit_shot_detail::Smooth01(
                    (u - kOrbitWeaveSecondPeakSeconds) /
                    (period - kOrbitWeaveSecondPeakSeconds));
+}
+
+// `Instance192` right track, normalised to [-1, +1]. This knows nothing about
+// metres: kOrbitTargetSwayRightM turns the value into metres. The asset keys
+// are 0 / 0 / +1 / 0 / -1 / 0 at 0 / 15 / 22.5 / 30 / 37.5 / 45 s, wrapping to
+// 0 at 60 s; the spline adds a small (~0.1) negative lobe near t = 10 s and a
+// matching positive one near t = 50 s that fall out of the C1 tangents.
+[[nodiscard]] inline double OrbitTargetSwayX(
+    const double time_seconds) noexcept {
+  return orbit_shot_detail::SamplePeriodicKeyedTrack(
+      kOrbitTargetSwayXTimes, kOrbitTargetSwayXValues,
+      kOrbitTargetSwayXKeyCount, kOrbitTargetSwayPeriodSeconds, time_seconds,
+      -1.0, 1.0);
+}
+
+// `Instance188` up track, normalised to [-1, 0]: -1 / 0 / -1 / 0 at 0 / 15 /
+// 30 / 45 s, wrapping back to -1 at 60 s. This one lands exactly on zero-slope
+// smoothsteps, so it never needs the clamp.
+[[nodiscard]] inline double OrbitTargetSwayY(
+    const double time_seconds) noexcept {
+  return orbit_shot_detail::SamplePeriodicKeyedTrack(
+      kOrbitTargetSwayYTimes, kOrbitTargetSwayYValues,
+      kOrbitTargetSwayYKeyCount, kOrbitTargetSwayPeriodSeconds, time_seconds,
+      -1.0, 0.0);
 }
 
 // Pure state machine plus pose. The class owns no clock and no locks: `Update`
@@ -426,6 +602,7 @@ class OrbitShot final {
     }
 
     UpdateHandheldNoise(dt);
+    UpdateTargetSway(dt);
 
     // Orbit pose. `dir`/`tangent` live in the car body's forward-right plane,
     // so on a slope the whole circle follows the body pitch (guide Q5-B).
@@ -496,26 +673,33 @@ class OrbitShot final {
     }
 
     // Look at the pivot; up stays world +Z so the horizon is level even on a
-    // slope, and roll is exactly zero (NFS has no RotationZ animation).
+    // slope. Any roll comes from the noise layer above, never from `up`.
     Vec3 look = Sub(pivot, eye);
     if (Length(look) < 1e-9) {
       look = basis.forward;
     }
     look = Normalize(look);
 
-    // Handheld noise changes only the look-at point. The eye, up and roll are
-    // untouched, so the orbit radius stays exactly the same. Branches on zero
-    // keep `strength == 0` bit-for-bit identical to the unshaken shot.
+    // Handheld noise and the low-frequency sway change only the look-at point.
+    // The eye, up and the roll basis stay untouched, so the orbit radius stays
+    // exactly the same. Branches on zero keep both `strength == 0` and
+    // `target_sway == 0` bit-for-bit identical to the shot without them.
     Vec3 target = pivot;
-    if (state_.shake_x_m != 0.0 || state_.shake_y_m != 0.0) {
+    if (state_.target_sway_x_m != 0.0 || state_.target_sway_y_m != 0.0 ||
+        state_.shake_x_m != 0.0 || state_.shake_y_m != 0.0) {
       Vec3 right = Cross(Vec3{0.0, 0.0, 1.0}, look);
       if (Length(right) < 1e-9) {
         right = basis.right;
       }
       right = Normalize(right);
       const Vec3 up_local = Normalize(Cross(look, right));
-      target = Add(pivot, Add(Mul(right, state_.shake_x_m),
-                              Mul(up_local, state_.shake_y_m)));
+      // Sway and noise are added on the same target point because the runtime
+      // does exactly that: Instance279 (reaction) and Instance18 (noise) both
+      // write pose+0x10. `0.0 + shake` stays exact when the sway is off.
+      target = Add(pivot, Add(Mul(right, state_.target_sway_x_m +
+                                            state_.shake_x_m),
+                              Mul(up_local, state_.target_sway_y_m +
+                                                state_.shake_y_m)));
       look = Normalize(Sub(target, eye));
     }
 
@@ -524,9 +708,13 @@ class OrbitShot final {
     view.target = target;
     view.up = {0.0, 0.0, 1.0};
     view.fov_y_degrees =
-        Clamp(Finite(config_.vertical_fov_degrees, 45.0), 1.0, 179.0);
-    view.roll = 0.0;
-    view.roll_degrees = 0.0;
+        Clamp(Finite(config_.vertical_fov_degrees, kOrbitVerticalFovDegrees),
+              1.0, 179.0);
+    // Roll is the inherited ROLL noise controller (Instance16), not a keyframed
+    // RotationZ and not a tilted up vector: pose+0x64 is a scalar the camera
+    // applies around the view axis, so `up` stays world +Z here.
+    view.roll_degrees = state_.roll_noise_degrees;
+    view.roll = view.roll_degrees * kRadiansPerDegree;
     view.pitch_degrees =
         std::asin(Clamp(look.z, -1.0, 1.0)) * kDegreesPerRadian;
     view.yaw_degrees =
@@ -549,8 +737,18 @@ class OrbitShot final {
         noise_period_oct2_, 0.0, 0.0, 0.0, kOrbitHandheldSeedX2};
     noise_y_oct2_ = orbit_shot_detail::ValueNoiseBand{
         noise_period_oct2_, 0.0, 0.0, 0.0, kOrbitHandheldSeedY2};
+    roll_ = orbit_shot_detail::ValueNoiseBand{
+        noise_period_, 0.0, 0.0, 0.0, kOrbitRollSeed};
+    roll_oct2_ = orbit_shot_detail::ValueNoiseBand{
+        noise_period_oct2_, 0.0, 0.0, 0.0, kOrbitRollSeed2};
     state_.shake_x_m = 0.0;
     state_.shake_y_m = 0.0;
+    state_.roll_noise_degrees = 0.0;
+    state_.target_sway_x_m = 0.0;
+    state_.target_sway_y_m = 0.0;
+    damped_sway_x_ = 0.0;
+    damped_sway_y_ = 0.0;
+    have_damped_sway_ = false;
   }
 
   void UpdateHandheldPeriod(const double frequency_hz) noexcept {
@@ -572,6 +770,12 @@ class OrbitShot final {
     noise_y_oct2_.t *= scale2;
     noise_x_oct2_.period = period2;
     noise_y_oct2_.period = period2;
+    // The roll bands share the frequency, so they have to be rescaled too or a
+    // slider move would jump the roll phase.
+    roll_.t *= scale;
+    roll_oct2_.t *= scale2;
+    roll_.period = period;
+    roll_oct2_.period = period2;
     noise_period_ = period;
     noise_period_oct2_ = period2;
   }
@@ -581,6 +785,7 @@ class OrbitShot final {
     if (state_.mode == OrbitPhase::kIdle) {
       state_.shake_x_m = 0.0;
       state_.shake_y_m = 0.0;
+      state_.roll_noise_degrees = 0.0;
       return;
     }
     const double strength = (std::max)(
@@ -589,9 +794,9 @@ class OrbitShot final {
         orbit_shot_detail::Finite(config_.handheld_roughness,
                                   kOrbitHandheldRoughness),
         0.0, 1.0);
-    // Advance both octaves even when strength is zero; only the returned
-    // offset is zero. Instance18 sums octave 1 + roughness * octave 2; the
-    // peak can therefore exceed the magnitude by (1 + roughness).
+    // Advance every band even when strength is zero; only the returned offset
+    // is zero. Instance18 sums octave 1 + roughness * octave 2; the peak can
+    // therefore exceed the magnitude by (1 + roughness).
     const double noise_x =
         orbit_shot_detail::ValueNoiseStep(noise_x_, dt) +
         roughness * orbit_shot_detail::ValueNoiseStep(noise_x_oct2_, dt);
@@ -600,6 +805,50 @@ class OrbitShot final {
         roughness * orbit_shot_detail::ValueNoiseStep(noise_y_oct2_, dt);
     state_.shake_x_m = kOrbitHandheldHorizontalM * strength * noise_x;
     state_.shake_y_m = kOrbitHandheldVerticalM * strength * noise_y;
+    // Roll is a separate controller (Instance16) with its own roughness 0.1 and
+    // its own LCG streams; it shares only the strength and frequency sliders.
+    // `strength == 0` multiplies to exactly zero, so the horizon is level.
+    const double roll_noise =
+        orbit_shot_detail::ValueNoiseStep(roll_, dt) +
+        kOrbitRollNoiseRoughness *
+            orbit_shot_detail::ValueNoiseStep(roll_oct2_, dt);
+    state_.roll_noise_degrees =
+        kOrbitRollNoiseDegrees * strength * roll_noise;
+  }
+
+  // Instance279 reaction: the two asset tracks scaled by the sway slider and
+  // smoothed by Instance127's 1.0 s damper. The damped value is seeded with the
+  // raw track on the first frame of a shot, so the layer does not crawl in from
+  // zero during the 2 s entry. Zero strength publishes exact zeros, which is
+  // what keeps the whole layer bit-for-bit inert when it is turned off.
+  void UpdateTargetSway(const double dt) noexcept {
+    const double strength = Clamp(
+        orbit_shot_detail::Finite(config_.target_sway, 1.0), 0.0, 2.0);
+    if (strength <= 0.0 || state_.mode == OrbitPhase::kIdle) {
+      damped_sway_x_ = 0.0;
+      damped_sway_y_ = 0.0;
+      have_damped_sway_ = false;
+      state_.target_sway_x_m = 0.0;
+      state_.target_sway_y_m = 0.0;
+      return;
+    }
+    const double raw_x =
+        strength * kOrbitTargetSwayRightM * OrbitTargetSwayX(state_.time);
+    const double raw_y =
+        strength * kOrbitTargetSwayUpM * OrbitTargetSwayY(state_.time);
+    if (!have_damped_sway_) {
+      damped_sway_x_ = raw_x;
+      damped_sway_y_ = raw_y;
+      have_damped_sway_ = true;
+    } else {
+      const double alpha =
+          1.0 - std::exp(-(std::max)(0.0, dt) /
+                         kOrbitTargetSwayDampSeconds);
+      damped_sway_x_ += (raw_x - damped_sway_x_) * alpha;
+      damped_sway_y_ += (raw_y - damped_sway_y_) * alpha;
+    }
+    state_.target_sway_x_m = damped_sway_x_;
+    state_.target_sway_y_m = damped_sway_y_;
   }
 
   [[nodiscard]] static double EntryPhase0(
@@ -629,6 +878,11 @@ class OrbitShot final {
   orbit_shot_detail::ValueNoiseBand noise_y_{};
   orbit_shot_detail::ValueNoiseBand noise_x_oct2_{};
   orbit_shot_detail::ValueNoiseBand noise_y_oct2_{};
+  orbit_shot_detail::ValueNoiseBand roll_{};
+  orbit_shot_detail::ValueNoiseBand roll_oct2_{};
+  double damped_sway_x_{};
+  double damped_sway_y_{};
+  bool have_damped_sway_{};
 };
 
 }  // namespace nfs2015_chase

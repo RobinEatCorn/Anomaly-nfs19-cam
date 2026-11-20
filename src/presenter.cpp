@@ -93,6 +93,12 @@ void PublishOrbitDiagnostics(
                                           std::memory_order_relaxed);
   context.presenter_orbit_shake_y_m.store(state.shake_y_m,
                                           std::memory_order_relaxed);
+  context.presenter_orbit_target_sway_x_m.store(
+      state.target_sway_x_m, std::memory_order_relaxed);
+  context.presenter_orbit_target_sway_y_m.store(
+      state.target_sway_y_m, std::memory_order_relaxed);
+  context.presenter_orbit_roll_noise_degrees.store(
+      state.roll_noise_degrees, std::memory_order_relaxed);
   if (blend > 0.0) {
     context.presenter_orbit_blend.store(blend, std::memory_order_relaxed);
   } else if (context.presenter_orbit_blend.load(
@@ -103,15 +109,17 @@ void PublishOrbitDiagnostics(
     return;
   }
   context.presenter_orbit_logged_mode = mode;
-  char message[288]{};
+  char message[352]{};
   std::snprintf(
       message, sizeof(message),
       "nfs2015 chase cam: orbit state=%s blend=%.2f hold=%.2fs time=%.2fs "
-      "phase0=%.1f in=%d speed=%.2f shake=(%.3f,%.3f)",
+      "phase0=%.1f in=%d speed=%.2f shake=(%.3f,%.3f) sway=(%.3f,%.3f) "
+      "roll=%.2fdeg",
       nfs2015_chase::OrbitPhaseName(state.mode), blend, state.hold_time,
       state.time, state.phase0 * nfs2015_chase::kDegreesPerRadian,
       state.input ? 1 : 0, state.speed_mps, state.shake_x_m,
-      state.shake_y_m);
+      state.shake_y_m, state.target_sway_x_m, state.target_sway_y_m,
+      state.roll_noise_degrees);
   Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
 }
 
@@ -129,6 +137,12 @@ void PublishOrbitReset(Context &context) noexcept {
   context.presenter_orbit_input.store(false, std::memory_order_relaxed);
   context.presenter_orbit_shake_x_m.store(0.0, std::memory_order_relaxed);
   context.presenter_orbit_shake_y_m.store(0.0, std::memory_order_relaxed);
+  context.presenter_orbit_target_sway_x_m.store(0.0,
+                                               std::memory_order_relaxed);
+  context.presenter_orbit_target_sway_y_m.store(0.0,
+                                               std::memory_order_relaxed);
+  context.presenter_orbit_roll_noise_degrees.store(
+      0.0, std::memory_order_relaxed);
   if (context.presenter_orbit_logged_mode == 0U) {
     return;
   }
@@ -522,6 +536,8 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         context.orbit_look_at_height.load(std::memory_order_acquire);
     orbit_config.weave_amplitude_m =
         context.orbit_weave.load(std::memory_order_acquire);
+    orbit_config.target_sway =
+        context.orbit_target_sway.load(std::memory_order_acquire);
     orbit_config.vertical_fov_degrees =
         context.orbit_fov.load(std::memory_order_acquire);
     orbit_config.handheld_strength =
@@ -536,7 +552,12 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
                                   chase_view.position, sample.aspect_ratio);
     PublishOrbitDiagnostics(context, orbit.state, orbit.blend);
     // The blend pivots around the same look-at point the orbit aims at, so the
-    // two heights stay independent all the way through the transition.
+    // two heights stay independent all the way through the transition. The
+    // blend pivot itself has no 0.772 m forward offset (BlendShotAroundCarPivot
+    // only takes a height), so the entry path circles the car origin while the
+    // steady-state orbit circles the shifted pivot. That mismatch predates the
+    // current layers and is left alone on purpose; if an A/B shows a sideways
+    // step at the end of the entry, this is the place to look first.
     view = nfs2015_chase::BlendShotAroundCarPivot(
         chase_view, orbit.view, sample.car, orbit.blend,
         orbit_config.look_at_height_m);

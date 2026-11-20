@@ -961,6 +961,7 @@ struct DisplayState final {
   // elevation angle.
   double orbit_look_at_height{kDefaultOrbitLookAtHeight};
   double orbit_weave{kDefaultOrbitWeave};
+  double orbit_target_sway{kDefaultOrbitTargetSway};
   double orbit_fov{kDefaultOrbitFov};
   double orbit_shake_strength{kDefaultOrbitShakeStrength};
   double orbit_shake_frequency{kDefaultOrbitShakeFrequency};
@@ -986,6 +987,12 @@ struct DisplayState final {
   double orbit_speed_mps{};
   double orbit_shake_x_m{};
   double orbit_shake_y_m{};
+  // Low-frequency sway after its strength scale and the 1 s damper, in metres
+  // along the camera's local right / up, plus the roll noise in degrees. All
+  // three are read-only diagnostics of the model's own state.
+  double orbit_target_sway_x_m{};
+  double orbit_target_sway_y_m{};
+  double orbit_roll_noise_degrees{};
   bool slope_follow{true};
   double slope_strength{kDefaultSlopeStrength};
   bool roll_only_in_drift{true};
@@ -1481,6 +1488,7 @@ struct Context final {
   std::atomic<double> orbit_height{kDefaultOrbitHeight};
   std::atomic<double> orbit_look_at_height{kDefaultOrbitLookAtHeight};
   std::atomic<double> orbit_weave{kDefaultOrbitWeave};
+  std::atomic<double> orbit_target_sway{kDefaultOrbitTargetSway};
   std::atomic<double> orbit_fov{kDefaultOrbitFov};
   std::atomic<double> orbit_shake_strength{kDefaultOrbitShakeStrength};
   std::atomic<double> orbit_shake_frequency{kDefaultOrbitShakeFrequency};
@@ -1663,6 +1671,9 @@ struct Context final {
   std::atomic_bool presenter_orbit_input{};
   std::atomic<double> presenter_orbit_shake_x_m{};
   std::atomic<double> presenter_orbit_shake_y_m{};
+  std::atomic<double> presenter_orbit_target_sway_x_m{};
+  std::atomic<double> presenter_orbit_target_sway_y_m{};
+  std::atomic<double> presenter_orbit_roll_noise_degrees{};
   std::atomic<std::int64_t> sample_interval_ns{};
   // Running mean of the Game tick interval. The presenter looks back this far
   // times kSampleDelayFactor, which is more than one interval, so the sample

@@ -131,6 +131,25 @@ void CheckDefaults(Context& context) {
   ExpectNear("fresh orbit look-at height",
              context.orbit_look_at_height.load(),
              nfs2015_chase_cam::detail::kDefaultOrbitLookAtHeight);
+  // The defaults are the NFS 2015 reference composition, pinned as numbers so
+  // a change to the constants cannot quietly drift away from it. The old
+  // 4.0 / 0.724 / 0.671 / 45 values are custom-only now.
+  ExpectNear("fresh orbit radius is the NFS reference",
+             context.orbit_radius.load(), 5.05);
+  ExpectNear("fresh orbit height is the NFS reference",
+             context.orbit_height.load(), 1.83);
+  ExpectNear("fresh orbit look-at height is the NFS reference",
+             context.orbit_look_at_height.load(), 1.23);
+  ExpectNear("fresh orbit FOV is the runtime 43 - 15",
+             context.orbit_fov.load(), 28.0);
+  ExpectNear("fresh orbit noise runs at the asset 2 Hz",
+             context.orbit_shake_frequency.load(), 2.0);
+  ExpectNear("fresh orbit look-at sway is on",
+             context.orbit_target_sway.load(), 1.0);
+  ExpectNear("the sway slider spans 0..2",
+             nfs2015_chase_cam::detail::kMinimumOrbitTargetSway, 0.0);
+  ExpectNear("the sway slider tops out at 2",
+             nfs2015_chase_cam::detail::kMaximumOrbitTargetSway, 2.0);
   Expect("fresh orbit hides the HUD by default",
          context.orbit_hide_ui.load());
   Expect("fresh dynamics roll scale on", context.roll_scale.load() == 1.0);
@@ -299,6 +318,9 @@ void CheckOrbit(Context& context) {
   ExpectNear("orbit default look-at height",
              context.orbit_look_at_height.load(),
              nfs2015_chase_cam::detail::kDefaultOrbitLookAtHeight);
+  ExpectNear("orbit default look-at sway",
+             context.orbit_target_sway.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitTargetSway);
   Expect("orbit default keeps the HUD switch on",
          context.orbit_hide_ui.load());
 
@@ -309,6 +331,7 @@ void CheckOrbit(Context& context) {
     custom.orbit_entry_delay = 5.0;
     custom.orbit_period = 90.0;
     custom.orbit_weave = 0.4;
+    custom.orbit_target_sway = 0.25;
     custom.orbit_fov = 50.0;
     custom.orbit_shake_strength = 1.5;
     custom.orbit_shake_frequency = 6.0;
@@ -324,6 +347,8 @@ void CheckOrbit(Context& context) {
              5.0);
   ExpectNear("orbit custom period", context.orbit_period.load(), 90.0);
   ExpectNear("orbit custom weave", context.orbit_weave.load(), 0.4);
+  ExpectNear("orbit custom look-at sway",
+             context.orbit_target_sway.load(), 0.25);
   ExpectNear("orbit custom FOV", context.orbit_fov.load(), 50.0);
   ExpectNear("orbit custom shake strength",
              context.orbit_shake_strength.load(), 1.5);
@@ -346,6 +371,9 @@ void CheckOrbit(Context& context) {
   ExpectNear("orbit opposite restores the built-in period",
              context.orbit_period.load(),
              nfs2015_chase_cam::detail::kDefaultOrbitPeriod);
+  ExpectNear("orbit opposite restores the built-in look-at sway",
+             context.orbit_target_sway.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitTargetSway);
   Expect("orbit opposite restores the built-in HUD switch",
          context.orbit_hide_ui.load());
   ExpectNear("orbit opposite does not rewrite the custom radius",

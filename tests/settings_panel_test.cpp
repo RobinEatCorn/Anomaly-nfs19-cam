@@ -79,6 +79,10 @@ struct Widget final {
   std::string kind;
   std::string label;
   float value{};
+  // Slider range, so a test can pin what the panel hands to ImGui instead of
+  // only what it stores. Zero for widgets that are not sliders.
+  float minimum{};
+  float maximum{};
 };
 
 class FakeUi final {
@@ -181,8 +185,9 @@ private:
                                  float *value, float minimum, float maximum) {
     auto *ui = static_cast<FakeUi *>(user);
     const std::string text(label.data, label.size);
-    ui->widgets.push_back(
-        {"slider", text, value != nullptr ? *value : 0.0F});
+    ui->widgets.push_back({"slider", text,
+                           value != nullptr ? *value : 0.0F, minimum,
+                           maximum});
     if (value == nullptr || ui->edit != WidgetId(text)) return 0;
     ui->edit.clear();
     float next = ui->edit_value;
@@ -512,13 +517,38 @@ void CheckPresetHidesSprings(Harness &harness) {
 void CheckOrbitDetails(Harness &harness) {
   harness.Click("group-orbit-mode-1");
   harness.Frame();
-  Expect("Orbit/Custom opens nine sliders",
+  Expect("Orbit/Custom opens ten sliders",
          CountIds(harness.ui,
                   {"chase-orbit-entry-delay", "chase-orbit-period",
                    "chase-orbit-radius", "chase-orbit-height",
                    "chase-orbit-look-at-height", "chase-orbit-weave",
-                   "chase-orbit-fov", "chase-orbit-shake-strength",
-                   "chase-orbit-shake-frequency"}) == 9);
+                   "chase-orbit-target-sway", "chase-orbit-fov",
+                   "chase-orbit-shake-strength",
+                   "chase-orbit-shake-frequency"}) == 10);
+  // The two sway layers are separate rows with distinct labels: one moves the
+  // camera along the tangent, the other moves only what it looks at.
+  const Widget *weave = harness.ui.Find("chase-orbit-weave");
+  const Widget *sway = harness.ui.Find("chase-orbit-target-sway");
+  Expect("the weave row names the camera, not the target",
+         weave != nullptr &&
+             VisiblePart(weave->label).find("Camera") != std::string::npos &&
+             VisiblePart(weave->label).find("Look-at") == std::string::npos);
+  Expect("the sway row names the look-at point",
+         sway != nullptr &&
+             VisiblePart(sway->label).find("Look-at") != std::string::npos &&
+             VisiblePart(sway->label).find("Camera") == std::string::npos);
+  Expect("the sway row spans 0..2",
+         sway != nullptr && sway->minimum == 0.0F && sway->maximum == 2.0F);
+  // The FOV row must not keep claiming the old 45 degree horizontal
+  // equivalent; it computes the current value instead.
+  const Widget *fov = harness.ui.Find("chase-orbit-fov");
+  Expect("the FOV row shows a computed horizontal equivalent",
+         fov != nullptr &&
+             VisiblePart(fov->label).find("72") == std::string::npos &&
+             VisiblePart(fov->label).find("horizontal") !=
+                 std::string::npos &&
+             VisiblePart(fov->label).find("48") !=
+                 std::string::npos);
   ExpectModeButton(harness.ui, "chase-orbit-hide-ui", true);
   Expect("Orbit/Custom runs the orbit", harness.context.orbit_enabled.load());
   ExpectUniqueWidgetIds(harness.ui);
@@ -544,6 +574,30 @@ void CheckOrbitDetails(Harness &harness) {
   ExpectNear("the look-at edit leaves the camera height alone",
              harness.context.orbit_height.load(), 2.4);
 
+  harness.MoveSlider("chase-orbit-target-sway", 0.5F);
+  harness.Frame();
+  ExpectNear("the look-at sway lands in the custom block",
+             harness.Custom().orbit_target_sway, 0.5);
+  ExpectNear("the look-at sway reaches the effective value",
+             harness.context.orbit_target_sway.load(), 0.5);
+  ExpectNear("the sway edit leaves the camera weave alone",
+             harness.context.orbit_weave.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitWeave);
+
+  // The FOV row recomputes its horizontal equivalent from the value it shows.
+  harness.MoveSlider("chase-orbit-fov", 40.0F);
+  harness.Frame();
+  ExpectNear("the FOV lands in the custom block",
+             harness.Custom().orbit_fov, 40.0);
+  const Widget *fov_after = harness.ui.Find("chase-orbit-fov");
+  // 40 degrees vertical at 16:9 is 2*atan(tan(20 deg) * 16/9) = 65.8 degrees,
+  // which rounds to 66. Pinned as a number so a changed aspect or a stale
+  // constant cannot slip through.
+  Expect("the FOV row recomputes the horizontal equivalent",
+         fov_after != nullptr &&
+             VisiblePart(fov_after->label).find("66") != std::string::npos &&
+             VisiblePart(fov_after->label).find("72") == std::string::npos);
+
   harness.Click("chase-orbit-hide-ui");
   harness.Frame();
   Expect("the HUD switch lands in the custom block",
@@ -563,6 +617,9 @@ void CheckOrbitDetails(Harness &harness) {
   ExpectNear("Orbit/Default restores the built-in look-at height",
              harness.context.orbit_look_at_height.load(),
              kDefaultOrbitLookAtHeight);
+  ExpectNear("Orbit/Default restores the built-in sway",
+             harness.context.orbit_target_sway.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitTargetSway);
   ExpectNear("Orbit/Default keeps the tuned radius as custom",
              harness.Custom().orbit_radius_m, 6.5);
 

@@ -4,6 +4,7 @@
 #include "internal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
@@ -142,7 +143,10 @@ const char *SpeedSourceFallback(const std::uint8_t source) noexcept {
 void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                      const nfs2015_chase_cam::Localizer &localizer,
                      const DisplayState &display) {
-  char line[128]{};
+  // 192 bytes rather than 128: the parked-orbit line carries the state, the
+  // blend, the clock, the two look-at layers and the roll noise, which no
+  // longer fits a 128 byte buffer once the clock passes a few minutes.
+  char line[192]{};
   // One word first: which channel is twitching. Everything below it is the raw
   // evidence for that verdict.
   {
@@ -208,12 +212,13 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
     std::snprintf(
         line, sizeof(line),
         "%s  blend %.2f  hold %.1fs  t %.1fs  phase0 %.1f  in %c  v %.2f"
-        "  shake=(%.3f,%.3f)",
+        "  shake=(%.3f,%.3f)  sway=(%.3f,%.3f)  roll=%.2f",
         nfs2015_chase::OrbitPhaseName(display.orbit_state),
         display.orbit_blend, display.orbit_hold_seconds, display.orbit_time,
         display.orbit_phase0_degrees, display.orbit_input ? '1' : '0',
         display.orbit_speed_mps, display.orbit_shake_x_m,
-        display.orbit_shake_y_m);
+        display.orbit_shake_y_m, display.orbit_target_sway_x_m,
+        display.orbit_target_sway_y_m, display.orbit_roll_noise_degrees);
     DrawStatusLine(ui, localizer, "diag.orbit", "Parked orbit", line);
     std::snprintf(
         line, sizeof(line),
@@ -798,17 +803,19 @@ bool DrawGroupHeader(const AnomalyUiServiceV1 *ui, Context &context,
 // One custom number. A moved slider is written to the custom block first, then
 // the group is re-applied, then the document is marked dirty: the effective
 // values follow from the mode, so nothing writes them here.
-void DrawCustomSlider(const AnomalyUiServiceV1 *ui, Context &context,
-                      const SettingsGroup group, const char *key,
-                      const char *fallback, const char *widget_key,
-                      double CustomSettings::*field, const double minimum,
-                      const double maximum) {
+// Shared body of every custom slider. The caller builds the label so a slider
+// can show a value that depends on another setting; see the orbit FOV slider,
+// whose horizontal equivalent follows the current vertical value.
+void DrawCustomSliderCore(const AnomalyUiServiceV1 *ui, Context &context,
+                          const SettingsGroup group,
+                          const std::string &label,
+                          double CustomSettings::*field, const double minimum,
+                          const double maximum) {
   double current{};
   {
     std::scoped_lock lock(context.custom_settings_mutex);
     current = context.custom_settings.*field;
   }
-  const std::string label = context.localizer.Label(key, fallback, widget_key);
   float slider_value = static_cast<float>(current);
   if (ui->slider_float(ui->user, StringView(label), &slider_value,
                        static_cast<float>(minimum),
@@ -823,6 +830,16 @@ void DrawCustomSlider(const AnomalyUiServiceV1 *ui, Context &context,
   }
   ApplyGroup(context, group);
   MarkSettingsDirty(context);
+}
+
+void DrawCustomSlider(const AnomalyUiServiceV1 *ui, Context &context,
+                      const SettingsGroup group, const char *key,
+                      const char *fallback, const char *widget_key,
+                      double CustomSettings::*field, const double minimum,
+                      const double maximum) {
+  DrawCustomSliderCore(ui, context, group,
+                       context.localizer.Label(key, fallback, widget_key),
+                       field, minimum, maximum);
 }
 
 void DrawCustomCheckbox(const AnomalyUiServiceV1 *ui, Context &context,
@@ -1162,6 +1179,22 @@ void DrawBurnoutGroup(const AnomalyUiServiceV1 *ui, Context &context,
 
 // The parked orbit. Default already runs it, so the group only opens its
 // numbers on Custom; Opposite is the state that turns it off.
+
+// Horizontal equivalent of a vertical lens at 16:9. Same formula as
+// CameraState::HorizontalFovDegrees; kept local so the FOV slider can label
+// itself with the current value instead of a constant that only matched the
+// old 45 degree default.
+[[nodiscard]] double OrbitHorizontalFovDegrees(
+    const double vertical_degrees) noexcept {
+  if (!(vertical_degrees > 1.0) || vertical_degrees >= 179.0) {
+    return vertical_degrees;
+  }
+  const double half =
+      std::tan(vertical_degrees * nfs2015_chase::kRadiansPerDegree * 0.5) *
+      (16.0 / 9.0);
+  return 2.0 * std::atan(half) * nfs2015_chase::kDegreesPerRadian;
+}
+
 void DrawOrbitGroup(const AnomalyUiServiceV1 *ui, Context &context,
                     const DisplayState &display) {
   ui->separator(ui->user);
@@ -1172,8 +1205,8 @@ void DrawOrbitGroup(const AnomalyUiServiceV1 *ui, Context &context,
            StringView(context.localizer.Text(
                "setting.orbit_summary",
                "After the car is parked and untouched for the entry delay, the "
-               "camera circles it; Custom opens the framing, the handheld "
-               "shake and the HUD switch.")));
+               "camera circles it; Custom opens the framing, the two sway "
+               "layers, the handheld shake and the HUD switch.")));
   DrawCustomSlider(ui, context, SettingsGroup::Orbit,
                    "setting.orbit_entry_delay", "Entry delay (s)",
                    "chase-orbit-entry-delay",
@@ -1197,15 +1230,41 @@ void DrawOrbitGroup(const AnomalyUiServiceV1 *ui, Context &context,
                    &CustomSettings::orbit_look_at_height_m,
                    kMinimumOrbitLookAtHeight, kMaximumOrbitLookAtHeight);
   DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_weave",
-                   "Lateral weave (m)", "chase-orbit-weave",
+                   "Camera lateral weave (m)", "chase-orbit-weave",
                    &CustomSettings::orbit_weave, kMinimumOrbitWeave,
                    kMaximumOrbitWeave);
-  DrawCustomSlider(ui, context, SettingsGroup::Orbit, "setting.orbit_fov",
-                   "Vertical FOV (16:9 ~72 horizontal)", "chase-orbit-fov",
-                   &CustomSettings::orbit_fov, kMinimumOrbitFov,
-                   kMaximumOrbitFov);
+  // The second sway layer: the aim point drifts, the camera does not. Kept as
+  // its own slider so a real-machine A/B can zero one layer at a time.
   DrawCustomSlider(ui, context, SettingsGroup::Orbit,
-                   "setting.orbit_shake_strength", "Handheld shake strength",
+                   "setting.orbit_target_sway",
+                   "Look-at low-frequency sway",
+                   "chase-orbit-target-sway",
+                   &CustomSettings::orbit_target_sway,
+                   kMinimumOrbitTargetSway, kMaximumOrbitTargetSway);
+  {
+    // Vertical FOV with the horizontal equivalent of the *current* value. A
+    // fixed "16:9 ~72 horizontal" only ever matched the old 45 degree
+    // default, so the number is computed here instead.
+    double fov_value{};
+    {
+      std::scoped_lock lock(context.custom_settings_mutex);
+      fov_value = context.custom_settings.orbit_fov;
+    }
+    char horizontal[24]{};
+    std::snprintf(horizontal, sizeof(horizontal), "%.0f",
+                  OrbitHorizontalFovDegrees(fov_value));
+    const std::array<std::string_view, 1> arguments{
+        std::string_view(horizontal)};
+    DrawCustomSliderCore(
+        ui, context, SettingsGroup::Orbit,
+        context.localizer.Label(
+            "setting.orbit_fov",
+            "Vertical FOV ({0} deg horizontal at 16:9)", "chase-orbit-fov",
+            arguments),
+        &CustomSettings::orbit_fov, kMinimumOrbitFov, kMaximumOrbitFov);
+  }
+  DrawCustomSlider(ui, context, SettingsGroup::Orbit,
+                   "setting.orbit_shake_strength", "Handheld shake / roll",
                    "chase-orbit-shake-strength",
                    &CustomSettings::orbit_shake_strength,
                    kMinimumOrbitShakeStrength, kMaximumOrbitShakeStrength);

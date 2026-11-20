@@ -64,6 +64,18 @@ public:
         return label;
     }
 
+    // Same convention, but the visible text is formatted first. Used by labels
+    // that show a value computed from another setting, such as the parked
+    // orbit's FOV slider and its horizontal equivalent.
+    [[nodiscard]] std::string Label(
+        const std::string_view key, const std::string_view english_fallback,
+        const std::string_view stable_id,
+        const std::span<const std::string_view> arguments) const {
+        std::string label = Format(key, english_fallback, arguments);
+        label.append("###").append(stable_id);
+        return label;
+    }
+
 private:
     static constexpr std::size_t kMaximumArguments = 8;
 

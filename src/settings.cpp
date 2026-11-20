@@ -166,7 +166,7 @@ bool WheelSteerSettingsValid(const double max_degrees, const double gain,
 bool OrbitSettingsValid(const double entry_delay, const double period,
                         const double radius_m, const double height_m,
                         const double look_at_height_m, const double weave,
-                        const double fov_degrees,
+                        const double target_sway, const double fov_degrees,
                         const double shake_strength,
                         const double shake_frequency) noexcept {
   return std::isfinite(entry_delay) &&
@@ -183,6 +183,9 @@ bool OrbitSettingsValid(const double entry_delay, const double period,
          look_at_height_m <= kMaximumOrbitLookAtHeight &&
          std::isfinite(weave) &&
          weave >= kMinimumOrbitWeave && weave <= kMaximumOrbitWeave &&
+         std::isfinite(target_sway) &&
+         target_sway >= kMinimumOrbitTargetSway &&
+         target_sway <= kMaximumOrbitTargetSway &&
          std::isfinite(fov_degrees) && fov_degrees >= kMinimumOrbitFov &&
          fov_degrees <= kMaximumOrbitFov &&
          std::isfinite(shake_strength) &&
@@ -291,6 +294,7 @@ bool PersistSettings(Context &context) noexcept {
   const double orbit_height_m = custom.orbit_height_m;
   const double orbit_look_at_height_m = custom.orbit_look_at_height_m;
   const double orbit_weave = custom.orbit_weave;
+  const double orbit_target_sway = custom.orbit_target_sway;
   const double orbit_fov = custom.orbit_fov;
   const double orbit_shake_strength = custom.orbit_shake_strength;
   const double orbit_shake_frequency = custom.orbit_shake_frequency;
@@ -379,7 +383,8 @@ bool PersistSettings(Context &context) noexcept {
                                wheel_steer_sample_percent) ||
       !OrbitSettingsValid(orbit_entry_delay, orbit_period, orbit_radius_m,
                           orbit_height_m, orbit_look_at_height_m,
-                          orbit_weave, orbit_fov, orbit_shake_strength,
+                          orbit_weave, orbit_target_sway, orbit_fov,
+                          orbit_shake_strength,
                           orbit_shake_frequency) ||
       context.settings_revision.load(std::memory_order_acquire) != revision) {
     // A UI write landed while the fields were being read; keep the revision
@@ -503,6 +508,11 @@ bool PersistSettings(Context &context) noexcept {
       AppendNumber(cursor, end, orbit_shake_frequency) &&
       AppendText(cursor, end, ",\"orbitHideUi\":") &&
       AppendText(cursor, end, orbit_hide_ui ? "true" : "false") &&
+      // Appended at the end of the orbit block so no existing key moves: an
+      // older build reading this document ignores the unknown key, and a
+      // document without it falls back to the built-in 1.0.
+      AppendText(cursor, end, ",\"orbitTargetSway\":") &&
+      AppendNumber(cursor, end, orbit_target_sway) &&
       AppendText(cursor, end, ",\"rollOnlyInDrift\":") &&
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
@@ -747,6 +757,9 @@ void ApplyGroup(Context &context, const SettingsGroup group) noexcept {
           std::memory_order_release);
       context.orbit_weave.store(
           use_custom ? custom.orbit_weave : kDefaultOrbitWeave,
+          std::memory_order_release);
+      context.orbit_target_sway.store(
+          use_custom ? custom.orbit_target_sway : kDefaultOrbitTargetSway,
           std::memory_order_release);
       context.orbit_fov.store(
           use_custom ? custom.orbit_fov : kDefaultOrbitFov,
@@ -1058,6 +1071,7 @@ bool LoadSettings(Context &context) noexcept {
   double orbit_height_m = kDefaultOrbitHeight;
   double orbit_look_at_height_m = kDefaultOrbitLookAtHeight;
   double orbit_weave = kDefaultOrbitWeave;
+  double orbit_target_sway = kDefaultOrbitTargetSway;
   double orbit_fov = kDefaultOrbitFov;
   double orbit_shake_strength = kDefaultOrbitShakeStrength;
   double orbit_shake_frequency = kDefaultOrbitShakeFrequency;
@@ -1190,6 +1204,11 @@ bool LoadSettings(Context &context) noexcept {
                                      orbit_shake_frequency));
   static_cast<void>(JsonObjectBoolean(json, root, "orbitHideUi",
                                       orbit_hide_ui));
+  // Missing from every document written before this key existed; the default
+  // keeps 1.0 so an upgrade turns the whole layer on exactly like a fresh
+  // install does. Unknown keys are still ignored by the parser.
+  static_cast<void>(JsonObjectNumber(json, root, "orbitTargetSway",
+                                     orbit_target_sway));
   static_cast<void>(JsonObjectNumber(json, root, "slopeMaxGradientDegrees",
                                      slope_max_gradient_degrees));
   static_cast<void>(JsonObjectNumber(json, root, "slopeUpLookAt",
@@ -1228,8 +1247,8 @@ bool LoadSettings(Context &context) noexcept {
                                wheel_steer_sample_percent) ||
       !OrbitSettingsValid(orbit_entry_delay, orbit_period, orbit_radius_m,
                           orbit_height_m, orbit_look_at_height_m,
-                          orbit_weave, orbit_fov, orbit_shake_strength,
-                          orbit_shake_frequency)) {
+                          orbit_weave, orbit_target_sway, orbit_fov,
+                          orbit_shake_strength, orbit_shake_frequency)) {
     return false;
   }
   context.enabled.store(enabled, std::memory_order_release);
@@ -1285,6 +1304,7 @@ bool LoadSettings(Context &context) noexcept {
   custom.orbit_height_m = orbit_height_m;
   custom.orbit_look_at_height_m = orbit_look_at_height_m;
   custom.orbit_weave = orbit_weave;
+  custom.orbit_target_sway = orbit_target_sway;
   custom.orbit_fov = orbit_fov;
   custom.orbit_shake_strength = orbit_shake_strength;
   custom.orbit_shake_frequency = orbit_shake_frequency;

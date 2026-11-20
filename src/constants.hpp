@@ -118,6 +118,13 @@ constexpr double kMaximumBurnoutHoldSpeed = 20.0;
 // the slope follow and the drift front wheels: the group's Default runs it on
 // these built-in numbers, Custom runs it on the user's numbers, and Opposite
 // is the only state that turns it off.
+//
+// The framing is the NFS 2015 reference composition, not a hand-tuned guess:
+// 5.05 m radius, 1.83 m eye height, 1.23 m look-at height and 28 degrees
+// vertical FOV. 5.05 * sin(6.8 deg) = 0.598 m is exactly the eye height above
+// the pivot, and 43 authored degrees minus the orbit controller's 15 gives the
+// lens. The older 4.0 / 0.724 / 0.671 / 45 values are still reachable by
+// typing them into the Custom sliders; they are only no longer the defaults.
 constexpr bool kDefaultOrbitEnabled = true;
 constexpr double kDefaultOrbitEntryDelay = 8.0;
 constexpr double kMinimumOrbitEntryDelay = 0.0;
@@ -125,38 +132,45 @@ constexpr double kMaximumOrbitEntryDelay = 60.0;
 constexpr double kDefaultOrbitPeriod = 60.0;
 constexpr double kMinimumOrbitPeriod = 10.0;
 constexpr double kMaximumOrbitPeriod = 600.0;
-constexpr double kDefaultOrbitRadius = 4.0;
+constexpr double kDefaultOrbitRadius = 5.05;
 constexpr double kMinimumOrbitRadius = 2.0;
 constexpr double kMaximumOrbitRadius = 12.0;
-// Camera height above the car origin, in metres along the body up axis. The
-// shipped default is tuned on the car rather than copied from the guide: the
-// guide's 5.05 m / 1.83 m / 1.23 m reference geometry stays in orbit_shot.hpp
-// as that model's fallback.
-constexpr double kDefaultOrbitHeight = 0.724;
+// Camera height above the car origin, in metres along the body up axis. With
+// the 5.05 m radius and the 1.23 m look-at height below this is the reference
+// 6.8 degree elevation: asin((1.83 - 1.23) / 5.05) = 6.83 degrees.
+constexpr double kDefaultOrbitHeight = 1.83;
 constexpr double kMinimumOrbitHeight = 0.3;
 constexpr double kMaximumOrbitHeight = 3.0;
 // Where the camera looks, measured above the car origin along the body up axis.
-// Targeting the origin frames the tyres instead of the car, so the default
-// keeps it above the wheel centre. The eye height above and the look-at height
-// are independent sliders; their difference sets the elevation angle
-// (0.724 - 0.671 = 0.053 m, about 0.76 degrees at the 4.0 m radius) and the 3D
-// slant radius stays at the orbit radius.
-constexpr double kDefaultOrbitLookAtHeight = 0.671;
+// Targeting the origin frames the tyres instead of the car, so the reference
+// keeps it above the wheel centre at 1.23 m. The eye height above and this one
+// are independent sliders; their difference sets the elevation angle and the
+// 3D slant radius stays at the orbit radius.
+constexpr double kDefaultOrbitLookAtHeight = 1.23;
 constexpr double kMinimumOrbitLookAtHeight = 0.3;
 constexpr double kMaximumOrbitLookAtHeight = 3.0;
 constexpr double kDefaultOrbitWeave = 1.0;
 constexpr double kMinimumOrbitWeave = 0.0;
 constexpr double kMaximumOrbitWeave = 3.0;
-// Vertical FOV: 45 degrees is about 72 degrees horizontal at 16:9.
-constexpr double kDefaultOrbitFov = 45.0;
+// Look-at low-frequency sway (Instance192/Instance188 -> Instance279): the
+// reaction that moves only the aim point, not the camera. 1.0 keeps the asset
+// keys as they are, 0 disables the layer, and 2 doubles the swing while the
+// amplitude is still B-grade evidence.
+constexpr double kDefaultOrbitTargetSway = 1.0;
+constexpr double kMinimumOrbitTargetSway = 0.0;
+constexpr double kMaximumOrbitTargetSway = 2.0;
+// Vertical FOV. 28 degrees is the runtime value: the chase preset authors 43
+// and the orbit controller subtracts 15. The horizontal equivalent is computed
+// from the current value in the panel instead of being baked into a label.
+constexpr double kDefaultOrbitFov = 28.0;
 constexpr double kMinimumOrbitFov = 20.0;
 constexpr double kMaximumOrbitFov = 70.0;
-// Handheld look-at noise. The UI range is narrower than the model's internal
-// 0.5..30 Hz guard: 2..8 Hz is the useful "handheld vs too fast" band.
+// Look-at noise (Instance18) and the roll noise (Instance16) share this band,
+// so 2 Hz is both the asset frequency and the default for the slider.
 constexpr double kDefaultOrbitShakeStrength = 1.0;
 constexpr double kMinimumOrbitShakeStrength = 0.0;
 constexpr double kMaximumOrbitShakeStrength = 2.0;
-constexpr double kDefaultOrbitShakeFrequency = 5.0;
+constexpr double kDefaultOrbitShakeFrequency = 2.0;
 // Hide the game HUD during the parked orbit. The runtime resolves the
 // W_OverallUILayout API; this switch is exposed in the settings panel later.
 constexpr bool kDefaultOrbitHideUi = true;

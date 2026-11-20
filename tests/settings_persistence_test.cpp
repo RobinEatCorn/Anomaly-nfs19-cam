@@ -827,6 +827,7 @@ void CheckOrbitRoundTrip() {
     custom.orbit_entry_delay = 5.0;
     custom.orbit_period = 90.0;
     custom.orbit_weave = 0.4;
+    custom.orbit_target_sway = 0.25;
     custom.orbit_fov = 50.0;
     custom.orbit_shake_strength = 1.5;
     custom.orbit_shake_frequency = 6.0;
@@ -843,6 +844,27 @@ void CheckOrbitRoundTrip() {
          host.document.find("\"orbitLookAtHeight\":0.8") != std::string::npos);
   Expect("the document stores the orbit HUD switch",
          host.document.find("\"orbitHideUi\":false") != std::string::npos);
+  Expect("the document stores the look-at sway",
+         host.document.find("\"orbitTargetSway\":0.25") !=
+             std::string::npos);
+  // The new key was appended, not inserted: every older orbit key keeps its
+  // position and its relative order, and the sway key closes the block.
+  {
+    const char *const orbit_order[] = {
+        "orbitEntryDelay", "orbitPeriod",   "orbitRadius",
+        "orbitHeight",     "orbitLookAtHeight", "orbitWeave",
+        "orbitFov",        "orbitShakeStrength", "orbitShakeFrequency",
+        "orbitHideUi",     "orbitTargetSway"};
+    std::size_t previous = 0;
+    bool ordered = true;
+    for (const char *key : orbit_order) {
+      const std::size_t at = host.document.find(std::string("\"") + key +
+                                                "\"");
+      ordered = ordered && at != std::string::npos && at > previous;
+      previous = at == std::string::npos ? previous : at;
+    }
+    Expect("the sway key is appended after every old orbit key", ordered);
+  }
   Expect("the document no longer stores a flat orbit enable key",
          host.document.find("\"orbitEnabled\"") == std::string::npos);
 
@@ -868,6 +890,10 @@ void CheckOrbitRoundTrip() {
              CustomCopy(loaded).orbit_entry_delay, 5.0, 1e-9);
   ExpectNear("the custom orbit weave survives",
              CustomCopy(loaded).orbit_weave, 0.4, 1e-9);
+  ExpectNear("the custom orbit look-at sway survives",
+             CustomCopy(loaded).orbit_target_sway, 0.25, 1e-9);
+  ExpectNear("the effective orbit look-at sway follows the custom value",
+             loaded.orbit_target_sway.load(), 0.25, 1e-9);
   ExpectNear("the custom orbit shake strength survives",
              CustomCopy(loaded).orbit_shake_strength, 1.5, 1e-9);
   ExpectNear("the custom orbit shake frequency survives",
@@ -911,7 +937,8 @@ void CheckVersion205Document() {
   for (const char *key : {"orbitEntryDelay", "orbitPeriod", "orbitRadius",
                           "orbitHeight", "orbitWeave", "orbitFov",
                           "orbitLookAtHeight", "orbitShakeStrength",
-                          "orbitShakeFrequency", "orbitHideUi"}) {
+                          "orbitShakeFrequency", "orbitHideUi",
+                          "orbitTargetSway"}) {
     Expect("strip the orbit numbers", editor.RemoveKey(key));
   }
   editor.document = editor.SerializeDocument();
@@ -928,6 +955,13 @@ void CheckVersion205Document() {
   ExpectNear("the orbit keeps its built-in radius",
              loaded.orbit_radius.load(),
              nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  // The sway key is newer than the whole orbit block. A document without it
+  // must come up on the built-in 1.0 instead of failing to load or reading 0.
+  ExpectNear("a document without the sway key falls back to 1.0",
+             loaded.orbit_target_sway.load(),
+             nfs2015_chase_cam::detail::kDefaultOrbitTargetSway);
+  ExpectNear("the fallback sway is the layer's on value",
+             loaded.orbit_target_sway.load(), 1.0);
   Expect("the rig mode is unchanged",
          GroupIs(loaded, SettingsGroup::Rig, GroupMode::Custom));
   ExpectNear("the rig numbers are unchanged",
@@ -1011,6 +1045,32 @@ void CheckBadModes(FakeHost &tuned_host) {
              CustomCopy(normalized).camera_distance_m, 6.4);
 }
 
+void CheckOutOfRangeSway() {
+  // The sway slider spans 0..2. A hand-edited document outside that range is
+  // refused, exactly like any other out-of-range number: the loader never
+  // guesses a value the panel could not draw.
+  FakeHost host;
+  {
+    Context context;
+    Bind(context, host);
+    SetDefaults(context);
+    Expect("persist a document for the sway range check",
+           PersistSettings(context));
+  }
+  FakeHost editor;
+  Expect("parse the sway range document",
+         editor.ParseDocument(host.document));
+  Expect("push the sway past its maximum",
+         editor.SetNumber("orbitTargetSway", 3.0));
+  editor.document = editor.SerializeDocument();
+  editor.has_document = true;
+
+  Context loaded;
+  Bind(loaded, editor);
+  Expect("a document with an out-of-range sway is refused",
+         !LoadSettings(loaded));
+}
+
 }  // namespace
 
 int main() {
@@ -1024,6 +1084,7 @@ int main() {
   CheckOrbitRoundTrip();
   CheckVersion205Document();
   CheckUnknownKeysIgnored();
+  CheckOutOfRangeSway();
   CheckBadModes(host);
   std::printf("\nall settings persistence checks passed\n");
   return 0;

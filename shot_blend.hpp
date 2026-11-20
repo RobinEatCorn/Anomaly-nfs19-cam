@@ -91,12 +91,22 @@ namespace shot_blend_detail {
 // The shot is not a straight lerp: NFS uses EULER_ORBIT, so the eye travels in
 // cylindrical coordinates around the pivot. The look direction uses a slerp and
 // the up vector is re-orthogonalised, keeping the blend free of the usual
-// target-length/pitch pops. WheelSpin and the parked orbit both have Roll 0.0
-// and no DUTCH controller, so the visible tilt recovery is this one orbit
-// blend, not a roll spring.
+// target-length/pitch pops. Roll is lerped separately as the scalar the camera
+// actually applies: the burnout close-up pins it at 0, while the parked orbit
+// carries the Instance16 ROLL noise (+-0.7 degrees) and relies on this lerp to
+// fade it in and out. A scene that tilts the horizon must therefore set `roll`
+// on the shot, never tilt `up`.
 //
 // `blend == 0` returns `base` bit-for-bit (no normalisation), and `blend == 1`
-// returns `shot` bit-for-bit; only the interior takes the orbit path.
+// returns `shot` bit-for-bit, roll included; only the interior takes the orbit
+// path.
+//
+// The pivot is `car origin + up * pivot_height_m` and deliberately carries no
+// forward offset, while the parked orbit aims 0.772 m ahead of the car origin.
+// Both shots that use this header have always worked that way, so the entry and
+// exit paths take a slightly different route around the car than a full orbit
+// does. Left alone on purpose: adding the offset here would change the burnout
+// close-up's entry as well.
 [[nodiscard]] inline CameraState BlendShotAroundCarPivot(
     const CameraState& base, const CameraState& shot, const CarState& car,
     const double blend, const double pivot_height_m) noexcept {

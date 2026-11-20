@@ -27,6 +27,11 @@ using nfs2015_chase::kOrbitHandheldSeedY;
 using nfs2015_chase::kOrbitHandheldVerticalM;
 using nfs2015_chase::kOrbitLookAtHeightM;
 using nfs2015_chase::kOrbitPivotForwardM;
+using nfs2015_chase::kOrbitRollNoiseDegrees;
+using nfs2015_chase::kOrbitRollNoiseFrequencyHz;
+using nfs2015_chase::kOrbitRollNoiseRoughness;
+using nfs2015_chase::kOrbitRollSeed;
+using nfs2015_chase::kOrbitRollSeed2;
 using nfs2015_chase::Length;
 using nfs2015_chase::MakeCarBasis;
 using nfs2015_chase::Mul;
@@ -108,6 +113,10 @@ struct Fixture final {
     config.handheld_frequency_hz = frequency;
     config.entry_delay = entry_delay;
     config.entry_time = entry_time;
+    // This fixture isolates the noise layer, so the low-frequency target sway
+    // (Instance279) is off. The sway has its own explicit setup; with both on,
+    // "target - pivot" would mix two independent tracks.
+    config.target_sway = 0.0;
     shot.SetConfig(config);
     car = MakeCar();
     camera = BehindCamera(car);
@@ -251,7 +260,8 @@ void TestTargetOnly() {
   still.EnterOrbitFast();
 
   bool positions_match = true;
-  bool up_roll_match = true;
+  bool up_fov_match = true;
+  bool roll_follows_strength = true;
   bool target_differs = false;
   for (int frame = 0; frame < 600; ++frame) {
     constexpr double dt = 1.0 / 120.0;
@@ -262,19 +272,29 @@ void TestTargetOnly() {
                                still.last.view.position.x &&
         shaken.last.view.position.y == still.last.view.position.y &&
         shaken.last.view.position.z == still.last.view.position.z;
-    up_roll_match =
-        up_roll_match && shaken.last.view.up.x == still.last.view.up.x &&
+    up_fov_match =
+        up_fov_match && shaken.last.view.up.x == still.last.view.up.x &&
         shaken.last.view.up.y == still.last.view.up.y &&
         shaken.last.view.up.z == still.last.view.up.z &&
-        shaken.last.view.roll == still.last.view.roll &&
-        shaken.last.view.roll_degrees == still.last.view.roll_degrees &&
         shaken.last.view.fov_y_degrees == still.last.view.fov_y_degrees;
+    // Roll used to be pinned at zero here. It is now the Instance16 ROLL noise
+    // and shares the strength slider, so the correct invariant is: strength 0
+    // is exactly level and strength 1 is not.
+    roll_follows_strength =
+        roll_follows_strength && still.last.view.roll == 0.0 &&
+        still.last.view.roll_degrees == 0.0 &&
+        still.last.state.roll_noise_degrees == 0.0 &&
+        shaken.last.view.roll ==
+            shaken.last.view.roll_degrees *
+                nfs2015_chase::kRadiansPerDegree;
     target_differs =
         target_differs ||
         Length(Sub(shaken.last.view.target, still.last.view.target)) > 1e-4;
   }
   Expect("6.1-7 noise never moves the eye", positions_match);
-  Expect("6.1-7 noise never moves up/roll/fov", up_roll_match);
+  Expect("6.1-7 noise never moves up/fov", up_fov_match);
+  Expect("6.1-7 roll noise follows the strength slider",
+         roll_follows_strength && shaken.last.state.roll_noise_degrees != 0.0);
   Expect("6.1-7 noise moves the target", target_differs);
   Expect("6.1-7 strength 0 has no offset",
          still.last.state.shake_x_m == 0.0 &&
@@ -282,6 +302,177 @@ void TestTargetOnly() {
   Expect("6.1-7 strength 1 has an offset",
          shaken.last.state.shake_x_m != 0.0 ||
              shaken.last.state.shake_y_m != 0.0);
+}
+
+// Instance16 ROLL, A-grade: magnitude 0.7 degrees, 2 Hz, two octaves, roughness
+// 0.1. The published roll is the scalar the camera applies, so it must stay
+// inside 0.7 * (1 + 0.1) and must never be folded into the up vector.
+void TestRollNoiseBounds() {
+  Fixture fixture(1.0, kOrbitRollNoiseFrequencyHz);
+  fixture.EnterOrbitFast();
+
+  double peak = 0.0;
+  double previous = fixture.last.state.roll_noise_degrees;
+  bool finite = true;
+  bool moves = false;
+  bool published = true;
+  bool level = true;
+  for (int frame = 0; frame < 120 * 60; ++frame) {
+    fixture.Update(1.0 / 60.0);
+    const double roll = fixture.last.state.roll_noise_degrees;
+    peak = (std::max)(peak, std::fabs(roll));
+    finite = finite && std::isfinite(roll);
+    moves = moves || std::fabs(roll - previous) > 1e-6;
+    published = published && fixture.last.view.roll_degrees == roll &&
+                fixture.last.view.roll ==
+                    roll * nfs2015_chase::kRadiansPerDegree;
+    level = level && fixture.last.view.up.x == 0.0 &&
+            fixture.last.view.up.y == 0.0 && fixture.last.view.up.z == 1.0;
+    previous = roll;
+  }
+  Expect("6.1-12 roll stays inside 0.7 * (1 + 0.1) degrees",
+         peak <= kOrbitRollNoiseDegrees * (1.0 + kOrbitRollNoiseRoughness) +
+                     1e-9);
+  Expect("6.1-12 roll uses most of its amplitude", peak > 0.3);
+  Expect("6.1-12 roll actually moves", moves);
+  Expect("6.1-12 roll is finite", finite);
+  Expect("6.1-12 the view publishes the roll noise unchanged", published);
+  Expect("6.1-12 roll never tilts the up vector", level);
+}
+
+// Strength 0 is the off switch: the horizon must be exactly level, not "almost".
+// Half strength is exactly half the noise, because the slider scales the
+// published value instead of reseeding the bands.
+void TestRollNoiseOffAndLinear() {
+  Fixture still(0.0, kOrbitRollNoiseFrequencyHz);
+  still.EnterOrbitFast();
+  bool exact_zero = true;
+  for (int frame = 0; frame < 600; ++frame) {
+    still.Update(1.0 / 60.0);
+    exact_zero = exact_zero && still.last.state.roll_noise_degrees == 0.0 &&
+                 still.last.view.roll == 0.0 &&
+                 still.last.view.roll_degrees == 0.0;
+  }
+  Expect("6.1-13 strength 0 keeps roll at exact zero", exact_zero);
+
+  Fixture half(0.5, kOrbitRollNoiseFrequencyHz);
+  Fixture full(1.0, kOrbitRollNoiseFrequencyHz);
+  half.EnterOrbitFast();
+  full.EnterOrbitFast();
+  bool linear = true;
+  bool nonzero = false;
+  for (int frame = 0; frame < 600; ++frame) {
+    constexpr double dt = 1.0 / 120.0;
+    half.Update(dt);
+    full.Update(dt);
+    linear = linear &&
+             std::fabs(half.last.state.roll_noise_degrees -
+                       0.5 * full.last.state.roll_noise_degrees) <= 1e-12;
+    nonzero = nonzero || full.last.state.roll_noise_degrees != 0.0;
+  }
+  Expect("6.1-13 strength 0.5 is exactly half the roll noise",
+         linear && nonzero);
+}
+
+// The two roll octaves are 2 Hz and 4 Hz and roughness only weights the second
+// one. Replaying the two bands reproduces the published value frame by frame,
+// which pins the whole equation rather than just its amplitude.
+void TestRollOctaves() {
+  ExpectNear("6.1-14 roll magnitude is 0.7 deg", kOrbitRollNoiseDegrees, 0.7,
+             0.0);
+  ExpectNear("6.1-14 roll frequency is 2 Hz", kOrbitRollNoiseFrequencyHz, 2.0,
+             0.0);
+  ExpectNear("6.1-14 roll roughness is 0.1", kOrbitRollNoiseRoughness, 0.1,
+             0.0);
+
+  Fixture fixture(1.0, kOrbitRollNoiseFrequencyHz);
+  fixture.EnterOrbitFast();
+  const double period = 1.0 / kOrbitRollNoiseFrequencyHz;
+  noise::ValueNoiseBand octave1 = MakeBand(kOrbitRollSeed, period);
+  noise::ValueNoiseBand octave2 = MakeBand(kOrbitRollSeed2, 0.5 * period);
+  // EnterOrbitFast(): the first update runs in Idle, which does not advance the
+  // bands at all; the second runs in Enter and advances them by 1e-3 s once.
+  constexpr double kEntryStep = 1.0e-3;
+  const double entry1 = noise::ValueNoiseStep(octave1, kEntryStep);
+  const double entry2 = noise::ValueNoiseStep(octave2, kEntryStep);
+  // 1 ms sits well inside the first period, which returns the initial zero.
+  // The replay below depends on that, so state it instead of assuming it.
+  Expect("6.1-14 the entry step stays on the initial zero",
+         entry1 == 0.0 && entry2 == 0.0);
+  bool matches = true;
+  for (int frame = 0; frame < 600; ++frame) {
+    constexpr double dt = 1.0 / 120.0;
+    fixture.Update(dt);
+    const double expected =
+        kOrbitRollNoiseDegrees *
+        (noise::ValueNoiseStep(octave1, dt) +
+         kOrbitRollNoiseRoughness * noise::ValueNoiseStep(octave2, dt));
+    matches = matches &&
+              std::fabs(fixture.last.state.roll_noise_degrees - expected) <=
+                  1e-12;
+  }
+  Expect("6.1-14 roll is octave1 + 0.1 * octave2", matches);
+
+  // The second band really runs at twice the frequency: with the same seed, the
+  // 2 Hz band at 1.0 s is exactly the 4 Hz band at 0.5 s (both are r1).
+  noise::ValueNoiseBand slow = MakeBand(kOrbitRollSeed, 0.5);
+  noise::ValueNoiseBand fast = MakeBand(kOrbitRollSeed, 0.25);
+  double slow_value = 0.0;
+  double fast_value = 0.0;
+  for (int step = 0; step < 10; ++step) {
+    slow_value = noise::ValueNoiseStep(slow, 0.05);
+    fast_value = noise::ValueNoiseStep(fast, 0.05);
+  }
+  ExpectNear("6.1-14 the 2 Hz band is still zero at 0.5 s", slow_value, 0.0,
+             0.0);
+  Expect("6.1-14 the 4 Hz band has left zero at 0.5 s", fast_value != 0.0);
+  for (int step = 0; step < 10; ++step) {
+    slow_value = noise::ValueNoiseStep(slow, 0.05);
+  }
+  ExpectNear("6.1-14 the 2 Hz band is one period behind the 4 Hz band",
+             slow_value, fast_value, 1e-12);
+}
+
+// The runtime adds Instance279 (sway) and Instance18 (noise) at the same
+// look-at point, so the published target has to be their sum: pivot plus both
+// layers on the same look-local right/up basis. Neither layer may move the eye.
+void TestSwayAndNoiseAdditive() {
+  Fixture both(1.0, kOrbitRollNoiseFrequencyHz);
+  both.config.target_sway = 1.0;
+  both.shot.SetConfig(both.config);
+  both.EnterOrbitFast();
+
+  Fixture none(0.0, kOrbitRollNoiseFrequencyHz);
+  none.EnterOrbitFast();
+
+  const Vec3 pivot = OrbitPivot(both.car);
+  bool additive = true;
+  bool eye_fixed = true;
+  bool layers_live = false;
+  constexpr double dt = 1.0 / 120.0;
+  for (int frame = 0; frame < 600; ++frame) {
+    both.Update(dt);
+    none.Update(dt);
+    const Vec3 look = Normalize(Sub(pivot, both.last.view.position));
+    const Vec3 right = Normalize(Cross(Vec3{0.0, 0.0, 1.0}, look));
+    const Vec3 up_local = Normalize(Cross(look, right));
+    const Vec3 expected = Add(
+        pivot, Add(Mul(right, both.last.state.target_sway_x_m +
+                                  both.last.state.shake_x_m),
+                   Mul(up_local, both.last.state.target_sway_y_m +
+                                     both.last.state.shake_y_m)));
+    additive =
+        additive && Length(Sub(both.last.view.target, expected)) <= 1e-9;
+    eye_fixed = eye_fixed &&
+                both.last.view.position.x == none.last.view.position.x &&
+                both.last.view.position.y == none.last.view.position.y &&
+                both.last.view.position.z == none.last.view.position.z;
+    layers_live = layers_live || both.last.state.target_sway_x_m != 0.0 ||
+                  both.last.state.target_sway_y_m != 0.0;
+  }
+  Expect("6.1-15 both look-at layers are live", layers_live);
+  Expect("6.1-15 sway and noise add at the same point", additive);
+  Expect("6.1-15 neither layer moves the eye", eye_fixed);
 }
 
 void TestLocalBasis() {
@@ -409,6 +600,10 @@ int main() {
   TestBoundsAndSmoothness();
   TestDeterminismAndReset();
   TestTargetOnly();
+  TestRollNoiseBounds();
+  TestRollNoiseOffAndLinear();
+  TestRollOctaves();
+  TestSwayAndNoiseAdditive();
   TestLocalBasis();
   TestStrengthLinearity();
   TestFrequency();
