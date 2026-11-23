@@ -602,11 +602,12 @@ constexpr std::uint8_t kRenderXFailed = 2;
 // `anomaly-cli --pid <pid> ue` reports the same value as `profileHash`. The
 // profile is hashed as its raw JSON text, so any edit - even whitespace or line
 // endings - moves this value and disables the camera hooks instead of reading a
-// layout that moved. Known 2.7.0 and 3.0.0 spellings are accepted: for each
-// release, the installed CRLF profile and the repository's LF profile. The
-// 3.0.0 profile is the same HTGame.exe (same layout keys and GWorld RVA), so
-// the offsets above stay valid. On a mismatch no camera hook is installed, the
-// game camera stays native, and the panel says `hash mismatch`.
+// layout that moved. Known 2.7.0, 3.0.0 and 3.1.0 spellings are accepted: for
+// each release, the installed CRLF profile and the repository's LF profile.
+// The 3.0.0 profile is the same HTGame.exe as 2.7.0, and 3.1.0 only adds
+// combat/account entries on top of the same camera layout and GWorld symbol,
+// so the offsets above stay valid. On a mismatch no camera hook is installed,
+// the game camera stays native, and the panel says `hash mismatch`.
 constexpr std::string_view kAcceptedProfileHashes[] = {
     // Anomaly 2.7.0 installed runtime (CRLF JSON).
     "c6d97fd2e506e75a7da060096a1614b80ff1a3a6a3e1eaf185e25eb5b55c1f52",
@@ -617,6 +618,11 @@ constexpr std::string_view kAcceptedProfileHashes[] = {
     "93eefb64683fe66d202cd405079e15540fe1ee0d6f5b40b7eacf3889c6eff1ff",
     // Anomaly 3.0.0 repository profile (LF JSON).
     "ddba763c22f45a2354b48cc123eef217717637088046ea5353afa0380bd22a20",
+    // Anomaly 3.1.0 installed runtime (CRLF JSON). Adds combat/account keys;
+    // every camera layout key and ue5.GWorld are unchanged from 3.0.0.
+    "08a3feb998c74f99375cebd6bd8866e409663680b9fe3da229274f4c9c2e249a",
+    // Anomaly 3.1.0 repository profile (LF JSON, tag v3.1.0).
+    "9acaf134e5279ade33f1b3c555a114b60871511717d9131850fe4a7bca2d5a82",
 };
 constexpr std::uint8_t kAnchorInsuranceWaiting = 0;
 constexpr std::uint8_t kAnchorInsuranceReady = 1;

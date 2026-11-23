@@ -1,12 +1,16 @@
 # NFS 2015 Chase Cam 2.0.6
 
-适用：Anomaly 2.7.0 / 3.0.0 Runtime，NTE。
+适用：Anomaly 2.7.0 / 3.0.0 / 3.1.0 Runtime，NTE。
 
 2.0.5 之后的功能更新：新增**停车环绕**运镜与**环绕时隐藏 HUD**，设置面板随之扩成
 **8 个基础类型**（新组只追加在末尾）。
 
 2.0.5 的内容（设置分组、米制机位、漂移前轮 quick turn / force turn、车体 heading）全部
 保留，本次没有回退或重写其中任何一项，见 `RELEASE-NOTES-2.0.5.md`。
+
+3.1.0 适配：profile 门禁新增 3.1.0 的安装包 CRLF 和仓库 LF 两个哈希。3.1.0 的 profile
+只在 3.0.0 基础上新增战斗/账号条目，相机 layout、`ue5.GWorld` 和 `HTGame.exe` 不变；
+插件已用 Anomaly 3.1.0 SDK 重新编译，3.1.0 测试宿主 10 次 reload / 660 tick 通过。
 
 ## 1. 停车环绕（新功能）
 
@@ -101,7 +105,7 @@
 
 ## 6. 测试与验证
 
-离线验收（MinGW-w64 + Anomaly 3.0.0 SDK，WSL2 直接运行 PE）：
+离线验收（MinGW-w64 + Anomaly 3.0.0 / 3.1.0 SDK，WSL2 直接运行 PE）：
 
 - 构建通过；`plugin.dll` 导入表仅 `KERNEL32.dll` / `msvcrt.dll`，导出
   `AnomalyPluginEntryV1`。
@@ -119,8 +123,9 @@
   | `nfs2015_settings_persistence_model` | 模式持久化、2.0.5 文档兼容、旧文档推断、未知键忽略 |
   | `nfs2015_settings_panel` | 8 组面板布局、Orbit 行与详情、恢复默认值 |
 
+- Anomaly 3.1.0 测试宿主：`--reload 10 --ticks 60` 通过，资源租约/暂存/Hotkey 均归零。
 - `verify-release.sh --allow-missing-host-tools`：manifest / package / ZIP / DLL 导入导出检查。
-- `anomaly-plugin validate` 与 `anomaly-test-host` 需要在 Windows 侧补跑。
+- Windows 侧已补跑 `anomaly-plugin validate`，以及 3.1.0 `anomaly-test-host --reload 10 --ticks 60`。
 
 仍需 NTE 实机确认（本版本发布前未完成逐项验收）：
 
