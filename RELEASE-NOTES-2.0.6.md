@@ -142,3 +142,8 @@
 - 隐藏 HUD 走的是游戏 UI 层的 `RenderOpacity`；游戏若改写动画或换层结构，需要重新验证
   `REPORT-orbit-hide-ui-probe.md` 里的探针结论。
 - 车头朝向、`forward_speed < 0` 时 slip 清零等 2.0.5 已知限制不变。
+
+## 8. 发布产物
+
+- `dist/Nfs2015ChaseCam-2.0.6.zip`，SHA-256 `d43440d29a02241a605531738e079a5d1115cf046c9e40f4b62960f864b02c3c`。
+- 包内 `plugin.dll`，SHA-256 `3391ebcf33d877817694b4c84c685641acd3bb11f2039c044dae4275a3f0790f`。
