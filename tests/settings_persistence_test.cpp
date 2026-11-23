@@ -27,7 +27,9 @@ using nfs2015_chase_cam::detail::CustomSettings;
 using nfs2015_chase_cam::detail::GroupMode;
 using nfs2015_chase_cam::detail::kMaximumSettingsBytes;
 using nfs2015_chase_cam::detail::kSettingsGroupCount;
+using nfs2015_chase_cam::detail::kSettingsSaveDelayMilliseconds;
 using nfs2015_chase_cam::detail::LoadSettings;
+using nfs2015_chase_cam::detail::MarkSettingsDirty;
 using nfs2015_chase_cam::detail::PersistSettings;
 using nfs2015_chase_cam::detail::SetDefaults;
 using nfs2015_chase_cam::detail::SettingsGroup;
@@ -83,6 +85,16 @@ public:
   std::string document;
   bool has_document{false};
 
+  // A synchronous stand-in for the host scheduler. MarkSettingsDirty() must
+  // hand the write here instead of writing from the Game/Render callback, which
+  // the host rejects. The test runs the task by hand.
+  AnomalySchedulerServiceV1 scheduler{};
+  AnomalyTaskCallbackV1 scheduled_task{};
+  void *scheduled_user{};
+  std::uint32_t scheduled_delay{};
+  bool has_scheduled{false};
+  std::uint64_t next_task{1};
+
   FakeHost() {
     config.struct_size = sizeof(config);
     config.service_version = 1;
@@ -92,6 +104,11 @@ public:
     config.read = &Read;
     config.write_atomic = &WriteAtomic;
     config.migrate = nullptr;
+    scheduler.struct_size = sizeof(scheduler);
+    scheduler.service_version = 1;
+    scheduler.user = this;
+    scheduler.schedule = &Schedule;
+    scheduler.cancel = &Cancel;
     json.struct_size = sizeof(json);
     json.service_version = 1;
     json.user = this;
@@ -117,6 +134,36 @@ public:
     root = parsed;
     document = text;
     has_document = true;
+    return true;
+  }
+
+  static AnomalyStatusV1 Schedule(void *user, const std::uint32_t delay,
+                                  AnomalyTaskCallbackV1 callback,
+                                  void *callback_user,
+                                  AnomalyGenerationHandleV1 *handle) {
+    auto *self = static_cast<FakeHost *>(user);
+    if (self->has_scheduled || handle == nullptr || callback == nullptr) {
+      return Status(ANOMALY_STATUS_V1_FAILED);
+    }
+    self->scheduled_task = callback;
+    self->scheduled_user = callback_user;
+    self->scheduled_delay = delay;
+    self->has_scheduled = true;
+    *handle = {self->next_task++, 1};
+    return Status(ANOMALY_STATUS_V1_OK);
+  }
+
+  static AnomalyStatusV1 Cancel(void *, AnomalyGenerationHandleV1) {
+    return Status(ANOMALY_STATUS_V1_OK);
+  }
+
+  bool RunScheduled() {
+    if (!has_scheduled || scheduled_task == nullptr) return false;
+    const AnomalyTaskCallbackV1 callback = scheduled_task;
+    void *const user = scheduled_user;
+    scheduled_task = nullptr;
+    has_scheduled = false;
+    callback(user, {0, 1});
     return true;
   }
 
@@ -441,6 +488,27 @@ void EditCustom(Context &context, void (*edit)(CustomSettings &)) {
          static_cast<std::uint32_t>(mode);
 }
 
+// The host validates every write against kSettingsSchema and the schema has
+// additionalProperties=false, so a key the writer emits but the schema does not
+// declare rejects the whole document. That failure is silent from the game's
+// point of view (it looked like "the game forgot my settings"), so pin the two
+// lists together: every top-level key in the document must be declared as a
+// property of the schema.
+void CheckSchemaDeclaresEveryStoredKey(const std::string &document) {
+  const std::string_view schema =
+      nfs2015_chase_cam::detail::kSettingsSchema;
+  std::size_t at = 0;
+  while ((at = document.find('"', at)) != std::string::npos) {
+    const std::size_t end = document.find('"', at + 1);
+    if (end == std::string::npos) return;
+    const std::string key = document.substr(at + 1, end - at - 1);
+    const std::string declaration = "\"" + key + "\":{\"type\"";
+    Expect(("the schema declares the stored key " + key).c_str(),
+           schema.find(declaration) != std::string::npos);
+    at = end + 1;
+  }
+}
+
 [[nodiscard]] std::string WithoutModeKeys(const std::string &document) {
   FakeHost editor;
   if (!editor.ParseDocument(document)) return {};
@@ -461,6 +529,7 @@ void CheckDefaultsDocument(FakeHost &host) {
          host.has_document && !host.document.empty());
   Expect("the document fits the settings buffer",
          host.document.size() < kMaximumSettingsBytes);
+  CheckSchemaDeclaresEveryStoredKey(host.document);
   for (const char *key : kModeKeys) {
     const std::string label = std::string("the document stores ") + key +
                               " as Default";
@@ -1045,6 +1114,115 @@ void CheckBadModes(FakeHost &tuned_host) {
              CustomCopy(normalized).camera_distance_m, 6.4);
 }
 
+void CheckLegacyOrbitDefaultsMigration() {
+  // 2.0.6 shipped 4.0 / 0.724 / 0.671 / 45 / 5 Hz and wrote those built-in
+  // numbers into the custom block even while the orbit ran on Default. A
+  // document without orbitTargetSway predates the current set, so a number it
+  // never tuned moves to today's default instead of making Custom restore the
+  // retired geometry.
+  FakeHost host;
+  {
+    Context context;
+    Bind(context, host);
+    SetDefaults(context);
+    EditCustom(context, [](CustomSettings &custom) {
+      custom.orbit_radius_m = 4.0;
+      custom.orbit_height_m = 0.724;
+      custom.orbit_look_at_height_m = 0.671;
+      custom.orbit_fov = 45.0;
+      custom.orbit_shake_frequency = 5.0;
+      custom.orbit_weave = 0.4;
+    });
+    SetMode(context, SettingsGroup::Orbit, GroupMode::Default);
+    Expect("persist a 2.0.6-shaped orbit document",
+           PersistSettings(context));
+  }
+  FakeHost editor;
+  Expect("parse the 2.0.6-shaped document",
+         editor.ParseDocument(host.document));
+  Expect("strip orbitTargetSway to make it look like 2.0.6",
+         editor.RemoveKey("orbitTargetSway"));
+  editor.document = editor.SerializeDocument();
+  editor.has_document = true;
+
+  Context loaded;
+  Bind(loaded, editor);
+  Expect("the 2.0.6-shaped document loads", LoadSettings(loaded));
+  ExpectNear("the old shake frequency migrates to 2 Hz",
+             CustomCopy(loaded).orbit_shake_frequency,
+             nfs2015_chase_cam::detail::kDefaultOrbitShakeFrequency);
+  ExpectNear("the old camera height migrates to 1.0 m",
+             CustomCopy(loaded).orbit_height_m,
+             nfs2015_chase_cam::detail::kDefaultOrbitHeight);
+  ExpectNear("the old look-at height migrates to 0.75 m",
+             CustomCopy(loaded).orbit_look_at_height_m,
+             nfs2015_chase_cam::detail::kDefaultOrbitLookAtHeight);
+  ExpectNear("the old radius migrates to the reference 5.05 m",
+             CustomCopy(loaded).orbit_radius_m,
+             nfs2015_chase_cam::detail::kDefaultOrbitRadius);
+  ExpectNear("the old FOV migrates to the runtime 28 degrees",
+             CustomCopy(loaded).orbit_fov,
+             nfs2015_chase_cam::detail::kDefaultOrbitFov);
+  ExpectNear("a tuned weave keeps its value",
+             CustomCopy(loaded).orbit_weave, 0.4);
+  Expect("the migrated document still runs the orbit on Default",
+         GroupIs(loaded, SettingsGroup::Orbit, GroupMode::Default) &&
+             loaded.orbit_enabled.load());
+  Expect("the migration schedules a rewrite of the document",
+         loaded.settings_revision.load() > 0);
+
+  // A document that carries orbitTargetSway was written after the change, so a
+  // 5 Hz there is a deliberate choice and must survive the load.
+  FakeHost current;
+  {
+    Context context;
+    Bind(context, current);
+    SetDefaults(context);
+    EditCustom(context, [](CustomSettings &custom) {
+      custom.orbit_shake_frequency = 5.0;
+    });
+    SetMode(context, SettingsGroup::Orbit, GroupMode::Custom);
+    Expect("persist a current document at 5 Hz", PersistSettings(context));
+  }
+  Context kept;
+  Bind(kept, current);
+  Expect("the current document loads", LoadSettings(kept));
+  ExpectNear("a chosen 5 Hz survives while orbitTargetSway is present",
+             kept.orbit_shake_frequency.load(), 5.0);
+  Expect("a current document is not marked for a rewrite",
+         kept.settings_revision.load() == 0);
+}
+
+void CheckScheduledSave() {
+  // The host rejects configuration I/O from the Game and Render callbacks, and
+  // both the settings panel and the Game tick run there. MarkSettingsDirty()
+  // must hand the debounced write to the scheduler's worker thread instead of
+  // writing inline; this fake scheduler pins the hand-off and the task body.
+  FakeHost host;
+  Context context;
+  Bind(context, host);
+  context.scheduler = &host.scheduler;
+  SetDefaults(context);
+  EditCustom(context, [](CustomSettings &custom) {
+    custom.orbit_shake_frequency = 6.0;
+  });
+  MarkSettingsDirty(context);
+  Expect("a settings change schedules a save", host.has_scheduled);
+  Expect("the save waits for the 500 ms debounce",
+         host.scheduled_delay == kSettingsSaveDelayMilliseconds);
+  Expect("nothing is written before the task runs", host.document.empty());
+  Expect("the scheduler task runs", host.RunScheduled());
+  Expect("the task writes the document", !host.document.empty());
+  Expect("the task records the persisted revision",
+         context.settings_revision.load() ==
+             context.persisted_settings_revision.load());
+  Expect("the pending flag is cleared",
+         !context.settings_save_pending.load());
+  Expect("the task writes the latest values",
+         host.document.find("\"orbitShakeFrequency\":6") !=
+             std::string::npos);
+}
+
 void CheckOutOfRangeSway() {
   // The sway slider spans 0..2. A hand-edited document outside that range is
   // refused, exactly like any other out-of-range number: the loader never
@@ -1084,6 +1262,8 @@ int main() {
   CheckOrbitRoundTrip();
   CheckVersion205Document();
   CheckUnknownKeysIgnored();
+  CheckLegacyOrbitDefaultsMigration();
+  CheckScheduledSave();
   CheckOutOfRangeSway();
   CheckBadModes(host);
   std::printf("\nall settings persistence checks passed\n");

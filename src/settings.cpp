@@ -9,15 +9,62 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <system_error>
+#include <string>
 #include <string_view>
+#include <system_error>
 
 namespace nfs2015_chase_cam::detail {
+
+namespace {
+
+// Runs on the scheduler's worker thread, which is the only place a game plugin
+// may write its configuration document: the host rejects config I/O from the
+// Game and Render callbacks. The revision check inside PersistSettings() covers
+// a UI change that lands while the write is in progress.
+void ANOMALY_CALL SettingsSaveTask(void *user,
+                                   AnomalyGenerationHandleV1 /*task*/) noexcept {
+  auto *context = static_cast<Context *>(user);
+  if (context == nullptr) {
+    return;
+  }
+  if (!PersistSettings(*context)) {
+    // Back off one debounce period; without this the Game tick would see the
+    // old change time and queue another attempt on every frame.
+    context->settings_changed_at.store(GetTickCount64(),
+                                       std::memory_order_release);
+  }
+  context->settings_save_pending.store(false, std::memory_order_release);
+}
+
+}  // namespace
+
+void QueueSettingsSave(Context &context, const std::uint32_t delay_ms) noexcept {
+  if (context.scheduler == nullptr || context.scheduler->schedule == nullptr) {
+    return;
+  }
+  // One write at a time: a later debounce while a task is queued only needs the
+  // task that is already there, because it reads the latest values when it runs.
+  if (context.settings_save_pending.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  AnomalyGenerationHandleV1 task{};
+  const auto status = context.scheduler->schedule(
+      context.scheduler->user, delay_ms, SettingsSaveTask, &context, &task);
+  if (status.code != ANOMALY_STATUS_V1_OK || task.id == 0) {
+    context.settings_save_pending.store(false, std::memory_order_release);
+    context.settings_changed_at.store(GetTickCount64(),
+                                      std::memory_order_release);
+  }
+}
 
 void MarkSettingsDirty(Context &context) noexcept {
   context.settings_changed_at.store(GetTickCount64(),
                                     std::memory_order_release);
   context.settings_revision.fetch_add(1, std::memory_order_acq_rel);
+  // Write from the scheduler worker. When the host has no scheduler the
+  // Game-tick fallback in OnUpdate() still tries the direct call.
+  QueueSettingsSave(context, static_cast<std::uint32_t>(
+                                 kSettingsSaveDelayMilliseconds));
 }
 
 bool SettingsValid(const std::uint32_t preset,
@@ -555,8 +602,23 @@ bool PersistSettings(Context &context) noexcept {
       Bytes(std::string_view(
           document.data(), static_cast<std::size_t>(cursor - document.data()))));
   if (status.code != ANOMALY_STATUS_V1_OK) {
+    // A rejection used to be completely silent, which made a bad schema or a
+    // forbidden calling thread look like "the game forgot my settings". Log
+    // once per distinct status so a retry loop cannot flood the log.
+    const std::uint32_t previous =
+        context.settings_save_reported_error.load(std::memory_order_acquire);
+    if (previous != status.code) {
+      std::string message =
+          "nfs2015 chase cam: settings save failed, host status=";
+      message.append(std::to_string(status.code));
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, message);
+      context.settings_save_reported_error.store(status.code,
+                                                 std::memory_order_release);
+    }
     return false;
   }
+  context.settings_save_reported_error.store(ANOMALY_STATUS_V1_OK,
+                                             std::memory_order_release);
   context.persisted_settings_revision.store(revision,
                                             std::memory_order_release);
   return true;
@@ -1206,9 +1268,42 @@ bool LoadSettings(Context &context) noexcept {
                                       orbit_hide_ui));
   // Missing from every document written before this key existed; the default
   // keeps 1.0 so an upgrade turns the whole layer on exactly like a fresh
-  // install does. Unknown keys are still ignored by the parser.
-  static_cast<void>(JsonObjectNumber(json, root, "orbitTargetSway",
-                                     orbit_target_sway));
+  // install does. Unknown keys are still ignored by the parser. Its absence is
+  // also the marker that the document predates the current orbit defaults, so
+  // the legacy migration below only runs for documents without it.
+  const bool has_orbit_target_sway =
+      JsonObjectNumber(json, root, "orbitTargetSway", orbit_target_sway);
+  // The 2.0.6 build shipped a different orbit default set (4.0 / 0.724 /
+  // 0.671 / 45 / 5) and wrote it into the custom block even while the group
+  // was on Default. A document without orbitTargetSway predates the current
+  // set, so a number that still equals the old default was never tuned: move
+  // it to today's default instead of making Custom restore the retired
+  // geometry. A number the user changed, and every document that carries
+  // orbitTargetSway, is left alone.
+  if (!has_orbit_target_sway) {
+    bool migrated = false;
+    const auto adopt = [&migrated](double &value, const double legacy,
+                                   const double current) {
+      if (value != legacy) {
+        return;
+      }
+      value = current;
+      migrated = true;
+    };
+    adopt(orbit_radius_m, kLegacyOrbitRadius, kDefaultOrbitRadius);
+    adopt(orbit_height_m, kLegacyOrbitHeight, kDefaultOrbitHeight);
+    adopt(orbit_look_at_height_m, kLegacyOrbitLookAtHeight,
+          kDefaultOrbitLookAtHeight);
+    adopt(orbit_fov, kLegacyOrbitFov, kDefaultOrbitFov);
+    adopt(orbit_shake_frequency, kLegacyOrbitShakeFrequency,
+          kDefaultOrbitShakeFrequency);
+    // Write the adopted numbers back on the first tick so the document stops
+    // carrying the retired set; without this the file would keep the old
+    // numbers and migrate again on every launch.
+    if (migrated) {
+      MarkSettingsDirty(context);
+    }
+  }
   static_cast<void>(JsonObjectNumber(json, root, "slopeMaxGradientDegrees",
                                      slope_max_gradient_degrees));
   static_cast<void>(JsonObjectNumber(json, root, "slopeUpLookAt",

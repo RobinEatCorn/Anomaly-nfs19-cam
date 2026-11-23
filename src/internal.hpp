@@ -57,6 +57,10 @@ void ANOMALY_CALL Draw(void *plugin_context,
 
 // --- settings.cpp ---------------------------------------------------------
 void MarkSettingsDirty(Context &context) noexcept;
+// Hands one debounced write to the host scheduler's worker thread. The host
+// rejects configuration I/O from the Game and Render callbacks, so the write
+// must not run there. A host without the scheduler keeps the Game-tick path.
+void QueueSettingsSave(Context &context, std::uint32_t delay_ms) noexcept;
 // Writes one group's effective values into the settings atomics. It is the
 // only grouped writer of those atomics; the caller edits the custom block and
 // then asks for the group to be applied again.

@@ -120,11 +120,12 @@ constexpr double kMaximumBurnoutHoldSpeed = 20.0;
 // is the only state that turns it off.
 //
 // The framing is the NFS 2015 reference composition, not a hand-tuned guess:
-// 5.05 m radius, 1.83 m eye height, 1.23 m look-at height and 28 degrees
-// vertical FOV. 5.05 * sin(6.8 deg) = 0.598 m is exactly the eye height above
-// the pivot, and 43 authored degrees minus the orbit controller's 15 gives the
-// lens. The older 4.0 / 0.724 / 0.671 / 45 values are still reachable by
-// typing them into the Custom sliders; they are only no longer the defaults.
+// 5.05 m radius, 1.0 m eye height, 0.75 m look-at height and 28 degrees
+// vertical FOV. The eye sits 0.25 m above the pivot, which is 2.84 degrees of
+// elevation on the 5.05 m radius; 43 authored degrees minus the orbit
+// controller's 15 gives the lens. The older 4.0 / 0.724 / 0.671 / 45 values are
+// still reachable by typing them into the Custom sliders; a document that still
+// carries them untouched is migrated by LoadSettings().
 constexpr bool kDefaultOrbitEnabled = true;
 constexpr double kDefaultOrbitEntryDelay = 8.0;
 constexpr double kMinimumOrbitEntryDelay = 0.0;
@@ -136,17 +137,17 @@ constexpr double kDefaultOrbitRadius = 5.05;
 constexpr double kMinimumOrbitRadius = 2.0;
 constexpr double kMaximumOrbitRadius = 12.0;
 // Camera height above the car origin, in metres along the body up axis. With
-// the 5.05 m radius and the 1.23 m look-at height below this is the reference
-// 6.8 degree elevation: asin((1.83 - 1.23) / 5.05) = 6.83 degrees.
-constexpr double kDefaultOrbitHeight = 1.83;
+// the 5.05 m radius and the 0.75 m look-at height below, the eye sits 0.25 m
+// above the pivot: asin(0.25 / 5.05) = 2.84 degrees of elevation.
+constexpr double kDefaultOrbitHeight = 1.0;
 constexpr double kMinimumOrbitHeight = 0.3;
 constexpr double kMaximumOrbitHeight = 3.0;
 // Where the camera looks, measured above the car origin along the body up axis.
-// Targeting the origin frames the tyres instead of the car, so the reference
-// keeps it above the wheel centre at 1.23 m. The eye height above and this one
-// are independent sliders; their difference sets the elevation angle and the
-// 3D slant radius stays at the orbit radius.
-constexpr double kDefaultOrbitLookAtHeight = 1.23;
+// Targeting the origin frames the tyres instead of the car, so it stays above
+// the wheel centre at 0.75 m. The eye height above and this one are independent
+// sliders; their difference sets the elevation angle and the 3D slant radius
+// stays at the orbit radius.
+constexpr double kDefaultOrbitLookAtHeight = 0.75;
 constexpr double kMinimumOrbitLookAtHeight = 0.3;
 constexpr double kMaximumOrbitLookAtHeight = 3.0;
 constexpr double kDefaultOrbitWeave = 1.0;
@@ -176,6 +177,17 @@ constexpr double kDefaultOrbitShakeFrequency = 2.0;
 constexpr bool kDefaultOrbitHideUi = true;
 constexpr double kMinimumOrbitShakeFrequency = 2.0;
 constexpr double kMaximumOrbitShakeFrequency = 8.0;
+// The orbit numbers the 2.0.6 build shipped. Its writer stored the built-in
+// numbers in the custom block even while the group was on Default, so a value
+// that still equals one of these was never tuned. A document without
+// orbitTargetSway predates the current set, and LoadSettings() moves such a
+// value to today's default; a value the user changed, and every document that
+// carries orbitTargetSway, is left alone.
+constexpr double kLegacyOrbitRadius = 4.0;
+constexpr double kLegacyOrbitHeight = 0.724;
+constexpr double kLegacyOrbitLookAtHeight = 0.671;
+constexpr double kLegacyOrbitFov = 45.0;
+constexpr double kLegacyOrbitShakeFrequency = 5.0;
 // Slope following. The UI exposes only the master switch and the composition
 // strength; the gradient scalars stay in the settings file.
 constexpr double kDefaultSlopeStrength = 1.0;
@@ -715,6 +727,7 @@ constexpr std::string_view kSettingsSchema = R"json(
     "orbitFov":{"type":"number","minimum":20.0,"maximum":70.0},
     "orbitShakeStrength":{"type":"number","minimum":0.0,"maximum":2.0},
     "orbitShakeFrequency":{"type":"number","minimum":2.0,"maximum":8.0},
+    "orbitTargetSway":{"type":"number","minimum":0.0,"maximum":2.0},
     "wheelSteerEnabled":{"type":"boolean"},
     "wheelSteerEntrySpeedKmh":{"type":"number","minimum":20.0,"maximum":160.0},
     "wheelSteerMaxDegrees":{"type":"number","minimum":20.0,"maximum":50.0},

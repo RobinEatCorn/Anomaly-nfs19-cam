@@ -445,7 +445,16 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
       const auto changed_at =
           context->settings_changed_at.load(std::memory_order_acquire);
       if (now - changed_at >= kSettingsSaveDelayMilliseconds) {
-        if (!PersistSettings(*context)) {
+        // This callback runs in the host's Game thread domain, and the host
+        // rejects configuration I/O from there. Hand the write to the
+        // scheduler's worker thread; MarkSettingsDirty() already queued one
+        // 500 ms after the change, and this is the retry path after a failed
+        // or missed task. A host without the scheduler keeps the old direct
+        // call, which works on the 2.7.0 runtime.
+        if (context->scheduler != nullptr &&
+            context->scheduler->schedule != nullptr) {
+          QueueSettingsSave(*context, 0);
+        } else if (!PersistSettings(*context)) {
           // Back off instead of retrying a failing config write every tick.
           context->settings_changed_at.store(now, std::memory_order_release);
         }

@@ -132,14 +132,14 @@ void CheckDefaults(Context& context) {
              context.orbit_look_at_height.load(),
              nfs2015_chase_cam::detail::kDefaultOrbitLookAtHeight);
   // The defaults are the NFS 2015 reference composition, pinned as numbers so
-  // a change to the constants cannot quietly drift away from it. The old
-  // 4.0 / 0.724 / 0.671 / 45 values are custom-only now.
+  // a change to the constants cannot quietly drift away from it. The 2.0.6
+  // 4.0 / 0.724 / 0.671 / 45 / 5 values are custom-only now.
   ExpectNear("fresh orbit radius is the NFS reference",
              context.orbit_radius.load(), 5.05);
-  ExpectNear("fresh orbit height is the NFS reference",
-             context.orbit_height.load(), 1.83);
-  ExpectNear("fresh orbit look-at height is the NFS reference",
-             context.orbit_look_at_height.load(), 1.23);
+  ExpectNear("fresh orbit height is the reference 1.0 m",
+             context.orbit_height.load(), 1.0);
+  ExpectNear("fresh orbit look-at height is 0.75 m",
+             context.orbit_look_at_height.load(), 0.75);
   ExpectNear("fresh orbit FOV is the runtime 43 - 15",
              context.orbit_fov.load(), 28.0);
   ExpectNear("fresh orbit noise runs at the asset 2 Hz",

@@ -1551,6 +1551,15 @@ struct Context final {
   std::atomic<std::uint64_t> settings_revision{};
   std::atomic<std::uint64_t> persisted_settings_revision{};
   std::atomic<std::uint64_t> settings_changed_at{};
+  // The debounced write runs on the host scheduler's worker thread: the host
+  // rejects configuration I/O from the Game and Render callbacks, which is
+  // where the settings are edited. Only one task may be in flight at a time;
+  // the task clears the flag after it has written (or failed to write).
+  std::atomic_bool settings_save_pending{};
+  // The status of the last write failure, so a silent rejection is logged once
+  // per distinct status instead of once per retry.
+  std::atomic<std::uint32_t> settings_save_reported_error{
+      ANOMALY_STATUS_V1_OK};
 
   // Hook and manager/POV state. `observed_manager` is written by the detour;
   // `resolved_manager` and `camera_pov` are written by the Game tick.
