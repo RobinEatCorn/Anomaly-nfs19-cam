@@ -18,6 +18,13 @@ constexpr std::uint32_t kSettingsSchemaVersion = 1;
 constexpr std::size_t kMaximumSettingsBytes = 4096;
 constexpr std::uint64_t kSettingsSaveDelayMilliseconds = 500;
 
+// Temporary A/B switch for the 2.1.0 architecture migration (task group 3).
+// Set to 1 to enable the new game-thread GetViewPoint path; absent or 0 keeps
+// the render-thread path. This is a development switch, not a user setting;
+// task group 7 removes it together with the old path.
+constexpr const char *kNativeViewPointEnv =
+    "NFS2015_CHASE_CAM_NATIVE_VIEW";
+
 constexpr double kDegreesToRadians =
     3.14159265358979323846 / 180.0;
 constexpr double kRadiansToDegrees =

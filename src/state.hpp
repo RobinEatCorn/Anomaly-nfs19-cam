@@ -1436,6 +1436,10 @@ struct Context final {
 
   // Settings: Render/hotkey write, Game reads.
   std::atomic_bool enabled{true};
+  // Temporary A/B switch (task group 3; removed in task group 7). False keeps
+  // the render-thread path; true selects the new game-thread GetViewPoint path.
+  // Read by hook installation and by the detours, hence an atomic.
+  std::atomic_bool native_view_point{false};
   std::atomic<std::uint32_t> preset{0};
   std::atomic<double> camera_distance_m{kDefaultCameraDistanceM};
   std::atomic<double> position_spring{kDefaultPositionSpring};

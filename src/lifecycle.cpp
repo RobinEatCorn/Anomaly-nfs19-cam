@@ -11,6 +11,41 @@
 
 namespace nfs2015_chase_cam::detail {
 
+namespace {
+
+// Reads a development switch once per Start. Only the exact values 1/true/yes
+// (case-insensitive first letter) enable it; anything else, including an unset
+// variable, keeps the default. The buffer is small on purpose: a long value is
+// a typo, not a request to enable the new path.
+bool EqualsIgnoreCase(const char *value, const char *expected) noexcept {
+  while (*value != '\0' && *expected != '\0') {
+    char left = *value++;
+    char right = *expected++;
+    if (left >= 'A' && left <= 'Z') {
+      left = static_cast<char>(left - 'A' + 'a');
+    }
+    if (right >= 'A' && right <= 'Z') {
+      right = static_cast<char>(right - 'A' + 'a');
+    }
+    if (left != right) {
+      return false;
+    }
+  }
+  return *value == '\0' && *expected == '\0';
+}
+
+bool ReadEnvironmentFlag(const char *name) noexcept {
+  char value[8]{};
+  const DWORD length = GetEnvironmentVariableA(name, value, sizeof(value));
+  if (length == 0 || length >= sizeof(value)) {
+    return false;
+  }
+  return EqualsIgnoreCase(value, "1") || EqualsIgnoreCase(value, "true") ||
+         EqualsIgnoreCase(value, "yes");
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Plugin lifecycle
 // ---------------------------------------------------------------------------
@@ -242,6 +277,15 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   context->render_x.Reset();
   ResetViewModeRecon(*context);
   EvaluateAnchorInsurance(*context);
+  // Task group 3's temporary A/B switch. The default is the old render-thread
+  // path so a baseline package behaves exactly like 2.0.6.
+  context->native_view_point.store(ReadEnvironmentFlag(kNativeViewPointEnv),
+                                   std::memory_order_release);
+  Log(*context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+      context->native_view_point.load(std::memory_order_acquire)
+          ? "nfs2015 chase cam: game-thread view-point path enabled "
+            "(NFS2015_CHASE_CAM_NATIVE_VIEW)"
+          : "nfs2015 chase cam: render-thread path enabled (A/B default)");
   context->detour_hz = 0.0;
   context->brake_last_target = 0.0;
   RegisterSettingsWindow(*context);
