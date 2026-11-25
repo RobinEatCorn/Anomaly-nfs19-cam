@@ -998,22 +998,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     if (context.sample_last_ns > 0 && sample.time_ns > context.sample_last_ns) {
       const std::int64_t interval_ns =
           sample.time_ns - context.sample_last_ns;
-      context.sample_interval_ns.store(interval_ns,
-                                       std::memory_order_relaxed);
-      {
-        const double previous =
-            context.sample_mean_interval_ns.load(std::memory_order_relaxed);
-        const double measured = static_cast<double>(interval_ns);
-        constexpr double kTrackingGain = 0.02;
-        context.sample_mean_interval_ns.store(
-            previous <= 0.0
-                ? measured
-                : previous + (measured - previous) * kTrackingGain,
-            std::memory_order_relaxed);
-      }
-      // Probe: how steady is the interval the delayed interpolation window is
-      // built from. A jumpy interval puts a per-tick speed change into every
-      // linearly interpolated quantity.
+      // Probe: how steady the Game tick interval is. A jumpy interval puts a
+      // per-tick speed change into the model's derivative input.
       const auto interval = static_cast<std::uint64_t>(interval_ns);
       RaisePeak(context.diag.tick_interval_max_ns, interval);
       LowerFloor(context.diag.tick_interval_min_ns, interval);

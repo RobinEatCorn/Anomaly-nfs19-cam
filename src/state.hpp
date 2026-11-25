@@ -1278,15 +1278,6 @@ struct Context final {
   std::atomic<double> presenter_orbit_target_sway_x_m{};
   std::atomic<double> presenter_orbit_target_sway_y_m{};
   std::atomic<double> presenter_orbit_roll_noise_degrees{};
-  std::atomic<std::int64_t> sample_interval_ns{};
-  // Running mean of the Game tick interval. The presenter looks back this far
-  // times kSampleDelayFactor, which is more than one interval, so the sample
-  // point always sits inside a bracket instead of clamping at its edge. An
-  // offline harness (tests/judder_repro.cpp) scores the alternatives on a 45 Hz
-  // tick against 59 Hz frames with hitches, as degrees of car-on-screen wobble
-  // per frame: last interval raw 0.354, this mean 0.124, this mean out to one
-  // and a half intervals with continuation 0.006.
-  std::atomic<double> sample_mean_interval_ns{};
   std::int64_t sample_last_ns{};
   // Bumped by the Game tick when the model must restart (world, preset, reset).
   std::uint64_t sample_epoch{};
