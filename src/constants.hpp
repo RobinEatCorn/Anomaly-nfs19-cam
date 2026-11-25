@@ -391,6 +391,28 @@ constexpr std::string_view kCameraViewPointPattern =
 constexpr std::uint32_t kCameraPovAccessorVtableOffset = 0x7A0;
 constexpr std::uint32_t kCameraPovFovOffset = 0x30;
 
+// 2.1.0 game-thread view path. `ULocalPlayer::GetViewPoint` is the engine's
+// own view-point producer; `CalcSceneViewInitOptions` brackets the first view
+// construction (its GetProjectionData call reaches GetViewPoint once). Both
+// patterns were taken from the running 3.1.0 build and are unique in .text
+// after the probe hooks are removed. They stay behind the existing profile
+// hash gate; a mismatch leaves the native camera alone.
+constexpr std::string_view kLocalPlayerGetViewPointPattern =
+    "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 "
+    "89 7C 24 20 41 56 48 83 EC 60 48 8B FA 48 8B E9 "
+    "E8 8B 85 FF FF 4C 8D 77 30 4C 8B C7 4C 8D 4F 18";
+constexpr std::string_view kCalcSceneViewInitOptionsPattern =
+    "40 56 57 41 54 41 55 41 56 48 83 EC 30 48 83 79 "
+    "30 00 4D 8B E9 4D 8B F0 48 8B FA 48 8B F1 0F 84 "
+    "29 03 00 00 0F 57 C0 66 0F 2F 81 90 00 00 00 0F";
+// The prefix of FMinimalViewInfo the new path reads and writes. The full
+// engine object is 0xC70 bytes; these four fields were confirmed by the
+// game's own UStruct reflection and a runtime FOV write in task group 1.
+constexpr std::uint32_t kMinimalViewInfoLocationOffset = 0x00;
+constexpr std::uint32_t kMinimalViewInfoRotationOffset = 0x18;
+constexpr std::uint32_t kMinimalViewInfoFovOffset = 0x30;
+constexpr std::uint32_t kMinimalViewInfoDesiredFovOffset = 0x34;
+
 // ---------------------------------------------------------------------------
 // Z-key view-mode recon (PLAN-zkey-phase2-h1.md task group 0).
 //

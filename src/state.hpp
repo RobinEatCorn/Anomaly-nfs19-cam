@@ -256,6 +256,13 @@ struct Diagnostics final {
   std::atomic<std::uint64_t> detour_calls_window{};
   // Active view but no published pose: the frame the game camera shows through.
   std::atomic<std::uint64_t> detour_no_publish{};
+  // 2.1.0 game-thread path. `view_applies` counts every GetViewPoint call the
+  // adapter actually wrote (the first call and every later UI/view/HUD call in
+  // the same frame). `query_skips` counts calls that saw `pose_attempted` but
+  // no pose: the advance failed earlier in this frame, so the rest of the
+  // frame deliberately stays on the game camera.
+  std::atomic<std::uint64_t> view_applies{};
+  std::atomic<std::uint64_t> query_skips{};
   // TG-1: frames the chase pose was withheld because the game's live view-mode
   // tag was not ThirdPerson. This is the belt-and-suspenders counter for plan
   // SS2.4: a non-zero value means the presenter's flag lagged the game.
@@ -1018,6 +1025,8 @@ struct DisplayState final {
   std::uint64_t view_read_torn{};
   std::uint64_t detour_calls{};
   std::uint64_t detour_no_publish{};
+  std::uint64_t view_applies{};
+  std::uint64_t query_skips{};
   std::uint64_t detour_thread_count{};
   std::uint64_t player_sequence_jumps{};
   std::uint64_t camera_yaw_esp_misses{};
@@ -1424,6 +1433,14 @@ struct Context final {
   AnomalyGenerationHandleV1 settings_schema{};
   std::atomic<std::uint64_t> view_hook_id{};
   std::atomic<std::uint64_t> view_hook_generation{};
+  // 2.1.0 game-thread hooks. They are separate from the old CameraManager
+  // getter so the temporary A/B switch can choose exactly one path.
+  std::atomic<std::uint64_t> game_view_point_hook_id{};
+  std::atomic<std::uint64_t> game_view_point_hook_generation{};
+  std::atomic<std::uintptr_t> game_view_point_hook_target{};
+  std::atomic<std::uint64_t> scene_view_init_hook_id{};
+  std::atomic<std::uint64_t> scene_view_init_hook_generation{};
+  std::atomic<std::uintptr_t> scene_view_init_hook_target{};
   std::atomic<std::uint64_t> transform_hook_id{};
   std::atomic<std::uint64_t> transform_hook_generation{};
   std::atomic<std::uintptr_t> transform_hook_target{};
@@ -1599,6 +1616,10 @@ struct Context final {
   bool transform_pattern_unavailable{};
   bool view_uniform_pattern_unavailable{};
   bool view_point_pattern_unavailable{};
+  bool game_view_point_pattern_unavailable{};
+  bool scene_view_init_pattern_unavailable{};
+  bool game_view_point_hook_failure_logged{};
+  bool scene_view_init_hook_failure_logged{};
 
   // Published view snapshot. The location fields are offsets from the car,
   // not absolute world positions: the detour adds the latest car position so
@@ -1611,6 +1632,16 @@ struct Context final {
   // first person or a cutscene does not resume an orbit immediately.
   std::atomic<std::uint64_t> view_epoch{};
   std::atomic_bool view_active{};
+  // D27 frame gate. The first GetViewPoint call in a frame (normally the UI
+  // projection in TG_PrePhysics) advances the model and sets pose_ready; every
+  // later call copies that pose. `pose_attempted` is set even when the advance
+  // fails, so the rest of the frame does not retry the model and cannot mix
+  // game-camera and chase-camera consumers. on_update clears both.
+  // `view_build_depth` is diagnostic only; it brackets
+  // CalcSceneViewInitOptions for task group 6's cut write.
+  std::atomic<std::uint32_t> view_build_depth{};
+  std::atomic_bool pose_attempted{};
+  std::atomic_bool pose_ready{};
   std::atomic<bool> view_fov_enabled{true};
   // `view_car_location` is the published camera anchor. The detour computes
   // `anchor + offset`, and the offset is built from the same anchor, so the

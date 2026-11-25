@@ -234,7 +234,7 @@ void PublishRouteBModelPose(Context &context,
 bool AdvancePresenter(Context &context, const std::int64_t now_ns,
                       const double *game_eye_cm, double location[3],
                       double rotation[3], float *lens, bool *fov_enabled,
-                      bool *advanced) noexcept {
+                      bool *advanced, const bool dedupe_same_frame) noexcept {
   *advanced = false;
   if (!TryLockPresenter(context)) {
     return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
@@ -244,13 +244,16 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     ~Unlock() { UnlockPresenter(context); }
   } unlock{context};
 
-  // The detour runs once per render pass, and one frame has many passes. If
-  // every pass advanced the model, the model time would be the pass-to-pass
-  // interval (a noisy fraction of a millisecond), not the frame interval.
-  // Advance once per frame and hand every later pass of that frame the cached
-  // pose. The threshold is smaller than the shortest frame at 60 fps
-  // (16.7 ms) and larger than the longest observed within-frame pass gap.
-  if (context.presenter_pose_valid.load(std::memory_order_relaxed)) {
+  // The old render detour runs once per render pass, and one frame has many
+  // passes. If every pass advanced the model, the model time would be the
+  // pass-to-pass interval (a noisy fraction of a millisecond), not the frame
+  // interval. Advance once per frame and hand every later pass of that frame
+  // the cached pose. The new game-thread path sets `dedupe_same_frame` false:
+  // its own pose_attempted/pose_ready flags already guarantee one advance per
+  // frame, and a time threshold would skip legitimate advances on >120 Hz
+  // displays.
+  if (dedupe_same_frame &&
+      context.presenter_pose_valid.load(std::memory_order_relaxed)) {
     const std::int64_t since = now_ns - context.presenter_pose_ns;
     if (since >= -kPresenterSameFrameNs && since < kPresenterSameFrameNs) {
       return ReadPresenterPose(context, location, rotation, lens, fov_enabled,
@@ -682,7 +685,73 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   return true;
 }
 
+void SamplePresenterMotion(Context &context, const std::int64_t now_ns,
+                           const double location[3],
+                           const double rotation[3],
+                           const bool advanced) noexcept {
+  if (!advanced) {
+    return;
+  }
+  // T3.4e: how fast the eye moves *relative to the car*, which is the only
+  // thing that can look like twitching. The absolute eye speed is dominated by
+  // the car's own travel, so it can never separate a smooth camera from a
+  // juddering one. Sample only on the call that advanced the model: later
+  // passes of the same frame reuse the cached pose, and dividing its step by a
+  // pass-length dt inflates the peak by the whole frame motion.
+  static thread_local bool relative_valid = false;
+  static thread_local std::int64_t relative_time_ns = 0;
+  static thread_local double relative_offset[3]{};
+  static thread_local double relative_yaw_degrees = 0.0;
+  double relative[3]{};
+  const double anchor[3] = {
+      context.presenter_anchor[0].load(std::memory_order_relaxed),
+      context.presenter_anchor[1].load(std::memory_order_relaxed),
+      context.presenter_anchor[2].load(std::memory_order_relaxed)};
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    relative[axis] = location[axis] - anchor[axis];
+  }
+  const double yaw_degrees = rotation[1];
+  if (relative_valid && now_ns > relative_time_ns) {
+    const double call_seconds =
+        static_cast<double>(now_ns - relative_time_ns) * 1e-9;
+    if (call_seconds > 2e-4 && call_seconds < 0.2) {
+      double step_squared = 0.0;
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const double step = relative[axis] - relative_offset[axis];
+        step_squared += step * step;
+      }
+      const double speed_cmps = std::sqrt(step_squared) / call_seconds;
+      const double yaw_step = nfs2015_chase::WrapPi(
+          (yaw_degrees - relative_yaw_degrees) *
+          nfs2015_chase::kRadiansPerDegree);
+      const double turn_dps =
+          std::fabs(yaw_step * nfs2015_chase::kDegreesPerRadian) /
+          call_seconds;
+      RaisePeak(context.diag.render_speed_peak_mmps,
+                static_cast<std::uint64_t>(speed_cmps * 10.0));
+      LowerFloor(context.diag.render_speed_floor_mmps,
+                 static_cast<std::uint64_t>(speed_cmps * 10.0));
+      RaisePeak(context.diag.render_turn_peak_cdps,
+                static_cast<std::uint64_t>(turn_dps * 100.0));
+      LowerFloor(context.diag.render_turn_floor_cdps,
+                 static_cast<std::uint64_t>(turn_dps * 100.0));
+    }
+  }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    relative_offset[axis] = relative[axis];
+  }
+  relative_yaw_degrees = yaw_degrees;
+  relative_time_ns = now_ns;
+  relative_valid = true;
+}
+
 void UpdateCamera(Context &context, const double dt) noexcept {
+  // The on_update callback runs after this frame's Draw (task group 2). Clear
+  // the frame-local attempt/readiness flags here so the next frame's first
+  // GetViewPoint advances the model again; every early return below still
+  // clears them.
+  context.pose_ready.store(false, std::memory_order_release);
+  context.pose_attempted.store(false, std::memory_order_release);
   const bool enabled = context.enabled.load(std::memory_order_acquire);
   const std::uint32_t preset = context.preset.load(std::memory_order_acquire);
   bool fov_enabled = context.fov_enabled.load(std::memory_order_acquire);

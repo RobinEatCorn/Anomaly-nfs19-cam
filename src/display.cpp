@@ -75,6 +75,10 @@ void UpdateDisplay(Context &context) noexcept {
       diag.detour_calls.load(std::memory_order_relaxed);
   context.display.detour_no_publish =
       diag.detour_no_publish.load(std::memory_order_relaxed);
+  context.display.view_applies =
+      diag.view_applies.load(std::memory_order_relaxed);
+  context.display.query_skips =
+      diag.query_skips.load(std::memory_order_relaxed);
   context.display.detour_thread_count =
       diag.detour_thread_count.load(std::memory_order_relaxed);
   context.display.player_sequence_jumps =
@@ -630,6 +634,31 @@ void UpdateDisplay(Context &context) noexcept {
 }
 
 void RetryHookIfNeeded(Context &context) noexcept {
+  if (context.native_view_point.load(std::memory_order_acquire)) {
+    // 2.1.0 game-thread path. The two hooks are one unit: the view adapter is
+    // only useful when both succeed, and the profile hash is the layout
+    // witness for both (D6). Do not install any render-thread route B hook on
+    // this side of the A/B; it would overwrite the view after we wrote it.
+    const bool view_point_ready =
+        context.game_view_point_hook_id.load(std::memory_order_acquire) != 0 ||
+        context.game_view_point_pattern_unavailable;
+    const bool scene_init_ready =
+        context.scene_view_init_hook_id.load(std::memory_order_acquire) != 0 ||
+        context.scene_view_init_pattern_unavailable;
+    if (view_point_ready && scene_init_ready) {
+      return;
+    }
+    if (context.hook_retry_requested.exchange(false,
+                                               std::memory_order_acq_rel)) {
+      context.next_hook_retry = 0.0;
+    }
+    if (context.elapsed < context.next_hook_retry) {
+      return;
+    }
+    context.next_hook_retry = context.elapsed + kHookRetrySeconds;
+    static_cast<void>(EnsureHook(context));
+    return;
+  }
   const bool view_point_ready =
       context.view_hook_id.load(std::memory_order_acquire) != 0 ||
       context.view_point_pattern_unavailable;

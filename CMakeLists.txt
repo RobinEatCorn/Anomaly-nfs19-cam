@@ -32,6 +32,7 @@ anomaly_add_plugin(nfs2015_chase_cam
             src/lifecycle.cpp
             src/hooks.cpp
             src/camera_detour.cpp
+            src/view_point.cpp
             src/routeb.cpp
             src/render_x_probe.cpp
             src/burnout.cpp

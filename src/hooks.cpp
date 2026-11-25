@@ -22,6 +22,25 @@ bool ResolveSignature(Context &context, const std::string_view pattern,
          address != 0;
 }
 
+// `g_active` must stay published while any camera detour can still run. The
+// 2.1.0 hooks add two more slots; a failure in one install path must not clear
+// the context for the other path's live hook.
+bool AnyCameraHookInstalled(const Context &context) noexcept {
+  return context.view_hook_id.load(std::memory_order_acquire) != 0 ||
+         context.game_view_point_hook_id.load(std::memory_order_acquire) != 0 ||
+         context.scene_view_init_hook_id.load(std::memory_order_acquire) != 0 ||
+         context.transform_hook_id.load(std::memory_order_acquire) != 0 ||
+         context.view_uniform_hook_id.load(std::memory_order_acquire) != 0 ||
+         context.prepare_view_state_hook_id.load(
+             std::memory_order_acquire) != 0;
+}
+
+void ClearActiveIfNoHooks(Context &context) noexcept {
+  if (!AnyCameraHookInstalled(context)) {
+    g_active.store(nullptr, std::memory_order_release);
+  }
+}
+
 // Resolve the manager's cached FMinimalViewInfo. The getter's own body reaches
 // it through a vtable slot holding a `lea rax,[rcx+disp32]; ret` accessor.
 bool ResolveCameraPov(Context &context) noexcept {
@@ -760,7 +779,152 @@ bool EnsureTransformHook(Context &context) noexcept {
   return true;
 }
 
+bool EnsureViewPointHook(Context &context) noexcept {
+  if (context.game_view_point_pattern_unavailable) {
+    return false;
+  }
+  // D6: the new path is fail-closed on the profile hash. The old hook has a
+  // legacy no-build-service exception; the game-thread path does not, because
+  // its field offsets were only verified on this build.
+  if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (context.game_view_point_hook_id.load(std::memory_order_acquire) != 0 &&
+      HookReady(context.hook)) {
+    return true;
+  }
+  if (!HookReady(context.hook)) {
+    return false;
+  }
+  std::uintptr_t target =
+      context.game_view_point_hook_target.load(std::memory_order_acquire);
+  if (target == 0) {
+    if (!ResolveSignature(context, kLocalPlayerGetViewPointPattern, target)) {
+      context.game_view_point_pattern_unavailable = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: ULocalPlayer::GetViewPoint pattern not found; "
+          "game-thread camera disabled for this session");
+      return false;
+    }
+    context.game_view_point_hook_target.store(target,
+                                               std::memory_order_release);
+  }
+  AnomalyHookRequestV1 request{sizeof(request)};
+  request.kind = ANOMALY_HOOK_V1_FUNCTION;
+  request.target = target;
+  request.detour = reinterpret_cast<void *>(&LocalPlayerViewPointDetour);
+  request.label =
+      StringView("nfs2015-chase-cam-local-player-view-point");
+  std::uintptr_t original{};
+  AnomalyGenerationHandleV1 handle{};
+  g_active.store(&context, std::memory_order_release);
+  const auto status =
+      context.hook->create(context.hook->user, &request, &original, &handle);
+  if (status.code != ANOMALY_STATUS_V1_OK || handle.id == 0 || original == 0) {
+    if (handle.id != 0 && HookReady(context.hook)) {
+      static_cast<void>(
+          context.hook->release(context.hook->user, handle));
+    }
+    context.game_view_point_hook_id.store(0, std::memory_order_release);
+    context.game_view_point_hook_generation.store(0,
+                                                   std::memory_order_release);
+    ClearActiveIfNoHooks(context);
+    if (!context.game_view_point_hook_failure_logged) {
+      context.game_view_point_hook_failure_logged = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: ULocalPlayer::GetViewPoint hook creation "
+          "failed; another plugin may own the same function");
+    }
+    return false;
+  }
+  context.game_view_point_hook_generation.store(handle.generation,
+                                                 std::memory_order_release);
+  g_local_player_get_view_point_original.store(
+      reinterpret_cast<LocalPlayerGetViewPointFn>(original),
+      std::memory_order_release);
+  context.game_view_point_hook_id.store(handle.id, std::memory_order_release);
+  context.game_view_point_hook_failure_logged = false;
+  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+      "nfs2015 chase cam: game-thread GetViewPoint hook installed");
+  return true;
+}
+
+bool EnsureSceneViewInitOptionsHook(Context &context) noexcept {
+  if (context.scene_view_init_pattern_unavailable) {
+    return false;
+  }
+  if (!context.render_x.version_gate.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (context.scene_view_init_hook_id.load(std::memory_order_acquire) != 0 &&
+      HookReady(context.hook)) {
+    return true;
+  }
+  if (!HookReady(context.hook)) {
+    return false;
+  }
+  std::uintptr_t target =
+      context.scene_view_init_hook_target.load(std::memory_order_acquire);
+  if (target == 0) {
+    if (!ResolveSignature(context, kCalcSceneViewInitOptionsPattern, target)) {
+      context.scene_view_init_pattern_unavailable = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: CalcSceneViewInitOptions pattern not found; "
+          "game-thread camera disabled for this session");
+      return false;
+    }
+    context.scene_view_init_hook_target.store(target,
+                                               std::memory_order_release);
+  }
+  AnomalyHookRequestV1 request{sizeof(request)};
+  request.kind = ANOMALY_HOOK_V1_FUNCTION;
+  request.target = target;
+  request.detour = reinterpret_cast<void *>(&CalcSceneViewInitOptionsDetour);
+  request.label =
+      StringView("nfs2015-chase-cam-scene-view-init-options");
+  std::uintptr_t original{};
+  AnomalyGenerationHandleV1 handle{};
+  g_active.store(&context, std::memory_order_release);
+  const auto status =
+      context.hook->create(context.hook->user, &request, &original, &handle);
+  if (status.code != ANOMALY_STATUS_V1_OK || handle.id == 0 || original == 0) {
+    if (handle.id != 0 && HookReady(context.hook)) {
+      static_cast<void>(
+          context.hook->release(context.hook->user, handle));
+    }
+    context.scene_view_init_hook_id.store(0, std::memory_order_release);
+    context.scene_view_init_hook_generation.store(0,
+                                                   std::memory_order_release);
+    ClearActiveIfNoHooks(context);
+    if (!context.scene_view_init_hook_failure_logged) {
+      context.scene_view_init_hook_failure_logged = true;
+      Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+          "nfs2015 chase cam: CalcSceneViewInitOptions hook creation failed; "
+          "the view-point gate cannot open");
+    }
+    return false;
+  }
+  context.scene_view_init_hook_generation.store(handle.generation,
+                                                 std::memory_order_release);
+  g_calc_scene_view_init_options_original.store(
+      reinterpret_cast<CalcSceneViewInitOptionsFn>(original),
+      std::memory_order_release);
+  context.scene_view_init_hook_id.store(handle.id,
+                                        std::memory_order_release);
+  context.scene_view_init_hook_failure_logged = false;
+  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+      "nfs2015 chase cam: CalcSceneViewInitOptions gate hook installed");
+  return true;
+}
+
 bool EnsureHook(Context &context) noexcept {
+  if (context.native_view_point.load(std::memory_order_acquire)) {
+    const bool view_point = EnsureViewPointHook(context);
+    const bool scene_init = EnsureSceneViewInitOptionsHook(context);
+    context.hook_ready.store(view_point && scene_init,
+                             std::memory_order_release);
+    return view_point && scene_init;
+  }
   if (context.view_point_pattern_unavailable) {
     return false;
   }
@@ -837,6 +1001,47 @@ bool EnsureHook(Context &context) noexcept {
 
 void ReleaseHook(Context &context) noexcept {
   g_active.store(nullptr, std::memory_order_release);
+  const std::uint64_t game_view_point_id =
+      context.game_view_point_hook_id.load(std::memory_order_acquire);
+  bool game_view_point_released = false;
+  if (game_view_point_id != 0 && HookReady(context.hook)) {
+    const AnomalyGenerationHandleV1 handle{
+        game_view_point_id,
+        context.game_view_point_hook_generation.load(
+            std::memory_order_acquire)};
+    game_view_point_released =
+        context.hook->release(context.hook->user, handle).code ==
+        ANOMALY_STATUS_V1_OK;
+  }
+  if (game_view_point_released) {
+    g_local_player_get_view_point_original.store(nullptr,
+                                                  std::memory_order_release);
+  }
+  context.game_view_point_hook_id.store(0, std::memory_order_release);
+  context.game_view_point_hook_generation.store(0,
+                                                 std::memory_order_release);
+  const std::uint64_t scene_view_init_id =
+      context.scene_view_init_hook_id.load(std::memory_order_acquire);
+  bool scene_view_init_released = false;
+  if (scene_view_init_id != 0 && HookReady(context.hook)) {
+    const AnomalyGenerationHandleV1 handle{
+        scene_view_init_id,
+        context.scene_view_init_hook_generation.load(
+            std::memory_order_acquire)};
+    scene_view_init_released =
+        context.hook->release(context.hook->user, handle).code ==
+        ANOMALY_STATUS_V1_OK;
+  }
+  if (scene_view_init_released) {
+    g_calc_scene_view_init_options_original.store(nullptr,
+                                                   std::memory_order_release);
+  }
+  context.scene_view_init_hook_id.store(0, std::memory_order_release);
+  context.scene_view_init_hook_generation.store(0,
+                                                 std::memory_order_release);
+  context.view_build_depth.store(0, std::memory_order_release);
+  context.pose_attempted.store(false, std::memory_order_release);
+  context.pose_ready.store(false, std::memory_order_release);
   const std::uint64_t transform_id =
       context.transform_hook_id.load(std::memory_order_acquire);
   bool transform_released = false;

@@ -627,6 +627,10 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
                 display.view_read_torn);
   DrawCountLine(ui, localizer, "diag.detour_missing",
                 "detour no pose", display.detour_no_publish);
+  DrawCountLine(ui, localizer, "diag.view_applies", "view applies",
+                display.view_applies);
+  DrawCountLine(ui, localizer, "diag.query_skips", "pose skips",
+                display.query_skips);
   DrawCountLine(ui, localizer, "diag.camera_yaw_fallback",
                 "ticks no car yaw", display.camera_yaw_esp_misses);
   std::snprintf(line, sizeof(line), "%.1f deg",

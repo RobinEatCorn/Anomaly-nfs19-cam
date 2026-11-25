@@ -3,6 +3,7 @@
 #pragma once
 
 #include "sdk.hpp"
+#include "view_point.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -138,6 +139,10 @@ AnomalyStatusV1 ResolveSignatureStatus(const Context &context,
 [[nodiscard]] bool EnsurePrepareViewStateHook(Context &context) noexcept;
 [[nodiscard]] bool EnsureViewUniformHook(Context &context) noexcept;
 [[nodiscard]] bool EnsureTransformHook(Context &context) noexcept;
+// 2.1.0 game-thread path. Both are independent hooks; the view adapter is only
+// active when both are installed and the profile gate is open.
+[[nodiscard]] bool EnsureViewPointHook(Context &context) noexcept;
+[[nodiscard]] bool EnsureSceneViewInitOptionsHook(Context &context) noexcept;
 [[nodiscard]] bool EnsureHook(Context &context) noexcept;
 void ReleaseHook(Context &context) noexcept;
 
@@ -161,8 +166,15 @@ void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
                                     const double *game_eye_cm,
                                     double location[3], double rotation[3],
                                     float *lens, bool *fov_enabled,
-                                    bool *advanced) noexcept;
+                                    bool *advanced,
+                                    bool dedupe_same_frame = true) noexcept;
 void RequestPresenterReset(Context &context) noexcept;
+// T3.4e: eye speed/turn rate relative to the car, sampled only on the call that
+// actually advanced the model. Shared by the old render-thread detour and the
+// 2.1.0 game-thread view adapter so the A/B diagnostics have the same meaning.
+void SamplePresenterMotion(Context &context, std::int64_t now_ns,
+                           const double location[3],
+                           const double rotation[3], bool advanced) noexcept;
 [[nodiscard]] bool ReadPresenterPose(const Context &context,
                                      double location[3], double rotation[3],
                                      float *lens, bool *fov_enabled,

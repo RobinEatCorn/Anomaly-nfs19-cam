@@ -15,6 +15,15 @@ namespace nfs2015_chase_cam::detail {
 using anomaly::sdk::StringView;
 
 using CameraViewPointFn = void(ANOMALY_CALL *)(void *, double *, double *);
+// ULocalPlayer::GetViewPoint(FMinimalViewInfo&). The engine object is a
+// 0xC70-byte value owned by the caller; the plugin only reads/writes the
+// prefix described by MinimalViewInfo.
+using LocalPlayerGetViewPointFn = void(ANOMALY_CALL *)(const void *, void *);
+// ULocalPlayer::CalcSceneViewInitOptions(FSceneViewInitOptions&, FViewport*,
+// FViewElementDrawer*, int32). The detour only brackets the call; the game's
+// return value is passed through unchanged.
+using CalcSceneViewInitOptionsFn = bool(ANOMALY_CALL *)(
+    void *, void *, void *, void *, std::int32_t);
 // `HTPlayerController::ToggleSwitchCameraViewMode(bool bForward)`. Both the
 // argument and the result are carried as raw bytes on purpose: the game's own
 // body only ever tests the flag for zero, and taking it as `bool` would let the
@@ -135,6 +144,10 @@ void NoteDetourThread(Context &context) noexcept;
 // hook is installed and read on the hook's own thread afterwards.
 extern std::atomic<Context *> g_active;
 extern std::atomic<CameraViewPointFn> g_original;
+extern std::atomic<LocalPlayerGetViewPointFn>
+    g_local_player_get_view_point_original;
+extern std::atomic<CalcSceneViewInitOptionsFn>
+    g_calc_scene_view_init_options_original;
 extern std::atomic<ToggleViewModeFn> g_toggle_view_mode_original;
 // The toggle detour publishes its own context instead of sharing `g_active`:
 // releasing any one camera hook clears `g_active`, and a toggle that silently

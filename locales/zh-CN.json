@@ -136,6 +136,8 @@
     "diag.lease_failures": "Hook 租约失败",
     "diag.torn_reads": "快照撕裂",
     "diag.detour_missing": "未写回位姿",
+    "diag.view_applies": "视点写回次数",
+    "diag.query_skips": "视点推进失败跳过",
     "diag.detour_threads": "渲染调用线程数",
     "diag.camera_yaw_fallback": "缺车头朝向 tick",
     "diag.slip_position": "打滑角（位置）",

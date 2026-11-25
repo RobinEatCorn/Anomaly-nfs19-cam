@@ -141,60 +141,8 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
         if (AdvancePresenter(*context, render_now_ns, game_eye_cm,
                              present_location, present_rotation,
                              &present_lens, &present_fov_enabled, &advanced)) {
-          // T3.4e: how fast the eye moves *relative to the car*, which is the
-          // only thing that can look like twitching. The absolute eye speed is
-          // dominated by the car's own travel, so it can never separate a
-          // smooth camera from a juddering one. Sample only when this call
-          // advanced the model: later passes of the same frame reuse the cached
-          // pose, and dividing its step by a pass-length dt inflates the peak
-          // by the whole frame motion (PLAN-camera-timing.md §4.1).
-          if (advanced) {
-            static thread_local bool relative_valid = false;
-            static thread_local std::int64_t relative_time_ns = 0;
-            static thread_local double relative_offset[3]{};
-            static thread_local double relative_yaw_degrees = 0.0;
-            double relative[3]{};
-            const double anchor[3] = {
-                context->presenter_anchor[0].load(std::memory_order_relaxed),
-                context->presenter_anchor[1].load(std::memory_order_relaxed),
-                context->presenter_anchor[2].load(std::memory_order_relaxed)};
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-              relative[axis] = present_location[axis] - anchor[axis];
-            }
-            const double yaw_degrees = present_rotation[1];
-            if (relative_valid && render_now_ns > relative_time_ns) {
-              const double call_seconds =
-                  static_cast<double>(render_now_ns - relative_time_ns) * 1e-9;
-              if (call_seconds > 2e-4 && call_seconds < 0.2) {
-                double step_squared = 0.0;
-                for (std::size_t axis = 0; axis < 3; ++axis) {
-                  const double step = relative[axis] - relative_offset[axis];
-                  step_squared += step * step;
-                }
-                const double speed_cmps = std::sqrt(step_squared) / call_seconds;
-                const double yaw_step = nfs2015_chase::WrapPi(
-                    (yaw_degrees - relative_yaw_degrees) *
-                    nfs2015_chase::kRadiansPerDegree);
-                const double turn_dps =
-                    std::fabs(yaw_step * nfs2015_chase::kDegreesPerRadian) /
-                    call_seconds;
-                RaisePeak(context->diag.render_speed_peak_mmps,
-                          static_cast<std::uint64_t>(speed_cmps * 10.0));
-                LowerFloor(context->diag.render_speed_floor_mmps,
-                           static_cast<std::uint64_t>(speed_cmps * 10.0));
-                RaisePeak(context->diag.render_turn_peak_cdps,
-                          static_cast<std::uint64_t>(turn_dps * 100.0));
-                LowerFloor(context->diag.render_turn_floor_cdps,
-                           static_cast<std::uint64_t>(turn_dps * 100.0));
-              }
-            }
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-              relative_offset[axis] = relative[axis];
-            }
-            relative_yaw_degrees = yaw_degrees;
-            relative_time_ns = render_now_ns;
-            relative_valid = true;
-          }
+          SamplePresenterMotion(*context, render_now_ns, present_location,
+                                present_rotation, advanced);
           {
             const bool skip_position =
                 context->diagnostic_skip_position.load(

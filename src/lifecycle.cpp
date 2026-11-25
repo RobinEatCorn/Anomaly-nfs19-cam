@@ -247,6 +247,11 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   context->diag.detour_calls.store(0, std::memory_order_relaxed);
   context->diag.detour_calls_window.store(0, std::memory_order_relaxed);
   context->diag.detour_no_publish.store(0, std::memory_order_relaxed);
+  context->diag.view_applies.store(0, std::memory_order_relaxed);
+  context->diag.query_skips.store(0, std::memory_order_relaxed);
+  context->view_build_depth.store(0, std::memory_order_relaxed);
+  context->pose_attempted.store(false, std::memory_order_release);
+  context->pose_ready.store(false, std::memory_order_release);
   context->diag.player_sequence_jumps.store(0, std::memory_order_relaxed);
   context->diag.camera_yaw_esp_misses.store(0, std::memory_order_relaxed);
   context->diag.slip_from_position_degrees.store(0.0,
@@ -315,6 +320,9 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   // not load again until the process restarts.
   g_active.store(nullptr, std::memory_order_release);
   context->chase_initialized = false;
+  context->pose_attempted.store(false, std::memory_order_release);
+  context->pose_ready.store(false, std::memory_order_release);
+  context->view_build_depth.store(0, std::memory_order_release);
   ++context->sample_epoch;
   context->sample_mean_interval_ns.store(0.0, std::memory_order_relaxed);
   context->game_offset_valid = false;
