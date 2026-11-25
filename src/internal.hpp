@@ -127,6 +127,14 @@ void EvaluateAnchorInsurance(Context &context) noexcept;
 void UpdateRenderXProbe(Context &context, const double base_cm[3],
                         bool player_valid) noexcept;
 void SampleRenderXPhase(Context &context) noexcept;
+// Task group 5: read the vehicle mesh's ComponentToWorld at the scene-view
+// phase (CalcSceneViewInitOptions entry). The pointer is the one the Game tick
+// already resolved and validated; the transform itself is read here, after the
+// vehicle has run, so the camera and the car the renderer is about to draw use
+// the same transform.
+[[nodiscard]] bool ReadVehicleComponentTransform(Context &context,
+                                                 double car_cm[3],
+                                                 double forward[3]) noexcept;
 
 // --- hooks.cpp ------------------------------------------------------------
 [[nodiscard]] bool ResolveSignature(Context &context,
@@ -162,12 +170,22 @@ void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
                                   const double forward[3]) noexcept;
 
 // --- presenter.cpp --------------------------------------------------------
-[[nodiscard]] bool AdvancePresenter(Context &context, std::int64_t now_ns,
-                                    const double *game_eye_cm,
-                                    double location[3], double rotation[3],
-                                    float *lens, bool *fov_enabled,
-                                    bool *advanced,
-                                    bool dedupe_same_frame = true) noexcept;
+// `provided_sample` is the game-thread path: when non-null the model consumes
+// that sample directly and does not read the old ring or the borrow anchor.
+// The render-thread A/B path passes null and keeps the existing behaviour.
+[[nodiscard]] bool AdvancePresenter(
+    Context &context, std::int64_t now_ns, const double *game_eye_cm,
+    double location[3], double rotation[3], float *lens, bool *fov_enabled,
+    bool *advanced, bool dedupe_same_frame = true,
+    const nfs2015_chase::CarSample *provided_sample = nullptr) noexcept;
+// The last completed Game-tick sample, written by UpdateCamera and read once
+// per frame at the scene-view advance. The value is a plain snapshot guarded by
+// an odd/even sequence; both writer and reader run on the Game thread.
+void PublishLatestCarSample(Context &context,
+                            const nfs2015_chase::CarSample &sample) noexcept;
+[[nodiscard]] bool ReadLatestCarSample(
+    const Context &context, nfs2015_chase::CarSample &sample) noexcept;
+void ClearLatestCarSample(Context &context) noexcept;
 void RequestPresenterReset(Context &context) noexcept;
 // T3.4e: eye speed/turn rate relative to the car, sampled only on the call that
 // actually advanced the model. Shared by the old render-thread detour and the

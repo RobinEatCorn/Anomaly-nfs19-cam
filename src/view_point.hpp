@@ -1,7 +1,9 @@
 // The game-thread view-point adapter (2.1.0). It is the only place the chase
-// model writes the engine's view data: the first GetViewPoint call inside
-// CalcSceneViewInitOptions advances the model, later calls in the same frame
-// copy the same pose, and every non-view query is left on the game camera.
+// model writes the engine's view data: the entry of CalcSceneViewInitOptions
+// advances the model, every GetViewPoint call after that copies the pose, and
+// calls before the scene view copy the previous scene pose (the car transform
+// they see is also the previous frame's). If the scene advance fails, the
+// post-scene frame fails open to the game camera.
 #pragma once
 
 #include "constants.hpp"
@@ -32,11 +34,11 @@ static_assert(offsetof(MinimalViewInfo, desired_fov) ==
               kMinimalViewInfoDesiredFovOffset);
 static_assert(sizeof(MinimalViewInfo) == 0x38);
 
-// Applies the chase pose to `view` when the D27 frame gate allows it. Returns
-// true when a pose was written. The first GetViewPoint call in a frame advances
-// the model, even when it comes from the UI projection before CalcSceneView;
-// later calls copy that pose. If the advance fails, the frame stays on the game
-// camera instead of retrying the model for every consumer.
+// Applies the chase pose to `view` when the scene-phase gate allows it.
+// Returns true when a pose was written. Calls before CalcSceneViewInitOptions
+// copy the previous scene pose; calls inside or after it copy this frame's
+// pose. If the scene advance failed, the post-scene frame stays on the game
+// camera instead of mixing a stale pose with the current car.
 [[nodiscard]] bool ApplyViewPoint(Context &context,
                                   MinimalViewInfo &view) noexcept;
 

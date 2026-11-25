@@ -257,10 +257,10 @@ struct Diagnostics final {
   // Active view but no published pose: the frame the game camera shows through.
   std::atomic<std::uint64_t> detour_no_publish{};
   // 2.1.0 game-thread path. `view_applies` counts every GetViewPoint call the
-  // adapter actually wrote (the first call and every later UI/view/HUD call in
-  // the same frame). `query_skips` counts calls that saw `pose_attempted` but
-  // no pose: the advance failed earlier in this frame, so the rest of the
-  // frame deliberately stays on the game camera.
+  // adapter actually wrote (the UI projection, the scene view, and the HUD).
+  // `query_skips` counts calls that saw `pose_attempted` but no pose: the scene
+  // advance failed this frame, so the post-scene consumers deliberately stay
+  // on the game camera.
   std::atomic<std::uint64_t> view_applies{};
   std::atomic<std::uint64_t> query_skips{};
   // TG-1: frames the chase pose was withheld because the game's live view-mode
@@ -1632,13 +1632,16 @@ struct Context final {
   // first person or a cutscene does not resume an orbit immediately.
   std::atomic<std::uint64_t> view_epoch{};
   std::atomic_bool view_active{};
-  // D27 frame gate. The first GetViewPoint call in a frame (normally the UI
-  // projection in TG_PrePhysics) advances the model and sets pose_ready; every
-  // later call copies that pose. `pose_attempted` is set even when the advance
-  // fails, so the rest of the frame does not retry the model and cannot mix
-  // game-camera and chase-camera consumers. on_update clears both.
-  // `view_build_depth` is diagnostic only; it brackets
-  // CalcSceneViewInitOptions for task group 6's cut write.
+  // 2.1.0 scene-phase gate. The model advances once at the entry of
+  // CalcSceneViewInitOptions, after the vehicle has run, and sets pose_ready.
+  // Every GetViewPoint call after that copies the pose. Earlier calls (the UMG
+  // projection in World Tick) copy the pose from the previous scene, which
+  // matches the previous-frame car transform they see. `pose_attempted` is set
+  // even when the scene advance fails, so the rest of the frame fails open to
+  // the game camera instead of retrying and mixing poses. on_update clears
+  // both.
+  // `view_build_depth` brackets CalcSceneViewInitOptions; it also identifies
+  // the scene consumers and is used by task group 6's cut write.
   std::atomic<std::uint32_t> view_build_depth{};
   std::atomic_bool pose_attempted{};
   std::atomic_bool pose_ready{};
@@ -1673,11 +1676,16 @@ struct Context final {
   OrbitUiRuntimeState orbit_ui{};
   std::uint32_t configured_preset{0};
   bool chase_initialized{};
-  // T2: the chase model runs on the render clock, so the Game tick only writes
-  // car samples and the render side advances the springs. The model state is
-  // shared, hence the try-lock: a render call that loses the race uses the last
-  // produced pose instead of blocking a frame.
+  // T2: the old render-thread path still consumes a ring so it can interpolate
+  // between Game ticks. Task group 5 gives the game-thread path a direct
+  // snapshot instead: the last completed Game-tick car state is copied once at
+  // the scene-view advance, then the live VehicleMesh ComponentToWorld replaces
+  // its position and attitude. No interpolation and no render-clock mapping.
+  // The ring stays only for the A/B path until task group 7 deletes it.
   nfs2015_chase::SampleRing car_ring;
+  std::atomic<std::uint64_t> latest_car_sample_sequence{};
+  nfs2015_chase::CarSample latest_car_sample{};
+  std::atomic_bool latest_car_sample_valid{};
   std::atomic_flag presenter_lock = ATOMIC_FLAG_INIT;
   std::int64_t presenter_last_ns{};
   std::uint64_t presenter_epoch{};

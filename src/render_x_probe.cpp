@@ -193,6 +193,85 @@ bool ReadVehicleParentAnchor(const AnomalyCoreServiceV1 *core,
   return true;
 }
 
+// Task group 5: read the VehicleMesh ComponentToWorld at the scene-view
+// advance. The Game tick has already resolved the root pointer; this read
+// follows the same AttachParent chain the render-thread probe uses, but reads
+// the transform after the vehicle has run, when it is the transform the
+// renderer is about to draw. The transform is deliberately read from the
+// component, not from the scene proxy: the proxy is the renderer's copy, and
+// the game-thread view uses the same source the game camera sees.
+bool ReadVehicleComponentTransform(Context &context, double car_cm[3],
+                                   double forward[3]) noexcept {
+  RenderXProbe &probe = context.render_x;
+  const std::uintptr_t root = probe.root.load(std::memory_order_relaxed);
+  if (root == 0) {
+    return false;
+  }
+  double root_cm[3]{};
+  if (!ReadChainLocation(context.core, root, root_cm)) {
+    return false;
+  }
+  std::uintptr_t parent{};
+  if (!ReadPointerAtOffset(context.core, root,
+                           kSceneComponentAttachParentOffset, parent) ||
+      parent == 0 || parent == root) {
+    return false;
+  }
+  std::array<double, 4> orientation{};
+  std::array<double, 3> translation{};
+  if (!Read(context.core, parent + kSceneComponentTransformOffset,
+            orientation) ||
+      !Read(context.core, parent + kSceneComponentTransformTranslationOffset,
+            translation)) {
+    return false;
+  }
+  const double norm2 =
+      orientation[0] * orientation[0] + orientation[1] * orientation[1] +
+      orientation[2] * orientation[2] + orientation[3] * orientation[3];
+  if (!(norm2 > 0.81 && norm2 < 1.21) ||
+      !std::isfinite(translation[0]) || !std::isfinite(translation[1]) ||
+      !std::isfinite(translation[2])) {
+    return false;
+  }
+  // The capsule sits inside the vehicle; a parent transform far from the pawn
+  // root is a stale/recycled pointer, not the car. This is the same sanity
+  // radius the render-thread probe uses.
+  double squared = 0.0;
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double delta = translation[axis] - root_cm[axis];
+    squared += delta * delta;
+  }
+  if (!std::isfinite(squared) ||
+      squared > kVehicleAnchorMaxOffsetCm * kVehicleAnchorMaxOffsetCm) {
+    return false;
+  }
+  const double inverse_norm = 1.0 / std::sqrt(norm2);
+  const double x = orientation[0] * inverse_norm;
+  const double y = orientation[1] * inverse_norm;
+  const double z = orientation[2] * inverse_norm;
+  const double w = orientation[3] * inverse_norm;
+  // Rotate the local +X (nose) axis by the ComponentToWorld quaternion.
+  const double tx = 0.0;
+  const double ty = 2.0 * z;
+  const double tz = -2.0 * y;
+  forward[0] = 1.0 + w * tx + (y * tz - z * ty);
+  forward[1] = w * ty + (z * tx - x * tz);
+  forward[2] = w * tz + (x * ty - y * tx);
+  const double length_squared =
+      forward[0] * forward[0] + forward[1] * forward[1] +
+      forward[2] * forward[2];
+  if (!std::isfinite(forward[0]) || !std::isfinite(forward[1]) ||
+      !std::isfinite(forward[2]) || !(length_squared > 1e-8)) {
+    return false;
+  }
+  const double inverse_length = 1.0 / std::sqrt(length_squared);
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    car_cm[axis] = translation[axis];
+    forward[axis] *= inverse_length;
+  }
+  return true;
+}
+
 bool HexEqualsIgnoreCase(const char *actual,
                          const std::string_view expected) noexcept {
   if (actual == nullptr) {

@@ -105,6 +105,73 @@ void PublishObservedView(const MinimalViewInfo &view,
                                   std::memory_order_release);
 }
 
+// Task group 5: build the sample the model consumes at the scene-view
+// advance. The last completed Game-tick sample supplies the derivative state
+// (velocity, acceleration, yaw rate, brake, burnout, rig geometry); the live
+// VehicleMesh ComponentToWorld supplies the position, yaw and body pitch. This
+// is the transform after the vehicle has run, so the camera and the car about
+// to be drawn share it; there is no render-clock interpolation.
+bool ReadGameThreadCarSample(Context &context, const std::int64_t now_ns,
+                             nfs2015_chase::CarSample &sample) noexcept {
+  if (!ReadLatestCarSample(context, sample)) {
+    return false;
+  }
+  double car_cm[3]{};
+  double forward[3]{};
+  if (!ReadVehicleComponentTransform(context, car_cm, forward)) {
+    return false;
+  }
+  if (!std::isfinite(car_cm[0]) || !std::isfinite(car_cm[1]) ||
+      !std::isfinite(car_cm[2]) || !std::isfinite(forward[0]) ||
+      !std::isfinite(forward[1]) || !std::isfinite(forward[2])) {
+    return false;
+  }
+  double pitch = 0.0;
+  if (!BodyPitchFromForward(forward, pitch)) {
+    return false;
+  }
+  if (!std::isfinite(now_ns) || now_ns <= 0) {
+    return false;
+  }
+  // The derivative facts come from the Game tick, but this pose is evaluated
+  // at the scene-view phase, when the VehicleMesh ComponentToWorld is the
+  // transform the renderer is about to draw. Advancing on this timestamp keeps
+  // the model's step tied to the car step that just happened.
+  sample.time_ns = now_ns;
+  sample.car.position = {car_cm[0] / 100.0, car_cm[1] / 100.0,
+                         car_cm[2] / 100.0};
+  sample.car.yaw = std::atan2(forward[1], forward[0]);
+  sample.car.pitch = pitch;
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    sample.anchor_cm[axis] = car_cm[axis];
+    sample.origin_cm[axis] = car_cm[axis];
+  }
+  // Keep the derivative facts from the Game tick, but express the signed speed
+  // and slip in the freshly read body frame. The old sample was built with the
+  // previous frame's yaw; mixing the two frames would tilt the slip angle by
+  // the yaw change even though the car did not slip.
+  const nfs2015_chase::Vec3 velocity = sample.car.velocity;
+  const nfs2015_chase::Vec3 body_forward =
+      nfs2015_chase::ForwardFromYaw(sample.car.yaw);
+  const nfs2015_chase::Vec3 body_right =
+      nfs2015_chase::RightFromYaw(sample.car.yaw);
+  const double forward_speed =
+      nfs2015_chase::Dot(velocity, body_forward);
+  const double speed =
+      std::hypot(velocity.x, velocity.y);
+  sample.car.speed = forward_speed;
+  if (speed < 0.75) {
+    sample.car.slip_angle = 0.0;
+  } else if (forward_speed >= 0.0) {
+    sample.car.slip_angle = nfs2015_chase::Clamp(
+        std::atan2(nfs2015_chase::Dot(velocity, body_right), forward_speed),
+        -nfs2015_chase::kPi * 0.5, nfs2015_chase::kPi * 0.5);
+  }
+  sample.driving = true;
+  sample.epoch = context.sample_epoch;
+  return true;
+}
+
 void WritePose(Context &context, MinimalViewInfo &view,
                const double location[3], const double rotation[3],
                float lens, bool fov_enabled) noexcept {
@@ -133,6 +200,43 @@ void WritePose(Context &context, MinimalViewInfo &view,
 
 }  // namespace
 
+bool AdvanceScenePose(Context &context, const std::int64_t now_ns) noexcept {
+  if (!context.view_active.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (!ChaseCameraGuardAllows(context)) {
+    context.diag.tag_veto_frames.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  if (context.pose_attempted.exchange(true, std::memory_order_acq_rel)) {
+    // A second scene view in the same frame (stereo) reuses the first pose.
+    return context.pose_ready.load(std::memory_order_acquire);
+  }
+  context.pose_ready.store(false, std::memory_order_release);
+  nfs2015_chase::CarSample sample;
+  if (!ReadGameThreadCarSample(context, now_ns, sample)) {
+    context.diag.detour_no_publish.fetch_add(1,
+                                             std::memory_order_relaxed);
+    return false;
+  }
+  double location[3]{};
+  double rotation[3]{};
+  float lens = 0.0F;
+  bool fov_enabled = false;
+  bool advanced = false;
+  if (!AdvancePresenter(context, now_ns, nullptr, location, rotation,
+                        &lens, &fov_enabled, &advanced,
+                        /*dedupe_same_frame=*/false, &sample)) {
+    context.diag.detour_no_publish.fetch_add(1,
+                                             std::memory_order_relaxed);
+    return false;
+  }
+  context.pose_ready.store(true, std::memory_order_release);
+  context.view_output_frames.fetch_add(1, std::memory_order_relaxed);
+  SamplePresenterMotion(context, now_ns, location, rotation, advanced);
+  return true;
+}
+
 bool ApplyViewPoint(Context &context, MinimalViewInfo &view) noexcept {
   if (!context.view_active.load(std::memory_order_acquire)) {
     return false;
@@ -142,45 +246,27 @@ bool ApplyViewPoint(Context &context, MinimalViewInfo &view) noexcept {
     return false;
   }
 
-  const bool pose_ready =
-      context.pose_ready.load(std::memory_order_acquire);
-  if (!pose_ready) {
-    // D27: the first GetViewPoint call in the frame owns the advance. It is
-    // normally the UI projection in TG_PrePhysics; the vehicle is still at the
-    // previous frame's final transform there, which is the same phase the
-    // game's own camera manager uses. Every later consumer must see the pose
-    // that this call produces, or UI and scene would use different cameras.
-    if (context.pose_attempted.exchange(true, std::memory_order_acq_rel)) {
-      // The advance already ran and failed this frame. Do not retry it for the
-      // next query: one failure means the whole frame stays fail-open.
-      context.diag.query_skips.fetch_add(1, std::memory_order_relaxed);
-      return false;
-    }
-    const std::int64_t now_ns = NowNanoseconds();
-    const double game_eye_cm[3] = {view.location[0], view.location[1],
-                                   view.location[2]};
-    double location[3]{};
-    double rotation[3]{};
-    float lens = 0.0F;
-    bool fov_enabled = false;
-    bool advanced = false;
-    if (!AdvancePresenter(context, now_ns, game_eye_cm, location, rotation,
-                          &lens, &fov_enabled, &advanced,
-                          /*dedupe_same_frame=*/false)) {
-      context.diag.detour_no_publish.fetch_add(1,
-                                               std::memory_order_relaxed);
-      return false;
-    }
-    context.pose_ready.store(true, std::memory_order_release);
-    context.view_output_frames.fetch_add(1, std::memory_order_relaxed);
-    SamplePresenterMotion(context, now_ns, location, rotation, advanced);
-    WritePose(context, view, location, rotation, lens, fov_enabled);
-    return true;
+  // The scene view is the phase that owns the advance (called from
+  // CalcSceneViewInitOptions before the original). Every consumer before that
+  // point, including the UMG/Slate projection in World Tick, uses the pose the
+  // previous scene view published, because its car transform is also the
+  // previous frame's final transform. Once the scene pose is ready, the scene
+  // view and the HUD after it copy it. If the scene advance failed this frame,
+  // the scene side fails open to the game camera instead of mixing a stale
+  // pose with the current car.
+  const bool scene_phase =
+      context.view_build_depth.load(std::memory_order_acquire) > 0;
+  const bool attempted =
+      context.pose_attempted.load(std::memory_order_acquire);
+  const bool ready = context.pose_ready.load(std::memory_order_acquire);
+  if ((scene_phase && !ready) || (attempted && !ready)) {
+    // The scene advance failed. Do not let the HUD or any later consumer mix
+    // the previous pose with this frame's car; the whole post-scene frame
+    // fails open to the game camera.
+    context.diag.query_skips.fetch_add(1, std::memory_order_relaxed);
+    return false;
   }
 
-  // Every later call in this frame (the UI projections, the direct
-  // CalcSceneView GetViewPoint, and the HUD) copies the pose the first call
-  // published. No model step, no second vehicle read.
   double location[3]{};
   double rotation[3]{};
   float lens = 0.0F;
@@ -250,6 +336,15 @@ bool ANOMALY_CALL CalcSceneViewInitOptionsDetour(
   if (context != nullptr) {
     leased = BeginSceneViewInitLease(*context, lease);
     context->view_build_depth.fetch_add(1, std::memory_order_acq_rel);
+    // This is the first point in the frame where the vehicle's
+    // ComponentToWorld is the transform the renderer is about to draw. Advance
+    // before the original so both GetProjectionData and the second direct
+    // GetViewPoint inside CalcSceneView see this frame's pose. The earlier UMG
+    // projection uses the previous frame's published pose, which matches the
+    // previous-frame car transform it sees in TG_PrePhysics.
+    if (leased) {
+      AdvanceScenePose(*context, NowNanoseconds());
+    }
   }
 
   bool result = false;

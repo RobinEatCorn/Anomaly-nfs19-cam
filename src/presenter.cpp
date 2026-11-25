@@ -228,13 +228,62 @@ void PublishRouteBModelPose(Context &context,
   probe.route_b_model_sequence.fetch_add(1, std::memory_order_release);
 }
 
+// Task group 5: publish the completed Game-tick sample for the game-thread
+// adapter. The ring is still written for the old render-thread path until task
+// group 7, but the new path never interpolates: it reads this snapshot once per
+// frame and replaces the transform with a live ComponentToWorld read.
+void PublishLatestCarSample(
+    Context &context, const nfs2015_chase::CarSample &sample) noexcept {
+  const std::uint64_t sequence =
+      context.latest_car_sample_sequence.load(std::memory_order_relaxed);
+  context.latest_car_sample_sequence.store(sequence + 1U,
+                                           std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
+  context.latest_car_sample = sample;
+  context.latest_car_sample_valid.store(true, std::memory_order_release);
+  context.latest_car_sample_sequence.store(sequence + 2U,
+                                           std::memory_order_release);
+}
+
+bool ReadLatestCarSample(const Context &context,
+                         nfs2015_chase::CarSample &sample) noexcept {
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    const std::uint64_t before =
+        context.latest_car_sample_sequence.load(std::memory_order_acquire);
+    if ((before & 1U) != 0U) {
+      continue;
+    }
+    if (!context.latest_car_sample_valid.load(std::memory_order_relaxed)) {
+      return false;
+    }
+    sample = context.latest_car_sample;
+    if (context.latest_car_sample_sequence.load(std::memory_order_relaxed) ==
+        before) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void ClearLatestCarSample(Context &context) noexcept {
+  const std::uint64_t sequence =
+      context.latest_car_sample_sequence.load(std::memory_order_relaxed);
+  context.latest_car_sample_sequence.store(sequence + 1U,
+                                           std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
+  context.latest_car_sample_valid.store(false, std::memory_order_release);
+  context.latest_car_sample_sequence.store(sequence + 2U,
+                                           std::memory_order_release);
+}
+
 // Advance the model to `now_ns` and produce the pose for this render call.
 // Returns false when there is nothing to present (no sample yet, or another
 // thread is advancing and no cached pose exists).
 bool AdvancePresenter(Context &context, const std::int64_t now_ns,
                       const double *game_eye_cm, double location[3],
                       double rotation[3], float *lens, bool *fov_enabled,
-                      bool *advanced, const bool dedupe_same_frame) noexcept {
+                      bool *advanced, const bool dedupe_same_frame,
+                      const nfs2015_chase::CarSample *provided_sample) noexcept {
   *advanced = false;
   if (!TryLockPresenter(context)) {
     return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
@@ -249,9 +298,9 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   // pass-to-pass interval (a noisy fraction of a millisecond), not the frame
   // interval. Advance once per frame and hand every later pass of that frame
   // the cached pose. The new game-thread path sets `dedupe_same_frame` false:
-  // its own pose_attempted/pose_ready flags already guarantee one advance per
-  // frame, and a time threshold would skip legitimate advances on >120 Hz
-  // displays.
+  // its pose_attempted/pose_ready flags already guarantee one advance at the
+  // scene-view phase, and a time threshold would skip legitimate advances on
+  // >120 Hz displays.
   if (dedupe_same_frame &&
       context.presenter_pose_valid.load(std::memory_order_relaxed)) {
     const std::int64_t since = now_ns - context.presenter_pose_ns;
@@ -261,29 +310,39 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     }
   }
 
-  // Look back one and a half mean intervals. More than one interval keeps the
-  // target strictly inside a bracket, so the ring interpolates instead of
-  // clamping at its edge; the mean rather than the last measurement keeps the
-  // target from dancing with the interval's own jitter. When a tick arrives
-  // late the target runs past the newest sample, and the ring continues along
-  // the newest pair rather than freezing there.
-  const double mean_interval_ns =
-      context.sample_mean_interval_ns.load(std::memory_order_relaxed);
-  constexpr double kSampleDelayFactor = 1.5;
-  const double delay_ns = mean_interval_ns * kSampleDelayFactor;
   nfs2015_chase::CarSample sample;
-  const bool zero_lag =
-      context.diagnostic_zero_lag.load(std::memory_order_relaxed);
-  // The curved sample, not the linear one. Linear interpolation is continuous
-  // in position and discontinuous in velocity, so the eye's speed steps at every
-  // Game tick and the whole world's flow rate steps with it. The projection
-  // instrument cannot see that: it projects the car, which travels with the
-  // camera, so the car stays still while the picture jolts. W, the camera's own
-  // speed jump, is the number that sees it, and this curve is what it is for.
-  const bool sampled =
-      zero_lag ? context.car_ring.Latest(sample)
-               : context.car_ring.AtSmooth(
-                     now_ns - static_cast<std::int64_t>(delay_ns), sample);
+  bool sampled = false;
+  if (provided_sample != nullptr) {
+    // The game-thread path builds this sample at the scene-view advance. It
+    // already carries the live ComponentToWorld position and attitude; do not
+    // run it through the render-clock ring or the borrow anchor.
+    sample = *provided_sample;
+    sampled = true;
+  } else {
+    // Look back one and a half mean intervals. More than one interval keeps the
+    // target strictly inside a bracket, so the ring interpolates instead of
+    // clamping at its edge; the mean rather than the last measurement keeps the
+    // target from dancing with the interval's own jitter. When a tick arrives
+    // late the target runs past the newest sample, and the ring continues along
+    // the newest pair rather than freezing there.
+    const double mean_interval_ns =
+        context.sample_mean_interval_ns.load(std::memory_order_relaxed);
+    constexpr double kSampleDelayFactor = 1.5;
+    const double delay_ns = mean_interval_ns * kSampleDelayFactor;
+    const bool zero_lag =
+        context.diagnostic_zero_lag.load(std::memory_order_relaxed);
+    // The curved sample, not the linear one. Linear interpolation is continuous
+    // in position and discontinuous in velocity, so the eye's speed steps at
+    // every Game tick and the whole world's flow rate steps with it. The
+    // projection instrument cannot see that: it projects the car, which travels
+    // with the camera, so the car stays still while the picture jolts. W, the
+    // camera's own speed jump, is the number that sees it, and this curve is
+    // what it is for.
+    sampled = zero_lag
+                  ? context.car_ring.Latest(sample)
+                  : context.car_ring.AtSmooth(
+                        now_ns - static_cast<std::int64_t>(delay_ns), sample);
+  }
   if (!sampled) {
     return false;
   }
@@ -313,7 +372,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
   //   Borrow  the old game-camera estimate,
   //   Model   the untouched Game-tick sample.
   // X only enters the anchor; velocity and yaw still come from the Game tick.
-  if (game_eye_cm != nullptr) {
+  if (provided_sample == nullptr && game_eye_cm != nullptr) {
     const double our_car_cm[3] = {
         sample.car.position.x * 100.0, sample.car.position.y * 100.0,
         sample.car.position.z * 100.0};
@@ -1223,7 +1282,13 @@ void UpdateCamera(Context &context, const double dt) noexcept {
       LowerFloor(context.diag.tick_interval_min_ns, interval);
     }
     context.sample_last_ns = sample.time_ns;
-    context.car_ring.Write(sample);
+    PublishLatestCarSample(context, sample);
+    // The old render-thread path still needs its interpolation ring. The new
+    // game-thread path reads the snapshot above instead and never touches the
+    // ring; task group 7 removes this branch with the old path.
+    if (!context.native_view_point.load(std::memory_order_relaxed)) {
+      context.car_ring.Write(sample);
+    }
     // The sample above is published in every slot, not only the chase one: the
     // spring model has to be warm when FP -> chase flips this flag inside the
     // toggle call, or the pose would start from a stale anchor.
