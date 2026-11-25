@@ -342,7 +342,8 @@ void CheckDefaultPanel(Harness &harness) {
   Expect("the advanced block starts closed",
          harness.ui.Find("advanced-open") != nullptr &&
              harness.ui.Find("chase-borrow") == nullptr &&
-             harness.ui.Find("anchor-0") == nullptr);
+             harness.ui.Find("anchor-0") == nullptr &&
+             harness.ui.Find("chase-zero-lag") == nullptr);
   Expect("a closed group draws no summary line",
          !harness.ui.HasText("Distance, height"));
   ExpectUniqueWidgetIds(harness.ui);
@@ -636,12 +637,11 @@ void CheckOrbitDetails(Harness &harness) {
 void CheckAdvancedBlock(Harness &harness) {
   harness.Click("advanced-open");
   harness.Frame();
-  Expect("the advanced block draws the anchors",
-         harness.ui.Find("anchor-0") != nullptr &&
-             harness.ui.Find("anchor-3") != nullptr);
-  Expect("the advanced block draws the lock slider",
-         harness.ui.Find("chase-borrow") != nullptr);
-  for (const char *id : {"chase-flat-pose", "chase-zero-lag",
+  Expect("the advanced block no longer draws anchor choices",
+         harness.ui.Find("anchor-0") == nullptr &&
+             harness.ui.Find("chase-borrow") == nullptr &&
+             harness.ui.Find("chase-zero-lag") == nullptr);
+  for (const char *id : {"chase-flat-pose",
                          "chase-skip-position", "chase-skip-rotation",
                          "chase-diagnostics"}) {
     ExpectModeButton(harness.ui, id, true);

@@ -18,7 +18,7 @@
 （默认 **Shift + W**）时，相机从 chase 视角绕到后轮外侧，进入 NFS 2015 风格的后轮
 close-up；松开按键或车辆开始移动后平滑回到 chase。
 特写使用独立的水平 FOV、震动和侧别（自动/左后/右后/居中），进入/退出/起步回正时间可在设置里调整。
-`BurnoutShot` 只在渲染时钟上推进，并与现有 route B / presenter pose 使用同一个混合 view。
+`BurnoutShot` 与当前场景相位发布的 pose 使用同一个混合视图。
 
 ## 停车环绕
 
@@ -143,7 +143,7 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
   `GetBoardWaterVehicle`。2.7.0 只是删掉了服务，游戏函数仍在；插件通过
   `anomaly.ue5.objects.find_exact` + `anomaly.ue5.process-event.invoke` 以 20 Hz
   轮询它们。getter 成功返回空表示确实不在载具上，此时不会再被冲刺速度误触发。
-  玩家胶囊 `AttachParent` 仍用于车辆锚点，并在 getter 服务不可用时作为存在性后备。
+  玩家胶囊 `AttachParent` 仍用于车辆存在性，并在 getter 服务不可用时作为后备。
   诊断面板会显示“载具存在”“速度来源”“速度符号”和“倒车”。
 - profile 门禁接受 2.7.0、3.0.0 与 3.1.0 的六个已验证 hash：2.7.0 安装包 CRLF
   `c6d97fd2...1f52`、2.7.0 仓库 LF `c37a7b3d...db2a`、3.0.0 安装包 CRLF
@@ -156,9 +156,8 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 - 3.1.0 的 profile 在 3.0.0 基础上只新增战斗/账号相关的 layout 和 symbol；插件依赖的
   相机 layout、`ue5.GWorld` 和 `HTGame.exe` 都没有变，所以偏移与 pattern 仍未改。
   3.1.0 SDK 下重新编译通过，3.1.0 测试宿主 10 次 reload / 660 tick 通过。
-- route B 只在全屏 view 上应用，并且只在 `PrepareViewStateForVisibility` 之前写一次；
-  面板的 `w N` 是历史 advisory witness 计数，早段路径不会因它跳过帧。route B 必须确定性
-  应用，否则会重新引入车辆抖动；读取撕裂时用 `held` 短暂保持上一帧机位，而不是晚段补写。
+- 两个相机钩子只在 `CalcSceneViewInitOptions` 的场景相位写视点；早段 UI 使用上一场景
+  的 pose，场景推进失败时整帧退回游戏相机。
 - 旧 ID 的启用状态、设置目录和窗口位置不会自动迁移；请按下面的手动步骤复制。
   完整变更列表见 [RELEASE-NOTES-2.0.0.md](RELEASE-NOTES-2.0.0.md)。
 
@@ -184,55 +183,56 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 本仓库是**独立的 CMake 工程**，只消费安装好的 `AnomalySDK`，不参与 Anomaly 仓库的构建，
 也不包含宿主内部头文件或对 Runtime 的修改。插件通过公开的纯 C ABI v1 服务工作：
 
-- `anomaly.interop.signature` + `anomaly.interop.hook` 解析并 hook 相机/渲染函数；
+- `anomaly.interop.signature` + `anomaly.interop.hook` 解析并 hook 两个相机函数；
 - `anomaly.nte.player` 读取玩家位置/朝向、游戏相机快照和 Pawn/Controller 对象句柄；
   车速优先由 `GetForwardSpeedKmH` 精确读取，失败时才由位置微分推导；
 - `anomaly.ue5.objects` + `anomaly.ue5.process-event`（可选）调用旧版载具 getter，
   判断当前是否在载具上，并调用 `GetForwardSpeedKmH` 读取带符号车速；
 - `anomaly.core` 的 `read_memory` 读取 `ue5.GWorld` 链和车辆/相机对象；
-- `anomaly.ue5.build`（可选）用 `profile_hash` 给 route B / FOV 的硬编码偏移做版本门禁；
+- `anomaly.ue5.build`（可选）用 `profile_hash` 给车辆/视点硬编码偏移做版本门禁；
 - `anomaly.config` + `anomaly.json` 持久化并解析设置（不依赖第三方 JSON 库）；
 - `anomaly.ui` / `anomaly.localization` 提供窗口和翻译；
 - `anomaly.ue5.names`（可选）把 `CameraViewMode.ThirdPerson` 之类的中段名字换成进程内的
   `FName` id，Z 键循环靠它判断当前档位；没有该服务时 Z 完全原生；
 - `anomaly.window`（可选）使用 2.6+ 的托管窗口；没有时退回直接 UI。
 
-### 相机与渲染路径
+### 相机与游戏线程
 
-相机模型由 `chase_cam.hpp` 推进；Game tick 只发布车辆样本，最终的追车视图在渲染线程应用：
-
-- `FPrimitiveSceneProxy::OnTransformChanged`：只发布这个渲染帧真正用于画车的车辆变换；
-  2.7 的 pattern 目前无法安全解析，插件会 fail-closed 不安装这个 hook，route B 在
-  pre-visibility 直接读车辆 proxy；
-- `FSceneRenderer::PrepareViewStateForVisibility`：**唯一**的机位写入点，在视锥裁剪和 TAA
-  历史推进之前写入最终机位；
-- `FSceneView::UpdateViewMatrix` / `SetupViewFrustum`：由上面这个写入点调用，重建视图矩阵、
-  `ViewFrustum` 和 `CullingFrustum`。
-
-**不要在 `OnTransformChanged` 或 `SetupUniformBufferParameters` 里再写机位。** 这两个位置
-可能已经晚于 `PrepareViewStateForVisibility`：裁剪、运动矢量和 TAA 历史仍描述旧机位，而最终
-画面使用新机位，表现就是行驶中偶发一帧“摄像头跳到别处/整屏半透明重影”。早段写入失败时，
-route B 最多短暂保持上一帧机位（`held`），不会退回晚段写入。
-
-route B 的最终机位由 NFS 模型和渲染线程车辆变换合成：
+相机模型由 `chase_cam.hpp` 推进。Game tick 只读取玩家/车辆并发布最近完成的车辆样本；
+真正的相机推进发生在引擎构造场景视图时：
 
 ```text
-fresh car = 渲染线程 proxy 平移（地面）
-eye.x/y   = fresh car + (NFS 模型 eye - NFS 模型 car) * (cameraDistanceM / 预设基础距离)
-eye.z     = fresh car + (NFS 模型 eye - NFS 模型 car) * (cameraHeightM / 预设基础高度)
-rotation  = NFS 模型的 pitch / yaw / roll
+UWorld::Tick
+  └ 早段的 UMG/Slate 世界坐标投影
+      └ GetViewPoint：拷贝上一场景发布的 pose
+         （此时车辆也还是上一帧最终值，二者匹配）
+
+UGameViewportClient::Draw
+  └ CalcSceneView
+      └ CalcSceneViewInitOptions 进入
+          ├ 读取 VehicleMesh ComponentToWorld（本帧最终）
+          ├ 推进一次相机模型（orbit / burnout / FOV / shake）
+          └ 发布本帧 pose
+      ├ GetProjectionData → GetViewPoint：拷贝本帧 pose
+      ├ CalcSceneView 第二次 GetViewPoint：拷贝本帧 pose
+      └ HUD PostRender：拷贝本帧 pose
+      └ CalcSceneViewInitOptions 返回后写 bInCameraCut
 ```
 
-模型原点固定在地面，用户不再配置 `originOffsetCm`。两个因子分别只作用于水平/垂直轴：
-静止时眼睛正好在 `(cameraDistanceM, cameraHeightM)`，速度/漂移/加速/坡度的增量按各自轴的
-比例缩放。
+- `ULocalPlayer::GetViewPoint`：唯一的视点写入点；早于场景的调用使用上一帧 pose，
+  场景内和场景后的调用使用本帧 pose；相机未激活、拍照/过场守卫不通过或场景推进失败时
+  原样返回游戏相机。
+- `ULocalPlayer::CalcSceneViewInitOptions`：进入时推进模型；返回后把插件声明的跳变
+  按位或进 `FSceneViewInitOptions::bInCameraCut`（`+0x2C8`），保留游戏自己的 cut。
+- 插件不在渲染线程写任何视图字段，也不写 `CameraCache.POV`；游戏相机仍然是游戏逻辑
+  看到的事实。
 
-模型 pose 暂时不可用时回退到固定的 route B 机架；再不可用时短暂保持上一帧的 route B 机位，
-仍不可用才保留游戏原相机。这样相机和车体共用渲染帧，不再依赖 game-tick 位置去追渲染帧中的车。
+车辆位置来自角色胶囊 `AttachParent` 指向的 `VehicleMesh` 的 `ComponentToWorld`：
+Game tick 读取一次用于存在性和车头朝向，场景相位再读一次用于本帧相机。没有
+`SampleRing`、渲染时钟映射或 proxy 拆分。
 
-不扫描 GObjects；`ue5.GWorld` 只在 profile pattern 命中后解析一次全局槽位。载具 getter 是
-通过 Host 的 `ue5.objects.find_exact` 和 `ue5.process-event.invoke` 调用的，不自行定位
-`ProcessEvent` 入口，也不每帧调用（20 Hz 轮询并缓存）。
+不扫描 GObjects；`ue5.GWorld` 只在 profile pattern 命中后解析一次全局槽位。载具 getter
+通过 Host 的 `ue5.objects.find_exact` 和 `ue5.process-event.invoke` 调用，20 Hz 轮询并缓存。
 
 ## 目录
 
@@ -281,18 +281,17 @@ rotation  = NFS 模型的 pitch / yaw / roll
 | `src/state.hpp` | `Context` 及各子状态结构；字段顺序即线程契约 |
 | `src/sdk.hpp` | 函数指针 typedef、SDK 支撑函数的声明、`g_*` 原子量外声明 |
 | `src/internal.hpp` | 模块间函数声明（跨 TU 用） |
-| `src/globals.cpp` | 8 个 `g_*` 原子量（detour 原始函数与活动实例） |
+| `src/globals.cpp` | 5 个 `g_*` 原子量（detour 原始函数与活动实例） |
 | `src/sdk_support.cpp` | `Status`/`Bytes`/`Query`/`*Ready`/`Read`/`Write`/`Log`/`Note*` |
 | `src/lifecycle.cpp` | `Load`/`Start`/`Stop`/`Unload`/`Update` 五个 ABI 回调 |
 | `src/game_tick.cpp` | `QueryPlayer`、运动学积分、偏航来源选择 |
 | `src/presenter.cpp` | T2 presenter 的 seqlock 写入与 `UpdateCamera`（含环绕与特写分层） |
 | `src/orbit_ui.cpp` | 环绕 HUD 的 Game 线程解析、透明度/位移动画与恢复 |
-| `src/display.cpp` | `UpdateDisplay` 与三条诊断日志 |
-| `src/hooks.cpp` | 渲染侧四个 detour 与签名解析、安装、释放 |
-| `src/camera_detour.cpp` | 相机 `view point` 主 detour |
+| `src/display.cpp` | `UpdateDisplay` 与诊断快照 |
+| `src/hooks.cpp` | 两个游戏线程 detour 的签名解析、安装、释放 |
+| `src/view_point.cpp` | 场景相位推进、视点拷贝与 cut 写入 |
 | `src/view_mode_cycle.cpp` | Z 三档循环：档位监视、切档去抖、相机守卫、进车/下车规则 |
-| `src/routeb.cpp` | Route B 位姿构造与视图写入 |
-| `src/render_x_probe.cpp` | 渲染线程车辆 X 探查与版本保险 |
+| `src/vehicle_runtime.cpp` | profile 门禁、`ue5.GWorld`/玩家链、车辆变换与存在性 |
 | `src/vehicle.cpp` | 车辆存在性与速度读取 |
 | `src/wheel_steer.cpp` | 漂移前轮反打 |
 | `src/burnout.cpp` | 烧胎探查与镜头信号 |
@@ -427,7 +426,7 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
   的职责不同。
 - 其余调整收进 **机位几何** 和 **镜头动态** 两个组，切到“自定义”才显示滑杆：视口宽高比、
   速度/加速距离倍率、侧倾强度、刹车俯仰强度、镜头震动强度与“仅在漂移时倾斜”（默认开启）。
-- **坡度跟随** 默认开启：机位随渲染线程车辆 proxy 的车身俯仰一起抬降，注视点仍保持车头水平方向，
+- **坡度跟随** 默认开启：机位随车辆 `ComponentToWorld` 的车身俯仰一起抬降，注视点仍保持车头水平方向，
   因此上下坡时相机到坡面的高度基本稳定、地平线不左右歪。NFS 的 `GradientAdjustments` 只做
   ±10° 内的次级微调：上坡 look/rest = `0.5 / 2.0`，下坡 = `0.3 / 0.25`。
 - 面板的 **坡度跟随** 组控制它：“默认 / 自定义”都跟随车身俯仰，“关闭”回到旧的 yaw-only
@@ -529,19 +528,15 @@ WSL 里可以用 `./build-mingw.sh --install D:/Games/NTE` 直接装到游戏目
 或 `slopeStrength = 0`，相机仍会跟随完整车身俯仰。坡度几何的离线验收值、构建/TestHost
 结果和实机确认记录见 [REPORT-slope-gradient.md](REPORT-slope-gradient.md)。
 
-### 锚点来源
+### 车辆变换与失败退化
 
-驾驶时车辆位置有四路来源，面板的 `Anchor` 行会显示本帧实际使用的来源：
+驾驶时车辆位置只来自角色胶囊 `AttachParent` 的 `VehicleMesh` `ComponentToWorld`。
+Game tick 用它发布存在性和车头朝向；场景相位在车辆已经跑完后重新读取同一个变换，
+因此相机和即将绘制的车共享同一帧。
 
-| 选项 | 来源 | 用途 |
-|---|---|---|
-| **X anchored** | 视点 detour 当刻读取的玩家 `root+280` | 轻量、稳定的车 root 位置 |
-| **Vehicle mesh** | 角色胶囊 `AttachParent` 的 `VehicleMesh`；优先 SceneProxy 的 `LocalToWorld`，退回 `ComponentToWorld` | 最贴近渲染器画车用的车身变换；受版本门禁保护；也是默认值 |
-| **Borrow estimate** | 用游戏相机位置反推车身（低通估计） | 兼容旧行为；FOV/motion 仍来自模型 |
-| **Pure model** | 只使用 Game-tick 的车辆样本 | 完全不让相机锁到游戏相机；用于诊断 |
-
-route B 的最终位置并不直接等于这里选中的锚点：锚点用于模型/presenter 的基准和回退；
-渲染线程的车辆 proxy 变换是最终位置的基准。`fb` 是锚点回退次数，不是车辆抖动计数。
+- profile hash 不匹配或 pattern 找不到：不安装两个相机钩子，完全使用游戏相机；
+- 车辆变换读不到：按最近样本的速度最多外推 2 帧（150 ms），超时请求一次 cut 并回到游戏相机；
+- Game tick 的玩家链与 Host 快照相差超过 1 cm 连续 3 次：视为偏移表失效，场景推进 fail-open。
 
 ### 漂移前轮反打
 
@@ -609,108 +604,74 @@ route B 的最终位置并不直接等于这里选中的锚点：锚点用于模
 
 ### NFS 镜头（FOV）
 
-**NFS 镜头（FOV）** 保持在“默认”时，route B 会把 NFS 模型算出的水平 FOV 写入当前 `FViewInfo`，并用
-`FViewMatrices` 构造函数重建整组矩阵（包括 `InvProjectionMatrix`、`ProjectionNoAAMatrix` 和
-`ScreenToClipMatrix`）；面板 `FOV` 显示实际水平 FOV。关闭后保留游戏原 FOV。
-
-FOV 写入和 route B 一样受版本门禁保护；模型 lens 不可用或值超出 1–179° 时跳过，不会写入。
+**NFS 镜头（FOV）** 保持在“默认”时，场景相位把 NFS 模型算出的水平 FOV 写入
+`FMinimalViewInfo::FOV` 和 `DesiredFOV`；面板 `FOV` 显示实际水平 FOV。关闭后保留游戏原 FOV。
+插件不写 `CameraCache.POV.FOV`。
 
 ### 相机模型时间
 
-Game tick 只写车样本；相机模型在视点 detour 中推进并发布 pose，route B 在渲染线程把模型 pose
-和这个渲染帧的车辆变换合成。渲染路径无分配、无自有锁、无日志；只用栈缓冲、原子快照和宿主
-hook lease。
+Game tick 只发布车辆样本、读取配置并清零本帧门闩；相机模型在
+`CalcSceneViewInitOptions` 进入时推进一次，随后所有消费者拷贝同一份 pose。这条路径无分配、
+无自有锁、无日志；只用栈缓冲、原子快照和宿主 hook lease。
 
 ## 状态行与诊断
 
 主窗口常用状态：
 
-- `Camera` / `View-point hook`：相机是否启用、基础视点 hook 是否成功；
-- `Anchor` + `版本门禁`：当前锚点来源、
-  `ok / hash / pattern / service / offset / off / read` 门禁结果，以及回退次数；
+- `Camera` / `View-point hook`：相机是否启用、两个游戏线程钩子是否都装好；
+- `版本门禁`：`ok / hash / pattern / service / offset / off / read`；
+- `车辆链`：Game tick 的玩家链与 Host 快照的最大差值和累计不一致次数；
+- `载具存在` / `车辆读取失败`：车辆存在性与 `AttachParent` 读取失败计数；
 - `水平 FOV`、`镜头-车辆距离（输出 / 原始）`、`速度`、`侧滑角`、`漂移量`；
 - `前轮转向`：漂移前轮视觉反打的实际角 / 目标角、前轮数量和 `active/stock` 状态；
-- `渲染钩`、`视图钩 R/G/线程`、`路线B 预应用/保持/回退/校验`：route B 各阶段的调用和
-  回退计数；`held` 是读取撕裂时短暂保持上一帧机位的次数，`w N` 是 advisory witness 计数；
-- `渲染龄` / `视图←变换龄`：route B 使用的车辆变换和视图之间差多少毫秒。
-
-诊断面板里的 `渲染 vs 代理`、`X 相位差`、`相机相对车速度/转向`、`tick 间隔`、`视野` 和
-`C px` 是定位渲染相位、帧长和锚点问题的常驻探针。它们只读取计数和样本，不参与相机计算；
-排查结束后可以忽略，不需要为了正常使用关闭。
-
-停车环绕有自己的两条状态行：`Parked orbit` 显示
-`state / blend / hold / clock / phase0 / input / speed / shake / sway / roll`，`Orbit UI hide` 显示
-`phase / was / hidden / int / rb / req / err`。前者能区分“停稳但还没进入”“正在环绕”
-“正在退出”；后者的 `rb` 是 `SetRenderOpacity` 读回是否可用，`req` 是隐藏/恢复请求数，
-`err` 是失败次数。两者的模式切换都会打一条 INFO 日志，不刷屏。
-
-Z 键循环的状态只写日志、不占窗口（计划要求本功能不新增设置/诊断项）：
-
-```text
-viewmode call #12 dir=fwd clock=... gused=0 en=1 veh=1 active=1 tag=FP ... ret=1 after=TP dec=first-to-chase
-viewmode watch: 0x3B1BE(FP) -> 0x3B1A1(TP) count=2 limit=0 veh=1 en=1 active=1 calls=3
-viewmode entry: tag=TP wanted=1 pending=0
-```
-
-- `dec` 是这次 `Z` 的判定：`chase-to-third` / `third-to-first` / `first-to-chase` /
-  对应的 `*-refused`（游戏拒绝）、`on-foot`、`blocked-limit`、`external-pass` 等；
-- `viewmode watch` 只在游戏档位真的变化时打印，用来排查"没按 Z 档位自己变了"；
-- `viewmode entry` 是进车（或车内重新启用插件）时应用的规则。
+- `视点写回次数` / `视点推进失败跳过` / `相机切镜写入` / `无视图切镜跳过` /
+  `位姿作废` / `外推帧` / `外推超时`：场景相位适配层的计数。
 
 诊断开关（`Diagnostic: ...`）会刻意关闭某些通道，仅用于二分问题：
 
 - `position and yaw only`：关闭 pitch/roll/镜头写入；
-- `zero lag, newest tick position`：绕过插值窗口；
-- `keep the Game's position` / `rotation`：保留游戏对应通道；
-- `Lock to the Game's camera (0 = pure model)`：只影响 borrow 分支的强度。
+- `keep the Game's position` / `rotation`：保留游戏对应通道。
 
 ## 版本保险与安全边界
 
-插件的 route B 会直接写 UE 的 `FViewInfo` / `FSceneRenderer` 字段，因此不能对任意游戏版本
-无条件启用。当前策略是 **fail-closed**：
+插件会直接读写 `FMinimalViewInfo`、`FSceneViewInitOptions` 和车辆对象，因此不能对任意游戏
+版本无条件启用。当前策略是 **fail-closed**：
 
 - 启动时读取 `anomaly.ue5.build` 的 `profile_hash`，只有命中 `kAcceptedProfileHashes`
   里的已验证 hash 才打开 `version_gate`；
-- 2.6+ 且 build service 存在时，门禁关闭就不创建 route B / `FViewInfo` FOV / 视点 hook，
-  也不写任何游戏内存；面板显示 `版本门禁`，相机保持游戏原样；
-- 所有需要的函数入口仍通过运行时 pattern 解析；早段 pattern 不命中会先按 2 秒窗口重试
-  5 次（避免首帧 signature 服务未就绪造成永久降级），仍失败才锁存并关闭 route B；
-  晚段诊断 pattern 不命中不影响 route B；
-- 渲染路径再次检查 render thread、全屏 view、view state、generation/新鲜度、有限值和
-  proxy 所有权；
+- 门禁关闭时不创建 `GetViewPoint` / `CalcSceneViewInitOptions` 钩子，也不写任何游戏内存；
+  面板显示 `版本门禁`，相机保持游戏原样；
+- 两个函数入口仍通过运行时 pattern 解析；pattern 不命中会按 2 秒窗口重试，仍失败则锁存并
+  保持游戏相机；
+- Game tick 的玩家链与 Host 快照相差超过 1 cm 连续 3 次，视为偏移表失效，场景推进 fail-open；
 - hook 回调使用宿主 generation lease；热重载时先撤 callback 再释放 hook。
 
 Z 键 detour 单独走**自己的**门禁，任何一条不成立就整条透传给游戏：pattern 唯一命中、
 vtable 槽双校验、`anomaly.ue5.names` 能按文本反查到 tag id、当前控制器快照可读、正在驾驶、
-本次调用来自本控制器、总开关打开。tag 读不出来时按"第三人称"处理（fail-open），这样没有
-names 服务的宿主仍然保留 2.0.3 的追车行为，只是 Z 不再循环。
+本次调用来自本控制器、总开关打开。tag 读不出来时按“第三人称”处理（fail-open），这样没有
+names 服务的宿主仍然保留追车行为，只是 Z 不再循环。
 
-**2.5 兼容**：2.5 没有可选的 build service，route B 和 `FViewInfo` FOV 写入关闭，只保留旧的
-基础视点 hook（它仍按旧路径写 CameraManager 的镜头）；2.6+ 如果 build service 存在但 hash
-不匹配，则相机完全不接管。
+**2.5 兼容**：2.5 没有可选的 build service，因此游戏线程相机不启用，只保留游戏的原始相机。
+2.6+ 如果 build service 存在但 hash 不匹配，相机同样完全不接管。
 
 这不是“任何未知版本都绝不会崩”的数学保证：如果游戏/Anomaly 更新后 profile hash 没有变化、
-但字段实际移动，或者 UE 对象在渲染线程被释放，原始内存访问仍可能触发 Windows access violation；
+但字段实际移动，或者 UE 对象在读取时被释放，原始内存访问仍可能触发 Windows access violation；
 C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加入 allowlist、复验偏移表，
 再发布新插件。
 
 ## 冲突与限制
 
-- 与 **Camera Tools**、**BetterPose** 的相机 Hook 互斥：CameraManager 的视点函数同一时间只能有一个
-  所有者。先停用其他相机插件，或在窗口里点 **Retry hook**。
+- 与 **Camera Tools**、**BetterPose** 的相机 Hook 互斥：`ULocalPlayer::GetViewPoint`
+  同一时间只能有一个所有者。先停用其他相机插件，或在窗口里点 **Retry hook**。
 - 插件不做镜头碰撞射线，贴墙时可能穿模。
-- route B 只处理全屏游戏 view；反射、场景捕获、阴影等小 view 保持游戏原相机。
 - `Camera distance (m)` 和 `Camera height (m)` 改的是相机，不改变车辆物理或游戏碰撞。
 - 本次未实现车身 roll 与腾空混合：`onGround` 仍恒为 true。跳跃/腾空时相机继续按车辆 proxy
   的俯仰跟随车头，不做空中姿态稳定。
-- route B 固定回退（模型 pose 短暂不可用时）只使用基础车身坐标架，不叠加
-  `GradientAdjustments`；与正常模型路径可能有细微高度/视线差。
-- 坡度来自渲染线程车辆 proxy 的 forward。首次加载或重置后还没有新的 proxy 变换时，会先按
-  平地姿态运行，直到下一次变换发布。
+- 坡度来自车辆 `ComponentToWorld` 的 forward。首次加载或重置后读取失败时，场景推进会
+  fail-open 到游戏相机。
 - 已知遗留：重刹车/漂移时模型仍可能出现一次点头式 pitch，当前不在本版验收范围。
 - 版本保险是**有意降级**：profile 不匹配时相机功能不会工作，优先保证不把游戏写崩；更新插件
   后再恢复。
-- 前向运动预测已移除（它会把逐帧变化的 `velocity * dt` 叠到机位上，反而放大抖动）。
 
 ## 与 Anomaly 内建版本的关系
 
@@ -729,10 +690,9 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 
 以下项目只有在未来出现明确需求或新证据时才做，不属于本版：
 
-- 把速度、车头朝向、yaw rate 从 Game-tick 差分迁移到渲染帧差分（当前 X/route B 只解决位置）；
 - 刹车重减速的点头 pitch 进行单独的模型/信号修正；
-- 如果游戏改变 `FViewInfo` / `FSceneRenderer` 布局，更新 `kAcceptedProfileHashes`、偏移表和
-  pattern，而不是放宽门禁；
+- 如果游戏改变 `FMinimalViewInfo` / `FSceneViewInitOptions` / 车辆组件布局，更新
+  `kAcceptedProfileHashes`、偏移表和 pattern，而不是放宽门禁；
 - 如 Anomaly 改变 hook 服务 ABI，升级时重新验证 `anomaly.interop.hook` 与 lease 行为。
 
 ## 发布

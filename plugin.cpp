@@ -5,30 +5,26 @@
 // persisted through `anomaly.config` and decoded through `anomaly.json`.
 //
 // Feeds the clean-room NFS 2015 chase-camera model in `chase_cam.hpp` from
-// Anomaly's NTE snapshots, then replaces the view point produced by the game's
-// camera manager. The game's own third-person camera is used as the car-yaw
-// sensor; the player snapshot supplies the car position. Anomaly 2.7.0 removed
-// `anomaly.nte.vehicle`, so vehicle presence is recovered by calling the same
-// reflected getters that service used, through `ue5.objects` +
-// `ue5.process-event`; the player capsule's AttachParent remains the anchor and
-// the fallback. Speed comes from differentiating the player position and is
-// signed against the resolved car yaw, with hysteresis for reverse. No GObjects
-// scan.
+// Anomaly's NTE snapshots and the vehicle's ComponentToWorld. The model advances
+// once at the entry of ULocalPlayer::CalcSceneViewInitOptions, and the
+// GetViewPoint detour copies that pose into the engine's FMinimalViewInfo.
+// Anomaly 2.7.0 removed `anomaly.nte.vehicle`, so vehicle presence is recovered
+// by calling the same reflected getters that service used, through
+// `ue5.objects` + `ue5.process-event`; the player capsule's AttachParent is the
+// presence fallback and the vehicle transform source. Speed comes from
+// differentiating the player position and is signed against the resolved car
+// yaw, with hysteresis for reverse. No GObjects scan.
 //
-// The `Probe` block below is the only code that reaches into the engine: it
-// resolves three reflected functions, takes the Pawn object handle and calls
-// `K2_GetActorRotation` from inside the once-per-frame AHUD callback. It is
-// read-only, it never feeds the camera, and every result is shown in the
-// diagnostics panel. See PLAN-camera-timing.md §8 P0.
+// The `Probe` block below is read-only AHUD diagnostics. It never feeds the
+// camera, and every result is shown in the diagnostics panel.
 //
 // Thread domains:
-//   on_update = Game. Reads NTE services, integrates the camera, publishes an
-//               immutable view snapshot and persists settings.
-//   detour    = whatever thread asks the camera manager for its view point.
-//               It only calls the original, copies the published snapshot to
-//               the two out-parameters, and writes the optional lens.
+//   on_update = Game. Reads NTE services, publishes the latest car sample,
+//               clears the frame gate, and persists settings.
+//   GetViewPoint / CalcSceneViewInitOptions = Game. The scene phase advances
+//               the model; every view-point call copies the published pose.
 //   on_draw   = Render. Copies the display snapshot under a short lock and
-//               calls UI outside it.
+//               calls UI outside it. No camera or game object is written here.
 
 #include "localization.hpp"
 

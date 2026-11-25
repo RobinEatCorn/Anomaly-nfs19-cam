@@ -289,8 +289,8 @@ bool PersistSettings(Context &context) noexcept {
   // never loses the user's numbers. The four group enable keys are written as
   // their effective values, so a build that predates the mode keys still turns
   // the same features on and off. The settings below the groups (the slope
-  // shape, the diagnostics and the anchor controls) have no group and are also
-  // written as their effective values.
+  // shape and the diagnostics) have no group and are also written as their
+  // effective values.
   CustomSettings custom;
   {
     std::scoped_lock lock(context.custom_settings_mutex);
@@ -384,14 +384,6 @@ bool PersistSettings(Context &context) noexcept {
       context.fov_enabled.load(std::memory_order_acquire);
   const bool diagnostic_flat_pose =
       context.diagnostic_flat_pose.load(std::memory_order_acquire);
-  const bool diagnostic_zero_lag =
-      context.diagnostic_zero_lag.load(std::memory_order_acquire);
-  const double borrow_strength =
-      context.borrow_strength.load(std::memory_order_acquire);
-  const std::uint32_t anchor_source =
-      context.anchor_source.load(std::memory_order_acquire);
-  const bool borrow_fallback =
-      context.borrow_fallback.load(std::memory_order_acquire);
   const bool diagnostic_skip_position =
       context.diagnostic_skip_position.load(std::memory_order_acquire);
   const bool diagnostic_skip_rotation =
@@ -564,14 +556,6 @@ bool PersistSettings(Context &context) noexcept {
       AppendText(cursor, end, roll_only_in_drift ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticFlatPose\":") &&
       AppendText(cursor, end, diagnostic_flat_pose ? "true" : "false") &&
-      AppendText(cursor, end, ",\"borrowStrength\":") &&
-      AppendNumber(cursor, end, borrow_strength) &&
-      AppendText(cursor, end, ",\"borrowFallback\":") &&
-      AppendText(cursor, end, borrow_fallback ? "true" : "false") &&
-      AppendText(cursor, end, ",\"anchorSource\":") &&
-      AppendNumber(cursor, end, static_cast<double>(anchor_source)) &&
-      AppendText(cursor, end, ",\"diagnosticZeroLag\":") &&
-      AppendText(cursor, end, diagnostic_zero_lag ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticSkipPosition\":") &&
       AppendText(cursor, end, diagnostic_skip_position ? "true" : "false") &&
       AppendText(cursor, end, ",\"diagnosticSkipRotation\":") &&
@@ -850,8 +834,8 @@ void ApplyAllGroups(Context &context) noexcept {
 void SetDefaults(Context &context) noexcept {
   context.enabled.store(true, std::memory_order_release);
   context.preset.store(0, std::memory_order_release);
-  // Settings that belong to no group: the slope shape, the diagnostics and the
-  // anchor controls. The grouped values below are written by ApplyAllGroups.
+  // Settings that belong to no group: the slope shape and the diagnostics.
+  // The grouped values below are written by ApplyAllGroups.
   context.slope_max_gradient_degrees.store(
       kDefaultSlopeMaxGradientDegrees, std::memory_order_release);
   context.slope_up_look_at.store(kDefaultSlopeUpLookAt,
@@ -863,13 +847,8 @@ void SetDefaults(Context &context) noexcept {
   context.slope_down_rest.store(kDefaultSlopeDownRest,
                                 std::memory_order_release);
   context.diagnostic_flat_pose.store(false, std::memory_order_release);
-  context.diagnostic_zero_lag.store(false, std::memory_order_release);
   context.diagnostic_skip_position.store(false, std::memory_order_release);
   context.diagnostic_skip_rotation.store(false, std::memory_order_release);
-  context.borrow_strength.store(1.0, std::memory_order_release);
-  context.borrow_fallback.store(kDefaultBorrowFallback,
-                                std::memory_order_release);
-  context.anchor_source.store(kAnchorSourceDefault, std::memory_order_release);
   {
     std::scoped_lock lock(context.custom_settings_mutex);
     context.custom_settings = CustomSettings{};
@@ -1119,10 +1098,6 @@ bool LoadSettings(Context &context) noexcept {
   double wheel_steer_sample_percent = kDefaultWheelSteerSamplePercent;
   bool roll_only_in_drift = true;
   bool diagnostic_flat_pose = false;
-  bool diagnostic_zero_lag = false;
-  double borrow_strength = 1.0;
-  bool borrow_fallback = kDefaultBorrowFallback;
-  double anchor_source_number = static_cast<double>(kAnchorSourceDefault);
   bool diagnostic_skip_position = false;
   bool diagnostic_skip_rotation = false;
   bool slope_follow = true;
@@ -1226,14 +1201,6 @@ bool LoadSettings(Context &context) noexcept {
                                       roll_only_in_drift));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticFlatPose",
                                       diagnostic_flat_pose));
-  static_cast<void>(JsonObjectNumber(json, root, "borrowStrength",
-                                     borrow_strength));
-  static_cast<void>(JsonObjectBoolean(json, root, "borrowFallback",
-                                      borrow_fallback));
-  static_cast<void>(JsonObjectNumber(json, root, "anchorSource",
-                                     anchor_source_number));
-  static_cast<void>(JsonObjectBoolean(json, root, "diagnosticZeroLag",
-                                      diagnostic_zero_lag));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticSkipPosition",
                                       diagnostic_skip_position));
   static_cast<void>(JsonObjectBoolean(json, root, "diagnosticSkipRotation",
@@ -1440,19 +1407,6 @@ bool LoadSettings(Context &context) noexcept {
   context.slope_down_rest.store(slope_down_rest, std::memory_order_release);
   context.diagnostic_flat_pose.store(diagnostic_flat_pose,
                                      std::memory_order_release);
-  context.borrow_strength.store(
-      nfs2015_chase::Clamp(borrow_strength, 0.0, 1.0),
-      std::memory_order_release);
-  context.borrow_fallback.store(borrow_fallback, std::memory_order_release);
-  context.anchor_source.store(
-      std::isfinite(anchor_source_number) && anchor_source_number >= 0.0 &&
-              anchor_source_number <= 3.0 &&
-              std::floor(anchor_source_number) == anchor_source_number
-          ? static_cast<std::uint32_t>(anchor_source_number)
-          : kAnchorSourceDefault,
-      std::memory_order_release);
-  context.diagnostic_zero_lag.store(diagnostic_zero_lag,
-                                    std::memory_order_release);
   context.diagnostic_skip_position.store(diagnostic_skip_position,
                                          std::memory_order_release);
   context.diagnostic_skip_rotation.store(diagnostic_skip_rotation,

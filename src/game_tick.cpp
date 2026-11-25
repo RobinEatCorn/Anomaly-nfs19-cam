@@ -85,10 +85,8 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
       context.probe_extent_z_cm = static_cast<double>(extent_z);
     }
     // T3.1: the game camera's yaw, sampled by the host on the same Game tick
-    // as the car position and delivered as a cached copy. The detour's
-    // observation is the same rotation read on the render thread at ~1400 Hz,
-    // which the 50 Hz Game tick then samples, so it aliases. Independent of
-    // the bounds sanity check above: the camera tail is usable even when the
+    // as the car position and delivered as a cached copy. Independent of the
+    // bounds sanity check above: the camera tail is usable even when the
     // bounds jump.
     if (complete && std::isfinite(esp.camera_rotation[1])) {
       context.camera_yaw_radians =
@@ -122,17 +120,6 @@ bool QueryPlayer(Context &context, double origin_cm[3], double base_cm[3],
 
 double WrappedAngle(const double angle) noexcept {
   return nfs2015_chase::WrapPi(angle);
-}
-
-// A world change, teleport, or model reset must not carry the old slope's
-// pitch into the new frame. The floor also rejects a still-fresh snapshot that
-// was published before the reset.
-void ResetRenderPitch(Context &context) noexcept {
-  context.render_pitch_valid = false;
-  context.render_pitch_radians = 0.0;
-  context.render_pitch_ns = 0;
-  context.render_pitch_floor_ns = NowNanoseconds();
-  context.render_pitch_proxy = 0;
 }
 
 bool WorldChanged(Context &context) noexcept {
@@ -299,15 +286,10 @@ void UpdateMotion(Context &context, const double origin_cm[3],
                 kAccelerationSmoothing, elapsed);
           }
         } else {
-          // D30: the new game-thread path detects teleports on consecutive
-          // scene-phase ComponentToWorld reads, where the cut can still be
-          // written into this frame's CalcSceneViewInitOptions. The on_update
-          // detection remains the source for the old render-thread A/B path,
-          // and still clears the derived-speed history in both modes.
-          if (!context.native_view_point.load(std::memory_order_relaxed)) {
-            NoteViewSnap(context, kSnapReasonTeleport);
-          }
-          ResetRenderPitch(context);
+          // D30 detects teleports on consecutive scene-phase
+          // ComponentToWorld reads, where the cut can still be written into
+          // this frame's CalcSceneViewInitOptions. The on_update path only
+          // clears the derived-speed history; it must not emit a second cut.
           // A teleport is not a brake. Clear the derived-speed history so the
           // next sample cannot turn the jump to zero into a full pitch input.
           context.last_vehicle_speed_mps = -1.0;
@@ -352,76 +334,32 @@ struct ObservedPose final {
   std::array<double, 3> rotation{};
 };
 
-// Try-read the detour's copy of the game camera pose. The detour writes it on
-// another thread; a torn or in-progress write is reported as unavailable
-// instead of spinning the Game thread.
-[[nodiscard]] bool ReadObservedPose(Context &context,
-                                    ObservedPose &pose) noexcept {
-  for (int attempt = 0; attempt < 4; ++attempt) {
-    const std::uint64_t before =
-        context.observed_sequence.load(std::memory_order_acquire);
-    if ((before & 1U) != 0) {
-      continue;
-    }
-    if (!context.observed_valid.load(std::memory_order_relaxed)) {
-      return false;
-    }
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      pose.location[axis] =
-          context.observed_location[axis].load(std::memory_order_relaxed);
-      pose.rotation[axis] =
-          context.observed_rotation[axis].load(std::memory_order_relaxed);
-    }
-    const std::uint64_t after =
-        context.observed_sequence.load(std::memory_order_acquire);
-    if (before == after) {
-      return true;
-    }
-  }
-  context.diag.observed_read_failures.fetch_add(1,
-                                                std::memory_order_relaxed);
-  return false;
-}
-
 double SelectCarYaw(Context &context, const double velocity_yaw,
                     const double velocity_mps, const bool have_velocity,
                     const bool exact_speed,
                     const double signed_speed_kmh) noexcept {
-  // The rendered vehicle proxy's chassis forward is the actual car heading.
-  // Prefer it over the game-camera yaw: the camera yaw is a smoothed look
-  // direction that lags the car (and can point at the car rather than down the
-  // road). The camera yaw remains the fallback when the proxy snapshot is
-  // missing, stale, or has no usable horizontal orientation.
+  // The Game tick reads the vehicle mesh's ComponentToWorld after the car has
+  // run. Its chassis forward is the actual car heading. Prefer it over the
+  // game-camera yaw: the camera yaw is a smoothed look direction that lags the
+  // car (and can point at the car rather than down the road). The camera yaw
+  // remains the fallback when the body sample is missing or stale.
   double body_yaw = 0.0;
-  std::uintptr_t body_proxy = 0;
   std::int64_t body_timestamp_ns = 0;
-  bool have_body_yaw = ReadRouteBBodyYaw(
-      context.render_x, body_yaw, body_proxy, body_timestamp_ns);
+  bool have_body_yaw =
+      ReadVehicleBodyYaw(context, body_yaw, body_timestamp_ns);
   if (have_body_yaw) {
-    const std::uintptr_t watched =
-        context.render_x.watched_proxy.load(std::memory_order_relaxed);
     const std::int64_t age_ns = NowNanoseconds() - body_timestamp_ns;
-    have_body_yaw = body_proxy != 0 && body_proxy == watched &&
-                    age_ns >= 0 &&
-                    age_ns <= kVehicleRenderTransformMaxAgeNs;
+    have_body_yaw =
+        age_ns >= 0 && age_ns <= kVehicleBodyYawMaxAgeNs;
   }
   // Game-camera fallback: same clock as the car position, so the reference
-  // cannot alias against a faster writer. The detour's render-thread
-  // observation is only a fallback for profiles without the ESP tail.
+  // cannot alias against a faster writer.
   double camera_yaw = 0.0;
   bool have_camera_yaw = false;
   if (context.camera_yaw_valid) {
     camera_yaw = context.camera_yaw_radians;
     have_camera_yaw = true;
   } else if (!have_body_yaw) {
-    ObservedPose observed{};
-    if (ReadObservedPose(context, observed)) {
-      const double raw = observed.rotation[1];
-      if (std::isfinite(raw)) {
-        camera_yaw = raw * kDegreesToRadians;
-        have_camera_yaw = true;
-      }
-    }
     context.diag.camera_yaw_esp_misses.fetch_add(1,
                                                 std::memory_order_relaxed);
   }
@@ -508,13 +446,9 @@ double SelectCarYaw(Context &context, const double velocity_yaw,
 }
 
 void PublishInactive(Context &context) noexcept {
-  const std::uint64_t sequence =
-      context.view_sequence.load(std::memory_order_relaxed);
-  context.view_sequence.store(sequence + 1U, std::memory_order_release);
   context.view_active.store(false, std::memory_order_release);
-  context.view_sequence.store(sequence + 2U, std::memory_order_release);
-  // The render thread uses this to drop any latched shot: the next activation
-  // is a fresh entry, not a continuation of the pose that was left behind.
+  // The next activation is a fresh entry, not a continuation of the pose that
+  // was left behind.
   context.view_epoch.fetch_add(1U, std::memory_order_relaxed);
   // Re-entering the camera must not blend from the view that was active
   // before the player stopped driving. D29: drop the published pose and the
@@ -523,9 +457,6 @@ void PublishInactive(Context &context) noexcept {
   NoteViewSnap(context, kSnapReasonInactive);
   InvalidatePresenterPose(context);
   ClearSceneCarTracking(context);
-  if (context.last_view_active && context.last_fov_enabled) {
-    context.fov_restore.store(true, std::memory_order_release);
-  }
   context.last_view_active = false;
   context.last_fov_enabled = false;
 }
@@ -539,34 +470,6 @@ void ActivateView(Context &context, const bool fov_enabled) noexcept {
   context.last_view_active = true;
   context.last_fov_enabled = fov_enabled;
   context.view_active.store(true, std::memory_order_release);
-}
-
-[[nodiscard]] bool ViewHistoryJumped(
-    const std::array<double, 3> &old_location,
-    const std::array<double, 3> &old_rotation,
-    const std::array<double, 3> &new_location,
-    const std::array<double, 3> &new_rotation) noexcept {
-  const double dx = new_location[0] - old_location[0];
-  const double dy = new_location[1] - old_location[1];
-  const double dz = new_location[2] - old_location[2];
-  if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz) ||
-      dx * dx + dy * dy + dz * dz >
-          kViewHistorySnapDistanceCm * kViewHistorySnapDistanceCm) {
-    return true;
-  }
-  for (std::size_t axis = 0; axis < 3; ++axis) {
-    if (!std::isfinite(old_rotation[axis]) ||
-        !std::isfinite(new_rotation[axis])) {
-      return true;
-    }
-    const double delta = WrappedAngle(
-        (new_rotation[axis] - old_rotation[axis]) * kDegreesToRadians);
-    if (std::fabs(delta) >
-        kViewHistorySnapAngleDegrees * kDegreesToRadians) {
-      return true;
-    }
-  }
-  return false;
 }
 
 }  // namespace nfs2015_chase_cam::detail

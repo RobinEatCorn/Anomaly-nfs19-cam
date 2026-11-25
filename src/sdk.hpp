@@ -14,7 +14,6 @@ namespace nfs2015_chase_cam::detail {
 
 using anomaly::sdk::StringView;
 
-using CameraViewPointFn = void(ANOMALY_CALL *)(void *, double *, double *);
 // ULocalPlayer::GetViewPoint(FMinimalViewInfo&). The engine object is a
 // 0xC70-byte value owned by the caller; the plugin only reads/writes the
 // prefix described by MinimalViewInfo.
@@ -30,30 +29,6 @@ using CalcSceneViewInitOptionsFn = bool(ANOMALY_CALL *)(
 // compiler canonicalise a value the game did not produce. The detour forwards
 // and returns exactly the byte it received.
 using ToggleViewModeFn = std::uint8_t(ANOMALY_CALL *)(void *, std::uint8_t);
-// The virtual transform notification. The second argument is the scene/command
-// context SetTransform forwards; it is passed through unchanged.
-using OnTransformChangedFn = void(ANOMALY_CALL *)(void *, void *);
-// FViewInfo::SetupUniformBufferParameters. The first four arguments are
-// pointers; the fifth is a small flag and the sixth an output pointer. It runs
-// late in the renderer's view setup, once per view, and is the stable place to
-// observe the view the renderer is actually about to use.
-using SetupUniformBufferFn = void(ANOMALY_CALL *)(void *, void *, void *,
-                                                  void *, std::uint64_t,
-                                                  void *) noexcept;
-// FViewMatrices::FViewMatrices(const FSceneViewInitOptions&). The constructor
-// derives all view/projection matrices from the supplied rotation/projection
-// and origin. Calling it is preferable to reimplementing its derived matrices.
-using ViewMatricesCtorFn = void(ANOMALY_CALL *)(void *, const void *) noexcept;
-// FSceneRenderer::PrepareViewStateForVisibility. Called once per renderer
-// immediately before visibility tasks are launched; the second argument points
-// at the scene textures config embedded in the renderer.
-using PrepareViewStateFn = void(ANOMALY_CALL *)(void *, const void *) noexcept;
-// FSceneView::UpdateViewMatrix() and the static FSceneView::SetupViewFrustum().
-// The former rebuilds ViewMatrices from ViewLocation/ViewRotation; the latter
-// derives both ViewFrustum and CullingFrustum afterwards.
-using SceneViewUpdateMatrixFn = void(ANOMALY_CALL *)(void *) noexcept;
-using SceneViewSetupFrustumFn = void(ANOMALY_CALL *)(void *) noexcept;
-
 template <typename Struct, typename Field>
 bool HasField(const Struct *value, const std::size_t offset) noexcept {
   return value != nullptr && value->struct_size >= offset + sizeof(Field);
@@ -148,7 +123,6 @@ void NoteDetourThread(Context &context) noexcept;
 // The installed detour originals. Written once under the hook lock while the
 // hook is installed and read on the hook's own thread afterwards.
 extern std::atomic<Context *> g_active;
-extern std::atomic<CameraViewPointFn> g_original;
 extern std::atomic<LocalPlayerGetViewPointFn>
     g_local_player_get_view_point_original;
 extern std::atomic<CalcSceneViewInitOptionsFn>
@@ -158,11 +132,5 @@ extern std::atomic<ToggleViewModeFn> g_toggle_view_mode_original;
 // releasing any one camera hook clears `g_active`, and a toggle that silently
 // stopped being observed would look exactly like a Z key that does nothing.
 extern std::atomic<Context *> g_view_mode_context;
-extern std::atomic<OnTransformChangedFn> g_on_transform_changed_original;
-extern std::atomic<SetupUniformBufferFn> g_setup_uniform_buffer_original;
-extern std::atomic<ViewMatricesCtorFn> g_view_matrices_ctor;
-extern std::atomic<PrepareViewStateFn> g_prepare_view_state_original;
-extern std::atomic<SceneViewUpdateMatrixFn> g_scene_view_update_matrix;
-extern std::atomic<SceneViewSetupFrustumFn> g_scene_view_setup_frustum;
 
 }  // namespace nfs2015_chase_cam::detail

@@ -497,21 +497,21 @@ bool ResolveNameText(Context &context, const std::uint32_t id, char *out,
 // controller switches between, so the ids cannot disagree with the names -- and
 // it doubles as the shape check the takeover needs: exactly two modes, spelling
 // ThirdPerson and FirstPerson.
-// The `ue5.GWorld` slot. The render-side probe resolves the same pattern under
+// The `ue5.GWorld` slot. The vehicle runtime resolves the same pattern under
 // the profile-hash gate and publishes the slot; when that path has not run yet
-// (or is idle because the camera is inactive) this resolves it locally, once
-// per retry window, without writing to the probe's state.
+// this resolves it locally, once per retry window, without writing to the
+// runtime's state.
 bool ResolveWorldSlot(Context &context, std::uintptr_t &slot) noexcept {
   slot = context.view_mode.world_slot.load(std::memory_order_relaxed);
   if (slot != 0) {
     return true;
   }
-  slot = context.render_x.gworld_slot;
+  slot = context.vehicle_runtime.gworld_slot;
   if (slot != 0) {
     context.view_mode.world_slot.store(slot, std::memory_order_relaxed);
     return true;
   }
-  if (context.render_x.insurance_state != kAnchorInsuranceReady) {
+  if (context.vehicle_runtime.profile_state != kProfileGateReady) {
     return false;
   }
   std::uintptr_t instruction{};
@@ -746,7 +746,7 @@ void MonitorViewMode(Context &context) noexcept {
   std::memcpy(&count, raw + 0x10, sizeof(count));
   std::memcpy(&limit, raw + 0x18, sizeof(limit));
 
-  // Publish before the change filter: the presenter and the render-thread guard
+  // Publish before the change filter: the presenter and the chase guard
   // read this copy, and it must be this tick's value, not the last edge's.
   state.published_tag.store(tag, std::memory_order_relaxed);
   state.published_tag_known.store(true, std::memory_order_release);

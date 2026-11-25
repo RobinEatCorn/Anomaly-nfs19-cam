@@ -42,8 +42,8 @@ static_assert(sizeof(MinimalViewInfo) == 0x38);
 [[nodiscard]] bool ApplyViewPoint(Context &context,
                                   MinimalViewInfo &view) noexcept;
 
-// Detours installed only when the temporary A/B switch selects the game-thread
-// path. Both call the original first and are fail-open on a missing trampoline.
+// The two game-thread detours. Both call the original first and are fail-open
+// on a missing trampoline.
 void ANOMALY_CALL LocalPlayerViewPointDetour(const void *self,
                                              void *out) noexcept;
 bool ANOMALY_CALL CalcSceneViewInitOptionsDetour(

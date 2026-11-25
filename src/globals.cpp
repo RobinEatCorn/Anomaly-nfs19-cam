@@ -5,16 +5,9 @@
 namespace nfs2015_chase_cam::detail {
 
 std::atomic<Context *> g_active{};
-std::atomic<CameraViewPointFn> g_original{};
 std::atomic<LocalPlayerGetViewPointFn> g_local_player_get_view_point_original{};
 std::atomic<CalcSceneViewInitOptionsFn> g_calc_scene_view_init_options_original{};
 std::atomic<ToggleViewModeFn> g_toggle_view_mode_original{};
 std::atomic<Context *> g_view_mode_context{};
-std::atomic<OnTransformChangedFn> g_on_transform_changed_original{};
-std::atomic<SetupUniformBufferFn> g_setup_uniform_buffer_original{};
-std::atomic<ViewMatricesCtorFn> g_view_matrices_ctor{};
-std::atomic<PrepareViewStateFn> g_prepare_view_state_original{};
-std::atomic<SceneViewUpdateMatrixFn> g_scene_view_update_matrix{};
-std::atomic<SceneViewSetupFrustumFn> g_scene_view_setup_frustum{};
 
 }  // namespace nfs2015_chase_cam::detail

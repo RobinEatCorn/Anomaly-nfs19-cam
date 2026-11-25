@@ -221,7 +221,7 @@ void ResetVehicleObjectCaches(Context &context) noexcept {
   context.vehicle_query_speed_kmh = 0.0;
   // Keep the 20 Hz poll deadline and the camera's presence identity: a
   // ue5.objects generation change invalidates handles, not the vehicle or the
-  // camera history. Resetting them here made route B/identity churn while
+  // camera history. Resetting them here made the identity path churn while
   // streaming.
   context.vehicle_speed_object = 0;
   context.vehicle_speed_function = {};

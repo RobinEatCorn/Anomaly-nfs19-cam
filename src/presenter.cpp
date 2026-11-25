@@ -19,8 +19,8 @@ namespace nfs2015_chase_cam::detail {
 // Measured against the car, the eye sat one tick of travel behind and caught up
 // in bursts (655 m/s against a 670 mm tick step).
 //
-// Now the Game tick only publishes samples and the render thread advances the
-// springs, so velocity is continuous by construction.
+// The camera model advances once at the scene-view phase, after the vehicle
+// has run, so the eye and the car share one tick.
 
 bool TryLockPresenter(Context &context) noexcept {
   return !context.presenter_lock.test_and_set(std::memory_order_acquire);
@@ -42,12 +42,12 @@ void LockPresenter(Context &context) noexcept {
 // Ask the render side to restart the model. The epoch travels with the samples,
 // so the renderer notices even if it was not running at the time.
 void RequestPresenterReset(Context &context) noexcept {
-  ResetRenderPitch(context);
   context.chase_initialized = false;
   ++context.sample_epoch;
 }
 
-// The model owns its state; other render threads must read a consistent pose.
+// The model owns its state; the scene detour and the Game tick coordinate
+// through this lock.
 void PublishPresenterPose(Context &context, const double location[3],
                           const double rotation[3], const double car_cm[3],
                           const float lens, const bool fov_enabled) noexcept {
@@ -185,53 +185,9 @@ void PublishOrbitReset(Context &context) noexcept {
   return false;
 }
 
-void PublishRouteBModelPose(Context &context,
-                            const nfs2015_chase::CarSample &sample,
-                            const nfs2015_chase::CameraState &view,
-                            const std::int64_t now_ns) noexcept {
-  RenderXProbe &probe = context.render_x;
-  probe.route_b_model_sequence.fetch_add(1, std::memory_order_acq_rel);
-  for (std::size_t axis = 0; axis < 3; ++axis) {
-    const double model_car =
-        axis == 0 ? sample.car.position.x
-                  : (axis == 1 ? sample.car.position.y
-                               : sample.car.position.z);
-    const double model_eye =
-        axis == 0 ? view.position.x
-                  : (axis == 1 ? view.position.y : view.position.z);
-    const double model_rotation =
-        axis == 0 ? view.pitch_degrees
-                  : (axis == 1 ? view.yaw_degrees : view.roll_degrees);
-    probe.route_b_model_car_cm[axis].store(model_car * 100.0,
-                                           std::memory_order_relaxed);
-    probe.route_b_model_eye_cm[axis].store(model_eye * 100.0,
-                                           std::memory_order_relaxed);
-    probe.route_b_model_rotation[axis].store(model_rotation,
-                                             std::memory_order_relaxed);
-  }
-  const nfs2015_chase::CameraRigFactors factors =
-      nfs2015_chase::CameraRigFactorsFor(
-          context.chase.config().rest, sample.camera_distance_m,
-          sample.camera_height_m);
-  probe.route_b_model_distance_scale.store(factors.distance,
-                                           std::memory_order_relaxed);
-  probe.route_b_model_height_scale.store(factors.height,
-                                         std::memory_order_relaxed);
-  probe.route_b_model_lens.store(
-      sample.fov_enabled
-          ? static_cast<float>(
-                view.HorizontalFovDegrees(sample.aspect_ratio))
-          : 0.0F,
-      std::memory_order_relaxed);
-  probe.route_b_model_ns.store(now_ns, std::memory_order_relaxed);
-  probe.route_b_model_valid.store(true, std::memory_order_relaxed);
-  probe.route_b_model_sequence.fetch_add(1, std::memory_order_release);
-}
-
-// Task group 5: publish the completed Game-tick sample for the game-thread
-// adapter. The ring is still written for the old render-thread path until task
-// group 7, but the new path never interpolates: it reads this snapshot once per
-// frame and replaces the transform with a live ComponentToWorld read.
+// Publish the completed Game-tick sample for the game-thread adapter. The
+// scene view reads this snapshot once per frame and replaces the transform with
+// a live ComponentToWorld read.
 void PublishLatestCarSample(
     Context &context, const nfs2015_chase::CarSample &sample) noexcept {
   const std::uint64_t sequence =
@@ -293,10 +249,9 @@ void ClearSceneCarTracking(Context &context) noexcept {
 // Returns false when there is nothing to present (no sample yet, or another
 // thread is advancing and no cached pose exists).
 bool AdvancePresenter(Context &context, const std::int64_t now_ns,
-                      const double *game_eye_cm, double location[3],
-                      double rotation[3], float *lens, bool *fov_enabled,
-                      bool *advanced, const bool dedupe_same_frame,
-                      const nfs2015_chase::CarSample *provided_sample) noexcept {
+                      const nfs2015_chase::CarSample &provided_sample,
+                      double location[3], double rotation[3], float *lens,
+                      bool *fov_enabled, bool *advanced) noexcept {
   *advanced = false;
   if (!TryLockPresenter(context)) {
     return ReadPresenterPose(context, location, rotation, lens, fov_enabled);
@@ -306,59 +261,7 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     ~Unlock() { UnlockPresenter(context); }
   } unlock{context};
 
-  // The old render detour runs once per render pass, and one frame has many
-  // passes. If every pass advanced the model, the model time would be the
-  // pass-to-pass interval (a noisy fraction of a millisecond), not the frame
-  // interval. Advance once per frame and hand every later pass of that frame
-  // the cached pose. The new game-thread path sets `dedupe_same_frame` false:
-  // its pose_attempted/pose_ready flags already guarantee one advance at the
-  // scene-view phase, and a time threshold would skip legitimate advances on
-  // >120 Hz displays.
-  if (dedupe_same_frame &&
-      context.presenter_pose_valid.load(std::memory_order_relaxed)) {
-    const std::int64_t since = now_ns - context.presenter_pose_ns;
-    if (since >= -kPresenterSameFrameNs && since < kPresenterSameFrameNs) {
-      return ReadPresenterPose(context, location, rotation, lens, fov_enabled,
-                              nullptr);
-    }
-  }
-
-  nfs2015_chase::CarSample sample;
-  bool sampled = false;
-  if (provided_sample != nullptr) {
-    // The game-thread path builds this sample at the scene-view advance. It
-    // already carries the live ComponentToWorld position and attitude; do not
-    // run it through the render-clock ring or the borrow anchor.
-    sample = *provided_sample;
-    sampled = true;
-  } else {
-    // Look back one and a half mean intervals. More than one interval keeps the
-    // target strictly inside a bracket, so the ring interpolates instead of
-    // clamping at its edge; the mean rather than the last measurement keeps the
-    // target from dancing with the interval's own jitter. When a tick arrives
-    // late the target runs past the newest sample, and the ring continues along
-    // the newest pair rather than freezing there.
-    const double mean_interval_ns =
-        context.sample_mean_interval_ns.load(std::memory_order_relaxed);
-    constexpr double kSampleDelayFactor = 1.5;
-    const double delay_ns = mean_interval_ns * kSampleDelayFactor;
-    const bool zero_lag =
-        context.diagnostic_zero_lag.load(std::memory_order_relaxed);
-    // The curved sample, not the linear one. Linear interpolation is continuous
-    // in position and discontinuous in velocity, so the eye's speed steps at
-    // every Game tick and the whole world's flow rate steps with it. The
-    // projection instrument cannot see that: it projects the car, which travels
-    // with the camera, so the car stays still while the picture jolts. W, the
-    // camera's own speed jump, is the number that sees it, and this curve is
-    // what it is for.
-    sampled = zero_lag
-                  ? context.car_ring.Latest(sample)
-                  : context.car_ring.AtSmooth(
-                        now_ns - static_cast<std::int64_t>(delay_ns), sample);
-  }
-  if (!sampled) {
-    return false;
-  }
+  nfs2015_chase::CarSample sample = provided_sample;
   if (!sample.driving) {
     // The car disappeared (exit / world change). Do not leave a latched shot
     // waiting to resume at full blend when the next vehicle appears.
@@ -367,180 +270,6 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     context.presenter_burnout_side.store(1, std::memory_order_relaxed);
     PublishOrbitReset(context);
     return false;
-  }
-
-  // A bumped epoch means the model must restart (world change, teleport,
-  // preset switch). Restart the offset estimate too, so it initialises from
-  // the current frame instead of converging over a third of a second.
-  if (context.presenter_initialized && context.presenter_epoch != sample.epoch) {
-    context.game_offset_valid = false;
-    context.game_offset_last_ns = 0;
-  }
-
-  // Anchor the model to the car position produced at this detour instant.
-  // Four sources, selected by `anchor_source`:
-  //   X       the player root+280 read the same detour took (task group 1),
-  //   Vehicle the player capsule's AttachParent (VehicleMesh) scene proxy
-  //           LocalToWorld, with the component transform as fallback,
-  //   Borrow  the old game-camera estimate,
-  //   Model   the untouched Game-tick sample.
-  // X only enters the anchor; velocity and yaw still come from the Game tick.
-  if (provided_sample == nullptr && game_eye_cm != nullptr) {
-    const double our_car_cm[3] = {
-        sample.car.position.x * 100.0, sample.car.position.y * 100.0,
-        sample.car.position.z * 100.0};
-    const double borrow_strength =
-        context.borrow_strength.load(std::memory_order_relaxed);
-    const bool borrow_fallback =
-        context.borrow_fallback.load(std::memory_order_relaxed);
-    const std::uint32_t anchor_source =
-        context.anchor_source.load(std::memory_order_relaxed);
-    double raw_est_cm[3]{};
-
-    bool x_valid = false;
-    if (anchor_source == kAnchorSourceX ||
-        anchor_source == kAnchorSourceVehicle) {
-      x_valid =
-          context.render_x.anchor_enabled.load(std::memory_order_acquire) &&
-          context.render_x.anchor_valid.load(std::memory_order_acquire);
-      if (x_valid) {
-        const std::int64_t age =
-            now_ns - context.render_x.anchor_ns.load(std::memory_order_relaxed);
-        x_valid = age >= 0 && age <= kAnchorSnapshotMaxAgeNs;
-      }
-    }
-    bool vehicle_valid = false;
-    if (anchor_source == kAnchorSourceVehicle) {
-      vehicle_valid =
-          context.render_x.anchor_enabled.load(std::memory_order_acquire) &&
-          context.render_x.vehicle_anchor_valid.load(
-              std::memory_order_acquire);
-      if (vehicle_valid) {
-        const std::int64_t age =
-            now_ns - context.render_x.vehicle_anchor_ns.load(
-                         std::memory_order_relaxed);
-        vehicle_valid = age >= 0 && age <= kAnchorSnapshotMaxAgeNs;
-      }
-      if (!vehicle_valid) {
-        context.render_x.vehicle_fallbacks.fetch_add(
-            1, std::memory_order_relaxed);
-      }
-    }
-
-    if (anchor_source == kAnchorSourceVehicle && vehicle_valid) {
-      // The vehicle source reads the capsule's AttachParent (the `VehicleMesh`
-      // SkeletalMesh) in the same detour pass. Its ComponentToWorld is the
-      // chassis transform the renderer uses; the capsule's own origin is the
-      // seat, a child transform that can lag the rendered car.
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        raw_est_cm[axis] = context.render_x.vehicle_anchor_cm[axis].load(
-            std::memory_order_relaxed);
-      }
-      raw_est_cm[2] -= kVehicleAnchorCenterHeightCm;
-      context.game_offset_valid = false;
-      context.game_offset_last_ns = 0;
-      context.render_x.last_used.store(kAnchorStateVehicle,
-                                       std::memory_order_relaxed);
-    } else if (anchor_source == kAnchorSourceX && x_valid) {
-      // X is the raw `root+280` (the body centre); the model origin is the
-      // fixed ground, so subtract the centre height exactly as game_tick does.
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        raw_est_cm[axis] =
-            context.render_x.anchor_cm[axis].load(std::memory_order_relaxed);
-      }
-      raw_est_cm[2] -= kVehicleAnchorCenterHeightCm;
-      // The borrow offset is not tracking in this mode. If the X path falls
-      // back, the offset re-initialises from the current Game camera instead
-      // of resuming a stale estimate.
-      context.game_offset_valid = false;
-      context.game_offset_last_ns = 0;
-      context.render_x.last_used.store(kAnchorStateX,
-                                       std::memory_order_relaxed);
-    } else if (anchor_source == kAnchorSourceVehicle && x_valid) {
-      // The vehicle parent was unavailable this frame (on foot, or a read that
-      // did not validate). The character X is a better fallback than borrow.
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        raw_est_cm[axis] =
-            context.render_x.anchor_cm[axis].load(std::memory_order_relaxed);
-      }
-      raw_est_cm[2] -= kVehicleAnchorCenterHeightCm;
-      context.game_offset_valid = false;
-      context.game_offset_last_ns = 0;
-      context.render_x.last_used.store(kAnchorStateX,
-                                       std::memory_order_relaxed);
-    } else if (anchor_source == kAnchorSourceModel) {
-      for (std::size_t axis = 0; axis < 3; ++axis) {
-        raw_est_cm[axis] = our_car_cm[axis];
-      }
-      context.game_offset_valid = false;
-      context.game_offset_last_ns = 0;
-      context.render_x.last_used.store(kAnchorStateDisabled,
-                                       std::memory_order_relaxed);
-    } else {
-      if (anchor_source == kAnchorSourceX ||
-          anchor_source == kAnchorSourceVehicle) {
-        context.render_x.anchor_fallbacks.fetch_add(
-            1, std::memory_order_relaxed);
-      }
-      if (!borrow_fallback && anchor_source != kAnchorSourceBorrow) {
-        // The snapshot is missing or older than the freshness window, and the
-        // borrow estimate is not allowed as a substitute. Switching estimators
-        // for one frame puts the eye wherever the game camera happened to be,
-        // which can be metres away: the car jumps in frame and the background
-        // does not, exactly the shape of the reported twitch. Keep the tick
-        // sample instead; during the stall that made the snapshot stale the
-        // tick is frozen too, so this is continuous rather than a jump.
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-          raw_est_cm[axis] = our_car_cm[axis];
-        }
-        context.game_offset_valid = false;
-        context.game_offset_last_ns = 0;
-        context.render_x.last_used.store(kAnchorStateDisabled,
-                                         std::memory_order_relaxed);
-      } else {
-        const double borrow_dt =
-            context.game_offset_last_ns == 0
-                ? 0.0
-                : static_cast<double>(now_ns -
-                                      context.game_offset_last_ns) *
-                      1e-9;
-        context.game_offset_last_ns = now_ns;
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-          const double offset = game_eye_cm[axis] - our_car_cm[axis];
-          if (!context.game_offset_valid) {
-            context.game_offset_cm[axis] = offset;
-          } else if (borrow_dt > 1e-5 && borrow_dt < 0.2) {
-            constexpr double kGameOffsetRate = 3.3;
-            const double blend =
-                1.0 - std::exp(-kGameOffsetRate * borrow_dt);
-            context.game_offset_cm[axis] +=
-                (offset - context.game_offset_cm[axis]) * blend;
-          }
-          raw_est_cm[axis] =
-              game_eye_cm[axis] - context.game_offset_cm[axis];
-        }
-        context.game_offset_valid = true;
-        context.render_x.last_used.store(kAnchorStateBorrow,
-                                         std::memory_order_relaxed);
-      }
-    }
-
-    // `borrow_strength` still interpolates between the plain tick sample and
-    // the selected source, so 0 is the pure model and 1 is fully anchored.
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      const double car_cm =
-          our_car_cm[axis] +
-          (raw_est_cm[axis] - our_car_cm[axis]) * borrow_strength;
-      if (axis == 0) {
-        sample.car.position.x = car_cm / 100.0;
-      } else if (axis == 1) {
-        sample.car.position.y = car_cm / 100.0;
-      } else {
-        sample.car.position.z = car_cm / 100.0;
-      }
-      sample.anchor_cm[axis] = car_cm;
-      sample.origin_cm[axis] = car_cm;
-    }
   }
 
   // Entering or leaving the chase slot bumps the view epoch. Drop the orbit so
@@ -631,8 +360,9 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     // blend pivot itself has no 0.772 m forward offset (BlendShotAroundCarPivot
     // only takes a height), so the entry path circles the car origin while the
     // steady-state orbit circles the shifted pivot. That mismatch predates the
-    // current layers and is left alone on purpose; if an A/B shows a sideways
-    // step at the end of the entry, this is the place to look first.
+    // current layers and is left alone on purpose; if a real-machine test
+    // shows a sideways step at the end of the entry, this is the place to look
+    // first.
     view = nfs2015_chase::BlendShotAroundCarPivot(
         chase_view, orbit.view, sample.car, orbit.blend,
         orbit_config.look_at_height_m);
@@ -674,9 +404,9 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
         context.burnout_hold_speed.load(std::memory_order_acquire);
     shot_config.slope_follow =
         context.slope_follow.load(std::memory_order_acquire);
-    // The presenter / route B still applies the user's metric rig scale once,
-    // around the car origin, after the blend. Scaling the shot locally as well
-    // would square that value (0.6 -> 0.36) and pull the close-up into the car.
+    // The presenter still applies the user's metric rig scale once, around
+    // the car origin, after the blend. Scaling the shot locally as well would
+    // square that value (0.6 -> 0.36) and pull the close-up into the car.
     shot_config.camera_scale = 1.0;
     context.burnout_shot.SetConfig(shot_config);
     const nfs2015_chase::BurnoutShotResult burnout =
@@ -695,9 +425,9 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
     context.presenter_burnout_blend.store(0.0, std::memory_order_relaxed);
     context.presenter_burnout_side.store(1, std::memory_order_relaxed);
   }
-  // A disabled game FOV must not be changed by the shot. The route B publisher
-  // already writes lens=0 in that case; restoring the chase vertical FOV here
-  // keeps the CameraState consistent for any other consumer.
+  // A disabled game FOV must not be changed by the shot. The view adapter
+  // publishes lens=0 in that case; restoring the chase vertical FOV here keeps
+  // the CameraState consistent for any other consumer.
   if (!sample.fov_enabled) {
     view.fov_y_degrees = chase_view.fov_y_degrees;
   }
@@ -705,8 +435,6 @@ bool AdvancePresenter(Context &context, const std::int64_t now_ns,
       nfs2015_chase::CameraRigFactorsFor(
           context.chase.config().rest, sample.camera_distance_m,
           sample.camera_height_m);
-  PublishRouteBModelPose(context, sample, view, now_ns);
-
   // Scale around the fixed ground origin per axis. x/y use the distance factor
   // and z uses the height factor, so the two metric sliders are independent;
   // the model's dynamics ride along on their own axis. The anchor is kept in
@@ -931,40 +659,36 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   AnomalyGenerationHandleV1 player_handle{};
   const bool player_valid = QueryPlayer(context, origin_cm, base_cm,
                                         player_sequence, player_handle);
-  // Task group 0 probe: cache the pawn chain and publish the snapshot the
-  // render-thread read is compared with. Read-only; the camera ignores it.
-  UpdateRenderXProbe(context, base_cm, player_valid);
-  // The camera anchor is the Pawn root location that `QueryPlayer` already
-  // fills. `base_cm` cancels out of the published world position (the detour
-  // adds it back), so it only has to be stable and cheap. Resolving the
-  // rendered body through `component_bounds` used to cost ~2 ms of the Game
-  // tick: the host walks the class's whole reflected property list by name on
-  // every call, decoding an FName twice per property and reading it through
-  // ReadProcessMemory. Nothing about the camera needs that.
+  // Resolve the profile/GWorld gate, cache the pawn chain and publish the
+  // vehicle presence/body-yaw sample. The camera still reads the live
+  // ComponentToWorld at the scene-view phase.
+  UpdateVehicleRuntime(context, base_cm, player_valid);
+  // `base_cm` is the same-chain control for the vehicle runtime; the camera
+  // position itself comes from the scene-phase ComponentToWorld read.
   // Anomaly 2.7.0 removed `anomaly.nte.vehicle`, not the game's vehicle
   // getters. Poll the same reflected functions the old Host snapshot used:
   // BP_GetCurrentDriveVehicle / BP_GetCurrentDirvingVehicle /
   // GetBoardWaterVehicle. Their answer is authoritative even when parked; the
-  // AttachParent sample remains the anchor source and the fallback when the
-  // generic UE5 services are unavailable.
-  RenderXProbe &render_x = context.render_x;
+  // AttachParent sample remains the presence fallback when the generic UE5
+  // services are unavailable.
+  VehicleRuntime &vehicle_runtime = context.vehicle_runtime;
   const VehiclePresence vehicle_query =
       enabled && player_valid ? QueryVehiclePresence(context)
                               : VehiclePresence{};
   const std::int64_t now_ns = NowNanoseconds();
   const std::int64_t vehicle_sample_ns =
-      render_x.vehicle_sample_ns.load(std::memory_order_relaxed);
+      vehicle_runtime.vehicle_sample_ns.load(std::memory_order_relaxed);
   const bool attach_sample_fresh =
       vehicle_sample_ns > 0 && now_ns >= vehicle_sample_ns &&
       now_ns - vehicle_sample_ns <= kVehiclePresenceFreshNs;
   const bool attach_present_fresh =
       attach_sample_fresh &&
-      render_x.vehicle_present.load(std::memory_order_acquire);
+      vehicle_runtime.vehicle_present.load(std::memory_order_acquire);
   const bool presence_known = vehicle_query.known || attach_sample_fresh;
   const bool presence_now =
       vehicle_query.known ? vehicle_query.present : attach_present_fresh;
   const std::uintptr_t vehicle_parent =
-      render_x.vehicle_parent.load(std::memory_order_relaxed);
+      vehicle_runtime.vehicle_parent.load(std::memory_order_relaxed);
   if (presence_now) {
     context.last_vehicle_present_time = context.elapsed;
   }
@@ -1212,10 +936,10 @@ void UpdateCamera(Context &context, const double dt) noexcept {
   car.position = {origin_cm[0] / 100.0, origin_cm[1] / 100.0,
                   origin_cm[2] / 100.0};
   car.yaw = car_yaw;
-  // The Game-tick snapshot has no body attitude; the rendered vehicle proxy is
-  // the only source for the slope frame. A fresh pitch is held briefly across
-  // a missed render frame and zeroed after a reset or teleport.
-  car.pitch = UpdateRenderPitch(context);
+  // This sample only carries derivative facts. The scene-view advance reads
+  // the live ComponentToWorld and overwrites the position, yaw and body pitch
+  // with the transform the renderer is about to draw.
+  car.pitch = 0.0;
   car.velocity = world_velocity;
   car.yaw_rate = context.yaw_rate;
   nfs2015_chase::Vec3 acceleration{
@@ -1254,8 +978,8 @@ void UpdateCamera(Context &context, const double dt) noexcept {
                    context.burnout_signals.steering_known, context.reversing,
                    dt);
 
-  // T2: the tick no longer advances the model - it publishes a car sample and
-  // the render thread integrates the springs on its own clock.
+  // The tick does not advance the model; it publishes the car sample and the
+  // scene-view phase integrates the springs with the live transform.
   {
     nfs2015_chase::CarSample sample;
     sample.time_ns = NowNanoseconds();
@@ -1296,12 +1020,6 @@ void UpdateCamera(Context &context, const double dt) noexcept {
     }
     context.sample_last_ns = sample.time_ns;
     PublishLatestCarSample(context, sample);
-    // The old render-thread path still needs its interpolation ring. The new
-    // game-thread path reads the snapshot above instead and never touches the
-    // ring; task group 7 removes this branch with the old path.
-    if (!context.native_view_point.load(std::memory_order_relaxed)) {
-      context.car_ring.Write(sample);
-    }
     // The sample above is published in every slot, not only the chase one: the
     // spring model has to be warm when FP -> chase flips this flag inside the
     // toggle call, or the pose would start from a stale anchor.

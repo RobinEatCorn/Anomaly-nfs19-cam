@@ -65,8 +65,6 @@ void UpdateDisplay(Context &context) noexcept {
   context.display.snap_total = snap_total;
   context.display.yaw_source_switches =
       diag.yaw_source_switches.load(std::memory_order_relaxed);
-  context.display.observed_read_failures =
-      diag.observed_read_failures.load(std::memory_order_relaxed);
   context.display.lease_failures =
       diag.lease_failures.load(std::memory_order_relaxed);
   context.display.view_read_torn =
@@ -127,9 +125,6 @@ void UpdateDisplay(Context &context) noexcept {
       static_cast<double>(
           diag.render_turn_peak_cdps.load(std::memory_order_relaxed)) /
       100.0;
-  context.display.car_step_cm =
-      static_cast<double>(diag.car_step_dcm.load(std::memory_order_relaxed)) /
-      10.0;
   const Probe &probe = context.probe;
   context.display.probe_ahud_service =
       context.ahud != nullptr && ProbeAhudReady(context.ahud);
@@ -252,237 +247,34 @@ void UpdateDisplay(Context &context) noexcept {
                 static_cast<double>(judder_car_count) / 10.0;
   context.display.probe_height_step_cm = probe.height_step_cm;
   {
-    const RenderXProbe &render_x = context.render_x;
-    const std::uint64_t samples =
-        render_x.sample_count.load(std::memory_order_relaxed);
-    const std::uint64_t sum_dcm =
-        render_x.sum_dcm.load(std::memory_order_relaxed);
-    const std::uint64_t sum_dms =
-        render_x.sum_dms.load(std::memory_order_relaxed);
-    const std::int64_t lead_count =
-        render_x.lead_count.load(std::memory_order_relaxed);
-    const std::int64_t lead_sum_dcm =
-        render_x.lead_sum_dcm.load(std::memory_order_relaxed);
-    const std::int64_t lead_sum_dms =
-        render_x.lead_sum_dms.load(std::memory_order_relaxed);
-    const std::uint64_t speed_sum_cmps =
-        render_x.speed_sum_cmps.load(std::memory_order_relaxed);
-    context.display.render_x_state = render_x.resolve_state;
-    context.display.render_x_code = render_x.resolve_code;
-    context.display.render_x_failures =
-        render_x.read_failures.load(std::memory_order_relaxed);
-    context.display.render_x_samples = samples;
-    context.display.render_x_valid = samples != 0;
-    context.display.render_x_peak_cm =
-        static_cast<double>(
-            render_x.peak_dcm.load(std::memory_order_relaxed)) /
-        10.0;
-    context.display.render_x_avg_cm =
-        samples == 0 ? 0.0
-                     : static_cast<double>(sum_dcm) /
-                           static_cast<double>(samples) / 10.0;
-    context.display.render_x_peak_ms =
-        static_cast<double>(
-            render_x.peak_dms.load(std::memory_order_relaxed)) /
-        10.0;
-    context.display.render_x_avg_ms =
-        samples == 0 ? 0.0
-                     : static_cast<double>(sum_dms) /
-                           static_cast<double>(samples) / 10.0;
-    context.display.render_x_speed_kmh =
-        samples == 0 ? 0.0
-                     : static_cast<double>(speed_sum_cmps) /
-                           static_cast<double>(samples) * 0.036;
-    context.display.render_x_lead_cm =
-        lead_count == 0 ? 0.0
-                        : static_cast<double>(lead_sum_dcm) /
-                              static_cast<double>(lead_count) / 10.0;
-    context.display.render_x_lead_ms =
-        lead_count == 0 ? 0.0
-                        : static_cast<double>(lead_sum_dms) /
-                              static_cast<double>(lead_count) / 10.0;
-    context.display.render_x_chain_cm = render_x.chain_max_cm;
-    context.display.render_x_chain_mismatches = render_x.chain_mismatches;
-    context.display.render_x_gt_samples =
-        render_x.samples_on_game_thread.load(std::memory_order_relaxed);
-    const std::uint64_t proxy_count =
-        render_x.render_proxy_count.load(std::memory_order_relaxed);
-    const std::uint64_t proxy_time_count =
-        render_x.render_proxy_time_count.load(std::memory_order_relaxed);
-    const std::int64_t proxy_lead_count =
-        render_x.render_proxy_lead_count.load(std::memory_order_relaxed);
-    const std::uint64_t age_count =
-        render_x.render_age_count.load(std::memory_order_relaxed);
-    context.display.render_proxy_valid = proxy_count != 0;
-    context.display.render_proxy_peak_cm =
-        static_cast<double>(
-            render_x.render_proxy_peak_dcm.load(std::memory_order_relaxed)) /
-        10.0;
-    context.display.render_proxy_avg_cm =
-        proxy_count == 0
-            ? 0.0
-            : static_cast<double>(
-                  render_x.render_proxy_sum_dcm.load(std::memory_order_relaxed)) /
-                  static_cast<double>(proxy_count) / 10.0;
-    context.display.render_proxy_peak_ms =
-        static_cast<double>(
-            render_x.render_proxy_peak_dms.load(std::memory_order_relaxed)) /
-        10.0;
-    context.display.render_proxy_avg_ms =
-        proxy_time_count == 0
-            ? 0.0
-            : static_cast<double>(
-                  render_x.render_proxy_sum_dms.load(std::memory_order_relaxed)) /
-                  static_cast<double>(proxy_time_count) / 10.0;
-    context.display.render_proxy_lead_cm =
-        proxy_lead_count == 0
-            ? 0.0
-            : static_cast<double>(
-                  render_x.render_proxy_lead_sum_dcm.load(
-                      std::memory_order_relaxed)) /
-                  static_cast<double>(proxy_lead_count) / 10.0;
-    context.display.render_proxy_lead_ms =
-        proxy_lead_count == 0
-            ? 0.0
-            : static_cast<double>(
-                  render_x.render_proxy_lead_sum_dms.load(
-                      std::memory_order_relaxed)) /
-                  static_cast<double>(proxy_lead_count) / 10.0;
-    context.display.render_age_valid = age_count != 0;
-    context.display.render_age_peak_ms =
-        static_cast<double>(
-            render_x.render_age_peak_us.load(std::memory_order_relaxed)) /
-        1000.0;
-    context.display.render_age_avg_ms =
-        age_count == 0
-            ? 0.0
-            : static_cast<double>(
-                  render_x.render_age_sum_us.load(std::memory_order_relaxed)) /
-                  static_cast<double>(age_count) / 1000.0;
-  }
-  {
-    const RenderXProbe &render_x = context.render_x;
-    const std::uint32_t source =
-        context.anchor_source.load(std::memory_order_acquire);
-    const std::uint8_t insurance = render_x.insurance_state;
-    const std::uint8_t last_used =
-        render_x.last_used.load(std::memory_order_relaxed);
-    context.display.anchor_source = source;
-    context.display.anchor_fallbacks =
-        render_x.anchor_fallbacks.load(std::memory_order_relaxed);
-    context.display.anchor_read_failures =
-        render_x.anchor_read_failures.load(std::memory_order_relaxed);
-    context.display.vehicle_anchor_valid =
-        render_x.vehicle_anchor_valid.load(std::memory_order_relaxed);
+    const VehicleRuntime &runtime = context.vehicle_runtime;
+    context.display.runtime_state = runtime.resolve_state;
+    context.display.runtime_code = runtime.resolve_code;
+    context.display.runtime_chain_cm = runtime.chain_max_cm;
+    context.display.runtime_chain_mismatches = runtime.chain_mismatches;
     context.display.vehicle_present =
-        context.vehicle_query_known
-            ? context.vehicle_query_present
-            : render_x.vehicle_present.load(std::memory_order_acquire);
+        runtime.vehicle_present.load(std::memory_order_acquire);
     context.display.vehicle_presence_known =
-        context.vehicle_query_known ||
-        render_x.vehicle_present.load(std::memory_order_acquire);
-    context.display.vehicle_proxy_used =
-        render_x.vehicle_proxy_used.load(std::memory_order_relaxed);
-    context.display.vehicle_render_used =
-        render_x.vehicle_render_used.load(std::memory_order_relaxed);
-    context.display.transform_hook_valid =
-        context.transform_hook_id.load(std::memory_order_relaxed) != 0;
-    context.display.transform_updates =
-        render_x.transform_updates.load(std::memory_order_relaxed);
-    context.display.view_uniform_hook_valid =
-        context.view_uniform_hook_id.load(std::memory_order_relaxed) != 0;
-    context.display.view_uniform_calls =
-        render_x.view_uniform_calls.load(std::memory_order_relaxed);
-    context.display.view_uniform_render_calls =
-        render_x.view_uniform_render_calls.load(std::memory_order_relaxed);
-    context.display.view_uniform_game_calls =
-        render_x.view_uniform_game_calls.load(std::memory_order_relaxed);
-    context.display.render_thread_id =
-        render_x.render_thread_id.load(std::memory_order_relaxed);
-    const std::uint64_t view_age_count =
-        render_x.view_uniform_age_count.load(std::memory_order_relaxed);
-    context.display.view_uniform_age_valid = view_age_count != 0;
-    context.display.view_uniform_age_avg_ms =
-        view_age_count == 0
-            ? 0.0
-            : static_cast<double>(render_x.view_uniform_age_sum_us.load(
-                  std::memory_order_relaxed)) /
-                  static_cast<double>(view_age_count) / 1000.0;
-    context.display.view_uniform_age_peak_ms =
-        static_cast<double>(render_x.view_uniform_age_peak_us.load(
-            std::memory_order_relaxed)) /
-        1000.0;
-    context.display.route_b_applied =
-        render_x.route_b_applied.load(std::memory_order_relaxed);
-    context.display.route_b_fallbacks =
-        render_x.route_b_fallbacks.load(std::memory_order_relaxed);
-    context.display.route_b_witness_failures =
-        render_x.route_b_witness_failures.load(std::memory_order_relaxed);
-    context.display.route_b_early_applied =
-        render_x.route_b_early_applied.load(std::memory_order_relaxed);
-    context.display.route_b_early_fallbacks =
-        render_x.route_b_early_fallbacks.load(std::memory_order_relaxed);
-    context.display.route_b_last_age_ms =
-        static_cast<double>(
-            render_x.route_b_last_age_us.load(std::memory_order_relaxed)) /
-        1000.0;
-    context.display.route_b_early_last_age_ms =
-        static_cast<double>(render_x.route_b_early_last_age_us.load(
-            std::memory_order_relaxed)) /
-        1000.0;
-    context.display.prepare_calls =
-        render_x.prepare_calls.load(std::memory_order_relaxed);
-    context.display.prepare_thread_mismatch =
-        render_x.prepare_thread_mismatch.load(std::memory_order_relaxed);
-    context.display.prepare_anchor_off =
-        render_x.prepare_anchor_off.load(std::memory_order_relaxed);
-    context.display.prepare_no_views =
-        render_x.prepare_no_views.load(std::memory_order_relaxed);
-    context.display.prepare_pose_fail =
-        render_x.prepare_pose_fail.load(std::memory_order_relaxed);
-    context.display.prepare_fullscreen_views =
-        render_x.prepare_fullscreen_views.load(std::memory_order_relaxed);
-    context.display.route_b_early_direct =
-        render_x.route_b_early_direct.load(std::memory_order_relaxed);
-    context.display.route_b_early_held =
-        render_x.route_b_early_held.load(std::memory_order_relaxed);
-    context.display.vehicle_fallbacks =
-        render_x.vehicle_fallbacks.load(std::memory_order_relaxed);
+        runtime.vehicle_sample_ns.load(std::memory_order_relaxed) != 0;
     context.display.vehicle_read_failures =
-        render_x.vehicle_read_failures.load(std::memory_order_relaxed);
-    context.display.vehicle_proxy_fallbacks =
-        render_x.vehicle_proxy_fallbacks.load(std::memory_order_relaxed);
-    std::uint8_t gate = kAnchorGateOff;
-    if (source == kAnchorSourceX || source == kAnchorSourceVehicle) {
-      if (insurance == kAnchorInsuranceHashMismatch) {
-        gate = kAnchorGateHash;
-      } else if (insurance == kAnchorInsuranceServiceMissing) {
-        gate = kAnchorGateService;
-      } else if (insurance == kAnchorInsuranceReadFailed) {
-        gate = kAnchorGateRead;
-      } else if (render_x.chain_failed) {
-        gate = kAnchorGateOffset;
-      } else if (render_x.resolve_state == kRenderXFailed) {
-        gate = kAnchorGateResolve;
-      } else if (insurance == kAnchorInsuranceReady &&
-                 render_x.resolve_state == kRenderXReady) {
-        gate = kAnchorGateOk;
+        runtime.vehicle_read_failures.load(std::memory_order_relaxed);
+    std::uint8_t gate = kProfileGateOff;
+    if (runtime.profile_state == kProfileGateHashMismatch) {
+      gate = kProfileGateHash;
+    } else if (runtime.profile_state == kProfileGateServiceMissing) {
+      gate = kProfileGateService;
+    } else if (runtime.profile_state == kProfileGateReadFailed) {
+      gate = kProfileGateRead;
+    } else if (runtime.profile_state == kProfileGateReady) {
+      if (runtime.chain_failed) {
+        gate = kProfileGateOffset;
+      } else if (runtime.resolve_state == kVehicleRuntimeFailed) {
+        gate = kProfileGateResolve;
+      } else if (runtime.resolve_state == kVehicleRuntimeReady) {
+        gate = kProfileGateOk;
       }
     }
-    context.display.anchor_gate = gate;
-    std::uint8_t effective = kAnchorStateDisabled;
-    if (source == kAnchorSourceX || source == kAnchorSourceVehicle) {
-      if (insurance == kAnchorInsuranceHashMismatch) {
-        effective = kAnchorStateHashMismatch;
-      } else if (render_x.resolve_state == kRenderXFailed) {
-        effective = kAnchorStateResolveFailed;
-      } else {
-        effective = last_used;
-      }
-    } else if (source == kAnchorSourceBorrow) {
-      effective = kAnchorStateBorrow;
-    }
-    context.display.anchor_effective = effective;
+    context.display.runtime_gate = gate;
   }
   const std::uint64_t interval_min_raw =
       diag.tick_interval_min_ns.load(std::memory_order_relaxed);
@@ -631,12 +423,6 @@ void UpdateDisplay(Context &context) noexcept {
       context.roll_only_in_drift.load(std::memory_order_acquire);
   context.display.diagnostic_flat_pose =
       context.diagnostic_flat_pose.load(std::memory_order_acquire);
-  context.display.diagnostic_zero_lag =
-      context.diagnostic_zero_lag.load(std::memory_order_acquire);
-  context.display.borrow_strength =
-      context.borrow_strength.load(std::memory_order_acquire);
-  context.display.borrow_fallback =
-      context.borrow_fallback.load(std::memory_order_acquire);
   context.display.diagnostic_skip_position =
       context.diagnostic_skip_position.load(std::memory_order_acquire);
   context.display.diagnostic_skip_rotation =
@@ -644,268 +430,24 @@ void UpdateDisplay(Context &context) noexcept {
 }
 
 void RetryHookIfNeeded(Context &context) noexcept {
-  if (context.native_view_point.load(std::memory_order_acquire)) {
-    // 2.1.0 game-thread path. The two hooks are one unit: the view adapter is
-    // only useful when both succeed, and the profile hash is the layout
-    // witness for both (D6). Do not install any render-thread route B hook on
-    // this side of the A/B; it would overwrite the view after we wrote it.
-    const bool view_point_ready =
-        context.game_view_point_hook_id.load(std::memory_order_acquire) != 0 ||
-        context.game_view_point_pattern_unavailable;
-    const bool scene_init_ready =
-        context.scene_view_init_hook_id.load(std::memory_order_acquire) != 0 ||
-        context.scene_view_init_pattern_unavailable;
-    if (view_point_ready && scene_init_ready) {
-      return;
-    }
-    if (context.hook_retry_requested.exchange(false,
-                                               std::memory_order_acq_rel)) {
-      context.next_hook_retry = 0.0;
-    }
-    if (context.elapsed < context.next_hook_retry) {
-      return;
-    }
-    context.next_hook_retry = context.elapsed + kHookRetrySeconds;
-    static_cast<void>(EnsureHook(context));
-    return;
-  }
   const bool view_point_ready =
-      context.view_hook_id.load(std::memory_order_acquire) != 0 ||
-      context.view_point_pattern_unavailable;
-  const bool transform_ready =
-      context.transform_hook_id.load(std::memory_order_acquire) != 0 ||
-      context.transform_pattern_unavailable;
-  const bool view_uniform_ready =
-      context.view_uniform_hook_id.load(std::memory_order_acquire) != 0 ||
-      context.view_uniform_pattern_unavailable;
-  const bool early_route_b_ready =
-      context.prepare_view_state_hook_id.load(std::memory_order_acquire) != 0 ||
-      context.early_route_b_unavailable;
-  if (view_point_ready && transform_ready && view_uniform_ready &&
-      early_route_b_ready) {
+      context.game_view_point_hook_id.load(std::memory_order_acquire) != 0 ||
+      context.game_view_point_pattern_unavailable;
+  const bool scene_init_ready =
+      context.scene_view_init_hook_id.load(std::memory_order_acquire) != 0 ||
+      context.scene_view_init_pattern_unavailable;
+  if (view_point_ready && scene_init_ready) {
     return;
   }
-  if (context.hook_retry_requested.exchange(false, std::memory_order_acq_rel)) {
+  if (context.hook_retry_requested.exchange(false,
+                                             std::memory_order_acq_rel)) {
     context.next_hook_retry = 0.0;
   }
   if (context.elapsed < context.next_hook_retry) {
     return;
   }
   context.next_hook_retry = context.elapsed + kHookRetrySeconds;
-  // The profile hash is the layout witness for the route B hooks. Patterns
-  // prove the entry point exists; they cannot prove that FViewInfo or
-  // FSceneRenderer still have the fields we write. If the gate is closed,
-  // stay out of the game instead of guessing. The legacy view-point hook is
-  // kept only when the host genuinely has no build service (2.5).
-  const bool version_gate =
-      context.render_x.version_gate.load(std::memory_order_acquire);
-  const bool legacy_without_build =
-      context.render_x.insurance_state == kAnchorInsuranceServiceMissing;
-  if (!version_gate && !legacy_without_build) {
-    return;
-  }
-  if (version_gate) {
-    static_cast<void>(EnsurePrepareViewStateHook(context));
-    static_cast<void>(EnsureTransformHook(context));
-    static_cast<void>(EnsureViewUniformHook(context));
-  }
   static_cast<void>(EnsureHook(context));
-}
-
-void LogViewUniformHookDiagnostics(Context &context) noexcept {
-  if (context.view_uniform_diag_logged) {
-    return;
-  }
-  const RenderXProbe &probe = context.render_x;
-  const std::uint64_t calls =
-      probe.view_uniform_calls.load(std::memory_order_relaxed);
-  const std::uint64_t render_calls =
-      probe.view_uniform_render_calls.load(std::memory_order_relaxed);
-  if (render_calls < 10 && calls < 200) {
-    return;
-  }
-  const std::uint64_t age_count =
-      probe.view_uniform_age_count.load(std::memory_order_relaxed);
-  const double age_avg_ms =
-      age_count == 0
-          ? 0.0
-          : static_cast<double>(
-                probe.view_uniform_age_sum_us.load(std::memory_order_relaxed)) /
-                static_cast<double>(age_count) / 1000.0;
-  const double age_peak_ms =
-      static_cast<double>(
-          probe.view_uniform_age_peak_us.load(std::memory_order_relaxed)) /
-      1000.0;
-  char message[192]{};
-  std::snprintf(
-      message, sizeof(message),
-      "nfs2015 chase cam: view hook calls=%llu render=%llu game=%llu "
-      "transform_thread=%u age avg/peak=%.2f/%.2f ms samples=%llu",
-      static_cast<unsigned long long>(calls),
-      static_cast<unsigned long long>(render_calls),
-      static_cast<unsigned long long>(
-          probe.view_uniform_game_calls.load(std::memory_order_relaxed)),
-      render_calls == 0
-          ? 0U
-          : probe.render_thread_id.load(std::memory_order_relaxed),
-      age_avg_ms, age_peak_ms,
-      static_cast<unsigned long long>(age_count));
-  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
-  context.view_uniform_diag_logged = true;
-}
-
-void LogRouteBDiagnostics(Context &context) noexcept {
-  const RenderXProbe &probe = context.render_x;
-  const std::uint64_t applied =
-      probe.route_b_applied.load(std::memory_order_relaxed);
-  const std::uint64_t early_applied =
-      probe.route_b_early_applied.load(std::memory_order_relaxed);
-  const std::uint64_t prepare_calls =
-      probe.prepare_calls.load(std::memory_order_relaxed);
-  if (!context.route_b_early_failure_logged && early_applied == 0 &&
-      applied == 0 && prepare_calls >= 120) {
-    context.route_b_early_failure_logged = true;
-    char warning[320]{};
-    std::snprintf(
-        warning, sizeof(warning),
-        "nfs2015 chase cam: route B early path has not applied yet: "
-        "prep=%llu off=%llu nv=%llu pf=%llu fs=%llu dir=%llu mm=%llu fb=%llu",
-        static_cast<unsigned long long>(prepare_calls),
-        static_cast<unsigned long long>(
-            probe.prepare_anchor_off.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(
-            probe.prepare_no_views.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(
-            probe.prepare_pose_fail.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(
-            probe.prepare_fullscreen_views.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(
-            probe.route_b_early_direct.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(
-            probe.prepare_thread_mismatch.load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(
-            probe.route_b_early_fallbacks.load(std::memory_order_relaxed)));
-    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING, warning);
-  }
-  if (context.route_b_diag_logged) {
-    return;
-  }
-  if (applied + early_applied < 10) {
-    return;
-  }
-  char message[256]{};
-  std::snprintf(message, sizeof(message),
-                "nfs2015 chase cam: route B early=%llu late=%llu "
-                "fallbacks=%llu witness=%llu early_age=%.2f ms "
-                "late_age=%.2f ms presenter=%llu direct=%llu held=%llu",
-                static_cast<unsigned long long>(early_applied),
-                static_cast<unsigned long long>(applied),
-                static_cast<unsigned long long>(
-                    probe.route_b_early_fallbacks.load(
-                        std::memory_order_relaxed) +
-                    probe.route_b_fallbacks.load(
-                        std::memory_order_relaxed)),
-                static_cast<unsigned long long>(
-                    probe.route_b_witness_failures.load(
-                        std::memory_order_relaxed)),
-                static_cast<double>(probe.route_b_early_last_age_us.load(
-                    std::memory_order_relaxed)) /
-                    1000.0,
-                static_cast<double>(
-                    probe.route_b_last_age_us.load(std::memory_order_relaxed)) /
-                    1000.0,
-                static_cast<unsigned long long>(
-                    probe.route_b_early_presenter.load(
-                        std::memory_order_relaxed)),
-                static_cast<unsigned long long>(
-                    probe.route_b_early_direct.load(
-                        std::memory_order_relaxed)),
-                static_cast<unsigned long long>(
-                    probe.route_b_early_held.load(
-                        std::memory_order_relaxed)));
-  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, message);
-  context.route_b_diag_logged = true;
-}
-
-// TEMP read-only timing report. It only logs values already captured by the
-// early/transform/late callbacks; it does not change any camera state.
-void LogRouteBTiming(Context &context) noexcept {
-  const RenderXProbe &probe = context.render_x;
-  const auto early = probe.timing_early_count.load(std::memory_order_relaxed);
-  if (early == 0 || context.route_b_timing_windows >= 15) {
-    return;
-  }
-  const auto now = GetTickCount64();
-  if (context.route_b_timing_last_log_ms != 0 &&
-      now - context.route_b_timing_last_log_ms < 2000) {
-    return;
-  }
-  context.route_b_timing_last_log_ms = now;
-  ++context.route_b_timing_windows;
-
-  const auto late = probe.timing_late_count.load(std::memory_order_relaxed);
-  const auto car_count =
-      probe.timing_car_delta_count.load(std::memory_order_relaxed);
-  const auto view_count =
-      probe.timing_view_delta_count.load(std::memory_order_relaxed);
-  const double car_avg =
-      car_count == 0
-          ? 0.0
-          : static_cast<double>(probe.timing_car_delta_sum_dmm.load(
-                std::memory_order_relaxed)) /
-                static_cast<double>(car_count) / 10.0;
-  const double car_peak =
-      static_cast<double>(probe.timing_car_delta_peak_dmm.load(
-          std::memory_order_relaxed)) / 10.0;
-  const double view_avg =
-      view_count == 0
-          ? 0.0
-          : static_cast<double>(probe.timing_view_delta_sum_dmm.load(
-                std::memory_order_relaxed)) /
-                static_cast<double>(view_count) / 10.0;
-  const double view_peak =
-      static_cast<double>(probe.timing_view_delta_peak_dmm.load(
-          std::memory_order_relaxed)) / 10.0;
-
-  char line[384]{};
-  std::snprintf(
-      line, sizeof(line),
-      "nfs2015 chase cam: timing early=%llu late=%llu "
-      "transform before/between/after=%llu/%llu/%llu "
-      "car_delta avg/peak=%.2f/%.2f cm view_delta avg/peak=%.2f/%.2f cm",
-      static_cast<unsigned long long>(early),
-      static_cast<unsigned long long>(late),
-      static_cast<unsigned long long>(
-          probe.timing_transform_before.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(
-          probe.timing_transform_between.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(
-          probe.timing_transform_after.load(std::memory_order_relaxed)),
-      car_avg, car_peak, view_avg, view_peak);
-  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, line);
-
-  char sample[384]{};
-  std::snprintf(
-      sample, sizeof(sample),
-      "nfs2015 chase cam: timing sample early_car=(%.2f,%.2f,%.2f) "
-      "late_car=(%.2f,%.2f,%.2f) presenter_car=(%.2f,%.2f,%.2f) "
-      "early_view=(%.2f,%.2f,%.2f) late_view=(%.2f,%.2f,%.2f)",
-      probe.timing_early_car[0].load(std::memory_order_relaxed),
-      probe.timing_early_car[1].load(std::memory_order_relaxed),
-      probe.timing_early_car[2].load(std::memory_order_relaxed),
-      probe.timing_late_car[0].load(std::memory_order_relaxed),
-      probe.timing_late_car[1].load(std::memory_order_relaxed),
-      probe.timing_late_car[2].load(std::memory_order_relaxed),
-      probe.timing_presenter_car[0].load(std::memory_order_relaxed),
-      probe.timing_presenter_car[1].load(std::memory_order_relaxed),
-      probe.timing_presenter_car[2].load(std::memory_order_relaxed),
-      probe.timing_early_view[0].load(std::memory_order_relaxed),
-      probe.timing_early_view[1].load(std::memory_order_relaxed),
-      probe.timing_early_view[2].load(std::memory_order_relaxed),
-      probe.timing_late_view[0].load(std::memory_order_relaxed),
-      probe.timing_late_view[1].load(std::memory_order_relaxed),
-      probe.timing_late_view[2].load(std::memory_order_relaxed));
-  Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO, sample);
 }
 
 }  // namespace nfs2015_chase_cam::detail

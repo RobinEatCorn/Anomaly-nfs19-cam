@@ -347,9 +347,6 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   }
   DrawStatusLine(ui, localizer, "diag.lens_residual",
                  "F peak/avg deg", line);
-  std::snprintf(line, sizeof(line), "B %.2f",
-                display.borrow_strength);
-  DrawStatusLine(ui, localizer, "diag.borrow", "B", line);
   if (display.flow_valid) {
     std::snprintf(line, sizeof(line), "W %.2f / %.2f cm",
                   display.flow_peak_cm, display.flow_avg_cm);
@@ -367,163 +364,39 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   DrawStatusLine(ui, localizer, "diag.frame_pacing",
                  "T peak/avg ms", line);
 
-  // Task group 0: the gate for the whole hook route. Order matters. `chain` is
-  // the control (same chain, Game tick, against the host snapshot); if it is
-  // not ~0 the offsets are stale and `phase` is meaningless.
-  if (display.render_x_state == kRenderXReady) {
-    std::snprintf(line, sizeof(line), "ok  n=%llu  gt=%llu/%llu  f=%llu",
-                  static_cast<unsigned long long>(display.render_x_samples),
-                  static_cast<unsigned long long>(display.render_x_gt_samples),
-                  static_cast<unsigned long long>(display.render_x_samples),
+  // Vehicle runtime gate: same-chain diff catches a stale offset table, and
+  // the profile gate says whether the hardcoded layout is accepted at all.
+  if (display.runtime_state == kVehicleRuntimeReady) {
+    std::snprintf(line, sizeof(line), "ok  chain %.2f cm / %llu",
+                  display.runtime_chain_cm,
                   static_cast<unsigned long long>(
-                      display.render_x_failures));
-  } else if (display.render_x_state == kRenderXFailed) {
-    std::snprintf(line, sizeof(line), "failed %u", display.render_x_code);
+                      display.runtime_chain_mismatches));
+  } else if (display.runtime_state == kVehicleRuntimeFailed) {
+    std::snprintf(line, sizeof(line), "failed %u", display.runtime_code);
   } else {
     std::snprintf(line, sizeof(line), "wait");
   }
-  DrawStatusLine(ui, localizer, "diag.render_x_state", "X GWorld", line);
-  std::snprintf(line, sizeof(line), "%.2f cm / %llu",
-                display.render_x_chain_cm,
-                static_cast<unsigned long long>(
-                    display.render_x_chain_mismatches));
-  DrawStatusLine(ui, localizer, "diag.render_x_chain",
-                 "X chain diff / count", line);
-  if (display.render_x_valid) {
-    std::snprintf(line, sizeof(line), "%.1f / %.1f cm  %.1f / %.1f ms",
-                  display.render_x_avg_cm, display.render_x_peak_cm,
-                  display.render_x_avg_ms, display.render_x_peak_ms);
-  } else {
-    std::snprintf(line, sizeof(line), "--");
-  }
-  DrawStatusLine(ui, localizer, "diag.render_x_phase",
-                 "X phase avg/peak", line);
-  std::snprintf(line, sizeof(line), "%+.1f cm %+.1f ms  %.0f km/h",
-                display.render_x_lead_cm, display.render_x_lead_ms,
-                display.render_x_speed_kmh);
-  DrawStatusLine(ui, localizer, "diag.render_x_lead", "X along travel",
-                 line);
-  if (display.render_proxy_valid) {
-    std::snprintf(line, sizeof(line), "%.1f / %.1f cm  %.1f / %.1f ms",
-                  display.render_proxy_avg_cm, display.render_proxy_peak_cm,
-                  display.render_proxy_avg_ms, display.render_proxy_peak_ms);
-  } else {
-    std::snprintf(line, sizeof(line), "--");
-  }
-  DrawStatusLine(ui, localizer, "diag.render_proxy_phase",
-                 "Render vs proxy avg/peak", line);
-  if (display.render_proxy_valid) {
-    std::snprintf(line, sizeof(line), "%+.1f cm %+.1f ms",
-                  display.render_proxy_lead_cm, display.render_proxy_lead_ms);
-  } else {
-    std::snprintf(line, sizeof(line), "--");
-  }
-  DrawStatusLine(ui, localizer, "diag.render_proxy_lead",
-                 "Render along travel", line);
-  if (display.render_age_valid) {
-    std::snprintf(line, sizeof(line), "%.1f / %.1f ms",
-                  display.render_age_avg_ms, display.render_age_peak_ms);
-  } else {
-    std::snprintf(line, sizeof(line), "--");
-  }
-  DrawStatusLine(ui, localizer, "diag.render_age", "Render age avg/peak",
-                 line);
+  DrawStatusLine(ui, localizer, "diag.runtime_state", "Vehicle chain", line);
   {
     static constexpr const char *kGateValues[7] = {
         "ok", "hash", "pattern", "service", "offset", "off", "read"};
     const std::size_t gate =
-        display.anchor_gate < 7U ? display.anchor_gate : 6U;
-    DrawStatusLine(ui, localizer, "diag.anchor_gate", "Version gate",
+        display.runtime_gate < 7U ? display.runtime_gate : 6U;
+    DrawStatusLine(ui, localizer, "diag.runtime_gate", "Version gate",
                    kGateValues[gate]);
-    std::snprintf(line, sizeof(line), "%llu / %llu",
-                  static_cast<unsigned long long>(
-                      display.anchor_fallbacks),
-                  static_cast<unsigned long long>(
-                      display.anchor_read_failures));
-    DrawStatusLine(ui, localizer, "diag.anchor_fallback",
-                   "X fallback/read", line);
-    std::string vehicle_anchor_value = localizer.Text("anchor.vehicle.off", "off");
-    if (display.vehicle_anchor_valid) {
-      if (display.vehicle_render_used) {
-        vehicle_anchor_value =
-            localizer.Text("anchor.vehicle.render", "render");
-      } else {
-        vehicle_anchor_value =
-            display.vehicle_proxy_used
-                ? localizer.Text("anchor.vehicle.proxy", "proxy")
-                : localizer.Text("anchor.vehicle.c2w", "c2w");
-      }
-    } else if (display.vehicle_read_failures != 0) {
-      vehicle_anchor_value = localizer.Text("anchor.vehicle.read", "read");
-    }
-    DrawStatusLine(ui, localizer, "diag.vehicle_anchor", "Car anchor",
-                   vehicle_anchor_value);
-    DrawStatusLine(
-        ui, localizer, "diag.vehicle_present", "Vehicle present",
-        display.vehicle_present
-            ? localizer.Text("status.yes", "yes")
-            : (display.vehicle_presence_known
-                   ? localizer.Text("status.no", "no")
-                   : localizer.Text("status.unknown", "unknown")));
-    std::snprintf(line, sizeof(line), "%llu / %llu",
-                  static_cast<unsigned long long>(
-                      display.vehicle_fallbacks),
-                  static_cast<unsigned long long>(
-                      display.vehicle_read_failures));
-    DrawStatusLine(ui, localizer, "diag.vehicle_fallback",
-                   "Car fallback/read", line);
-    std::snprintf(line, sizeof(line), "%s %llu",
-                  display.transform_hook_valid ? "ok" : "wait",
-                  static_cast<unsigned long long>(
-                      display.transform_updates));
-    DrawStatusLine(ui, localizer, "diag.transform_hook", "Render hook",
-                   line);
-    std::snprintf(line, sizeof(line), "%s R/G %llu/%llu thr %u",
-                  display.view_uniform_hook_valid ? "ok" : "wait",
-                  static_cast<unsigned long long>(
-                      display.view_uniform_render_calls),
-                  static_cast<unsigned long long>(
-                      display.view_uniform_game_calls),
-                  display.render_thread_id);
-    DrawStatusLine(ui, localizer, "diag.view_uniform_hook",
-                   "View hook R/G", line);
-    if (display.view_uniform_age_valid) {
-      std::snprintf(line, sizeof(line), "%.2f / %.2f ms",
-                    display.view_uniform_age_avg_ms,
-                    display.view_uniform_age_peak_ms);
-    } else {
-      std::snprintf(line, sizeof(line), "--");
-    }
-    DrawStatusLine(ui, localizer, "diag.view_uniform_age",
-                   "View->transform age", line);
-    std::snprintf(line, sizeof(line),
-                  "%llu(%.2f) / %llu / %llu w %llu  prep %llu mm %llu nv "
-                  "%llu pf %llu fs %llu dir %llu held %llu",
-                  static_cast<unsigned long long>(
-                      display.route_b_early_applied),
-                  display.route_b_early_last_age_ms,
-                  static_cast<unsigned long long>(
-                      display.route_b_applied),
-                  static_cast<unsigned long long>(
-                      display.route_b_fallbacks +
-                      display.route_b_early_fallbacks),
-                  static_cast<unsigned long long>(
-                      display.route_b_witness_failures),
-                  static_cast<unsigned long long>(display.prepare_calls),
-                  static_cast<unsigned long long>(
-                      display.prepare_thread_mismatch),
-                  static_cast<unsigned long long>(display.prepare_no_views),
-                  static_cast<unsigned long long>(display.prepare_pose_fail),
-                  static_cast<unsigned long long>(
-                      display.prepare_fullscreen_views),
-                  static_cast<unsigned long long>(
-                      display.route_b_early_direct),
-                  static_cast<unsigned long long>(
-                      display.route_b_early_held));
-    DrawStatusLine(ui, localizer, "diag.route_b",
-                   "Route B early/held/fallback/witness",
-                   line);
   }
+  DrawStatusLine(
+      ui, localizer, "diag.vehicle_present", "Vehicle present",
+      display.vehicle_present
+          ? localizer.Text("status.yes", "yes")
+          : (display.vehicle_presence_known
+                 ? localizer.Text("status.no", "no")
+                 : localizer.Text("status.unknown", "unknown")));
+  std::snprintf(line, sizeof(line), "%llu",
+                static_cast<unsigned long long>(
+                    display.vehicle_read_failures));
+  DrawStatusLine(ui, localizer, "diag.vehicle_read",
+                 "Vehicle read failures", line);
 
   if (!display.probe_ahud_service) {
     std::snprintf(line, sizeof(line), "no service");
@@ -577,8 +450,6 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   }
   DrawStatusLine(ui, localizer, "diag.render_turn",
                  "cam-car turn deg/s", line);
-  std::snprintf(line, sizeof(line), "%.1f cm", display.car_step_cm);
-  DrawStatusLine(ui, localizer, "diag.car_step", "anchor cm/tick", line);
   if (display.judder_car_valid) {
     std::snprintf(line, sizeof(line), "C %.1f / %.1f px",
                   display.judder_car_peak_px, display.judder_car_avg_px);
@@ -619,8 +490,6 @@ void DrawDiagnostics(const AnomalyUiServiceV1 *ui,
   }
   DrawCountLine(ui, localizer, "diag.yaw_switches",
                 "yaw source switches", display.yaw_source_switches);
-  DrawCountLine(ui, localizer, "diag.observed_failures",
-                "pose read failures", display.observed_read_failures);
   DrawCountLine(ui, localizer, "diag.lease_failures", "hook lease failures",
                 display.lease_failures);
   DrawCountLine(ui, localizer, "diag.torn_reads", "torn reads",
@@ -1294,9 +1163,8 @@ void DrawOrbitGroup(const AnomalyUiServiceV1 *ui, Context &context,
                      &CustomSettings::orbit_hide_ui);
 }
 
-// Advanced stays closed by default: it holds the anchor choice, the lock onto
-// the Game's camera, the diagnostic switches and the counters panel, none of
-// which is part of a base type.
+// Advanced stays closed by default: it holds the diagnostic switches and the
+// counters panel, neither of which is part of a base type.
 void DrawAdvancedGroup(const AnomalyUiServiceV1 *ui, Context &context,
                        const DisplayState &display) {
   ui->separator(ui->user);
@@ -1321,54 +1189,10 @@ void DrawAdvancedGroup(const AnomalyUiServiceV1 *ui, Context &context,
       MarkSettingsDirty(context);
     }
   };
-  ui->text(ui->user,
-           StringView(context.localizer.Text("setting.anchor_source",
-                                             "Anchor source")));
-  const auto anchor_button = [&](const std::uint32_t source, const char *key,
-                                 const char *fallback) {
-    std::string label;
-    label.append(display.anchor_source == source ? "> " : "  ");
-    label.append(context.localizer.Text(key, fallback));
-    label.append("###anchor-");
-    label.append(std::to_string(source));
-    if (ui->button(ui->user, StringView(label), 0.0F, 0.0F) != 0) {
-      context.anchor_source.store(source, std::memory_order_release);
-      MarkSettingsDirty(context);
-    }
-  };
-  anchor_button(kAnchorSourceX, "anchor.x", "X anchored");
-  anchor_button(kAnchorSourceVehicle, "anchor.vehicle", "Vehicle mesh");
-  anchor_button(kAnchorSourceBorrow, "anchor.borrow", "Borrow estimate");
-  anchor_button(kAnchorSourceModel, "anchor.model", "Pure model");
-
-  const std::string borrow_label = context.localizer.Label(
-      "setting.borrow_strength", "Lock to the Game's camera (0 = pure model)",
-      "chase-borrow");
-  float borrow = static_cast<float>(display.borrow_strength);
-  if (ui->slider_float(ui->user, StringView(borrow_label), &borrow, 0.0F,
-                       1.0F) != 0) {
-    context.borrow_strength.store(
-        nfs2015_chase::Clamp(static_cast<double>(borrow), 0.0, 1.0),
-        std::memory_order_release);
-    MarkSettingsDirty(context);
-  }
-  // Off by default. A stale snapshot used to fall back to the borrow estimate
-  // for a single frame, and that estimate can sit metres away from the rendered
-  // car, so the car jumps in frame while the background does not move. Keeping
-  // the tick sample is continuous and needs no second estimator.
-  advanced_checkbox("setting.borrow_fallback",
-                    "Fall back to the Game camera when the anchor is stale",
-                    "chase-borrow-fallback", display.borrow_fallback,
-                    context.borrow_fallback);
-
   advanced_checkbox("setting.diagnostic_flat_pose",
                     "Diagnostic: position and yaw only", "chase-flat-pose",
                     display.diagnostic_flat_pose,
                     context.diagnostic_flat_pose);
-  advanced_checkbox("setting.diagnostic_zero_lag",
-                    "Diagnostic: zero lag, newest tick position",
-                    "chase-zero-lag", display.diagnostic_zero_lag,
-                    context.diagnostic_zero_lag);
   advanced_checkbox("setting.diagnostic_skip_position",
                     "Diagnostic: keep the Game's position",
                     "chase-skip-position", display.diagnostic_skip_position,
@@ -1525,43 +1349,6 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui_v1) {
               : context->localizer.Text(
                     display.started ? "status.unavailable" : "status.stopped",
                     display.started ? "Unavailable" : "Stopped"));
-      {
-        const char *state_key = "anchor.state.disabled";
-        const char *state_fallback = "disabled";
-        switch (display.anchor_effective) {
-          case kAnchorStateX:
-            state_key = "anchor.state.x";
-            state_fallback = "X anchored";
-            break;
-          case kAnchorStateBorrow:
-            state_key = "anchor.state.borrow";
-            state_fallback = "borrow";
-            break;
-          case kAnchorStateHashMismatch:
-            state_key = "anchor.state.hash_mismatch";
-            state_fallback = "hash mismatch";
-            break;
-          case kAnchorStateResolveFailed:
-            state_key = "anchor.state.resolve_failed";
-            state_fallback = "pattern failed";
-            break;
-          case kAnchorStateVehicle:
-            state_key = "anchor.state.vehicle";
-            state_fallback = "vehicle";
-            break;
-          default:
-            break;
-        }
-        std::string anchor_value =
-            context->localizer.Text(state_key, state_fallback);
-        char fallback_count[48]{};
-        std::snprintf(fallback_count, sizeof(fallback_count), "  fb %llu",
-                      static_cast<unsigned long long>(
-                          display.anchor_fallbacks));
-        anchor_value.append(fallback_count);
-        DrawStatusLine(ui, context->localizer, "status.anchor", "Anchor",
-                       anchor_value);
-      }
       if (display.started) {
         char update_line[64]{};
         std::snprintf(update_line, sizeof(update_line), "%.1f Hz",

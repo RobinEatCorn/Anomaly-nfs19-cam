@@ -80,32 +80,6 @@ void EndLease(Context &context, AnomalyGenerationHandleV1 lease,
   }
 }
 
-void PublishObservedView(const MinimalViewInfo &view,
-                         Context &context) noexcept {
-  const double *location = view.location;
-  const double *rotation = view.rotation;
-  const bool finite =
-      std::isfinite(location[0]) && std::isfinite(location[1]) &&
-      std::isfinite(location[2]) && std::isfinite(rotation[0]) &&
-      std::isfinite(rotation[1]) && std::isfinite(rotation[2]);
-  if (!finite) {
-    return;
-  }
-  const std::uint64_t sequence =
-      context.observed_sequence.load(std::memory_order_relaxed);
-  context.observed_sequence.store(sequence + 1U,
-                                  std::memory_order_release);
-  for (std::size_t axis = 0; axis < 3; ++axis) {
-    context.observed_location[axis].store(location[axis],
-                                          std::memory_order_relaxed);
-    context.observed_rotation[axis].store(rotation[axis],
-                                          std::memory_order_relaxed);
-  }
-  context.observed_valid.store(true, std::memory_order_relaxed);
-  context.observed_sequence.store(sequence + 2U,
-                                  std::memory_order_release);
-}
-
 // Task group 6: model a short gap in the live ComponentToWorld read. The
 // last successful scene sample still carries the Game-tick velocity and yaw
 // rate; advance those facts on the scene clock for at most two frames. This is
@@ -326,9 +300,8 @@ void ApplyPendingCut(Context &context, void *out, const bool result) noexcept {
     Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
         std::string_view("nfs2015 chase cam: first camera cut applied"));
   }
-  // The snap reason has been delivered to the engine. `view_snap` is no longer
-  // consumed by the old published-view path; clearing it keeps the diagnostic
-  // state honest if that path is inspected during the A/B.
+  // The snap reason has been delivered to the engine. Clear it so the
+  // diagnostic state describes pending work only.
   context.view_snap = false;
   context.view_snap_reasons = 0;
 }
@@ -370,9 +343,8 @@ bool AdvanceScenePose(Context &context, const std::int64_t now_ns) noexcept {
   float lens = 0.0F;
   bool fov_enabled = false;
   bool advanced = false;
-  if (!AdvancePresenter(context, now_ns, nullptr, location, rotation,
-                        &lens, &fov_enabled, &advanced,
-                        /*dedupe_same_frame=*/false, &sample)) {
+  if (!AdvancePresenter(context, now_ns, sample, location, rotation,
+                        &lens, &fov_enabled, &advanced)) {
     InvalidatePresenterPose(context);
     context.diag.detour_no_publish.fetch_add(1,
                                              std::memory_order_relaxed);
@@ -454,19 +426,11 @@ void ANOMALY_CALL LocalPlayerViewPointDetour(const void *self,
   } catch (...) {
   }
 
-  if (context != nullptr && out != nullptr && original_called) {
+  if (context != nullptr && out != nullptr && original_called && leased) {
     auto &view = *static_cast<MinimalViewInfo *>(out);
-    // Keep the same observation the old render-thread detour exposed, so the
-    // diagnostics and the borrow input can be compared across the A/B.
     try {
-      PublishObservedView(view, *context);
+      static_cast<void>(ApplyViewPoint(*context, view));
     } catch (...) {
-    }
-    if (leased) {
-      try {
-        static_cast<void>(ApplyViewPoint(*context, view));
-      } catch (...) {
-      }
     }
   }
 

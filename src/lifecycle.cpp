@@ -11,41 +11,6 @@
 
 namespace nfs2015_chase_cam::detail {
 
-namespace {
-
-// Reads a development switch once per Start. Only the exact values 1/true/yes
-// (case-insensitive first letter) enable it; anything else, including an unset
-// variable, keeps the default. The buffer is small on purpose: a long value is
-// a typo, not a request to enable the new path.
-bool EqualsIgnoreCase(const char *value, const char *expected) noexcept {
-  while (*value != '\0' && *expected != '\0') {
-    char left = *value++;
-    char right = *expected++;
-    if (left >= 'A' && left <= 'Z') {
-      left = static_cast<char>(left - 'A' + 'a');
-    }
-    if (right >= 'A' && right <= 'Z') {
-      right = static_cast<char>(right - 'A' + 'a');
-    }
-    if (left != right) {
-      return false;
-    }
-  }
-  return *value == '\0' && *expected == '\0';
-}
-
-bool ReadEnvironmentFlag(const char *name) noexcept {
-  char value[8]{};
-  const DWORD length = GetEnvironmentVariableA(name, value, sizeof(value));
-  if (length == 0 || length >= sizeof(value)) {
-    return false;
-  }
-  return EqualsIgnoreCase(value, "1") || EqualsIgnoreCase(value, "true") ||
-         EqualsIgnoreCase(value, "yes");
-}
-
-}  // namespace
-
 // ---------------------------------------------------------------------------
 // Plugin lifecycle
 // ---------------------------------------------------------------------------
@@ -107,8 +72,8 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
   // "off" instead of failing the load.
   context->ahud = Query<AnomalyUe5AhudServiceV1>(
       host, ANOMALY_UE5_AHUD_SERVICE_V1_ID, ANOMALY_UE5_AHUD_SERVICE_V1_VERSION);
-  // Version insurance for the X anchor. Optional: a host without the build
-  // service leaves the X path disabled and the borrow estimate in charge.
+  // Optional build identity. A host without the build service leaves the
+  // game-thread camera disabled.
   context->build = Query<AnomalyUe5BuildServiceV1>(
       host, ANOMALY_UE5_BUILD_SERVICE_V1_ID,
       ANOMALY_UE5_BUILD_SERVICE_V1_VERSION);
@@ -203,12 +168,6 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
                                ? nfs2015_chase::GamePreset()
                                : nfs2015_chase::CinematicPreset());
   context->reset_requested.store(true, std::memory_order_release);
-  // Signature learning is a Lifecycle-domain operation; cache the target here
-  // so the Game tick only has to create the hook.
-  std::uintptr_t view_point_target = 0;
-  if (ResolveSignature(*context, kCameraViewPointPattern, view_point_target)) {
-    context->hook_target.store(view_point_target, std::memory_order_release);
-  }
   ResetMotion(*context);
   ResetOrbitUi(*context);
   context->wheel_steer = WheelSteerState{};
@@ -233,7 +192,6 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   context->next_vehicle_speed_function_retry = 0.0;
   context->vehicle_speed_diag_logged = false;
   context->vehicle_speed_active_logged = false;
-  context->observed_valid.store(false, std::memory_order_release);
   PublishInactive(*context);
   // T0: a new session starts from a clean counter baseline so the recorded
   // numbers describe this run only.
@@ -241,7 +199,6 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
     context->diag.snap_by_reason[index].store(0, std::memory_order_relaxed);
   }
   context->diag.yaw_source_switches.store(0, std::memory_order_relaxed);
-  context->diag.observed_read_failures.store(0, std::memory_order_relaxed);
   context->diag.lease_failures.store(0, std::memory_order_relaxed);
   context->diag.view_read_torn.store(0, std::memory_order_relaxed);
   context->diag.detour_calls.store(0, std::memory_order_relaxed);
@@ -276,7 +233,6 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   context->diag.render_turn_floor_cdps.store(UINT64_MAX,
                                              std::memory_order_relaxed);
   context->diag.render_turn_peak_cdps.store(0, std::memory_order_relaxed);
-  context->diag.car_step_dcm.store(0, std::memory_order_relaxed);
   context->diag.tick_interval_min_ns.store(UINT64_MAX,
                                            std::memory_order_relaxed);
   context->diag.tick_interval_max_ns.store(0, std::memory_order_relaxed);
@@ -285,21 +241,14 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   // A fresh session re-runs the P0 probe from scratch. Stop already dropped the
   // old subscription, so nothing can be in flight while this resets.
   context->probe = Probe{};
-  // Task group 1: check the profile hash, then resolve `ue5.GWorld` from the
-  // Lifecycle domain where signature learning is allowed. The Game tick
-  // retries a failed pattern scan, but never bypasses the hash gate.
-  context->render_x.Reset();
+  // Check the profile hash, then resolve `ue5.GWorld` from the Lifecycle
+  // domain where signature learning is allowed. The Game tick retries a failed
+  // pattern scan, but never bypasses the hash gate.
+  context->vehicle_runtime.Reset();
   ResetViewModeRecon(*context);
-  EvaluateAnchorInsurance(*context);
-  // Task group 3's temporary A/B switch. The default is the old render-thread
-  // path so a baseline package behaves exactly like 2.0.6.
-  context->native_view_point.store(ReadEnvironmentFlag(kNativeViewPointEnv),
-                                   std::memory_order_release);
+  EvaluateProfileGate(*context);
   Log(*context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
-      context->native_view_point.load(std::memory_order_acquire)
-          ? "nfs2015 chase cam: game-thread view-point path enabled "
-            "(NFS2015_CHASE_CAM_NATIVE_VIEW)"
-          : "nfs2015 chase cam: render-thread path enabled (A/B default)");
+      "nfs2015 chase cam: game-thread camera path enabled");
   context->detour_hz = 0.0;
   context->brake_last_target = 0.0;
   RegisterSettingsWindow(*context);
@@ -333,10 +282,6 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   context->pose_ready.store(false, std::memory_order_release);
   context->view_build_depth.store(0, std::memory_order_release);
   ++context->sample_epoch;
-  context->sample_mean_interval_ns.store(0.0, std::memory_order_relaxed);
-  context->game_offset_valid = false;
-  context->game_offset_last_ns = 0;
-  context->car_ring.Clear();
   ClearLatestCarSample(*context);
   ClearSceneCarTracking(*context);
   InvalidatePresenterPose(*context);
@@ -443,8 +388,7 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->diag.render_turn_floor_cdps.store(UINT64_MAX,
                                                    std::memory_order_relaxed);
         context->diag.render_turn_peak_cdps.store(0, std::memory_order_relaxed);
-        context->diag.car_step_dcm.store(0, std::memory_order_relaxed);
-        context->probe.camera_yaw_step_max_ddeg = 0.0;
+              context->probe.camera_yaw_step_max_ddeg = 0.0;
         context->probe.camera_yaw_step_sum_ddeg = 0.0;
         context->probe.camera_yaw_step_count = 0;
         context->probe.height_step_cm = 0.0;
@@ -476,7 +420,6 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
         context->diag.tick_interval_min_ns.store(UINT64_MAX,
                                                  std::memory_order_relaxed);
         context->diag.tick_interval_max_ns.store(0, std::memory_order_relaxed);
-        context->render_x.ResetWindow();
         context->diag.slip_max_step_ddeg.store(0,
                                                std::memory_order_relaxed);
         context->update_rate_window = 0.0;
@@ -485,10 +428,6 @@ void ANOMALY_CALL Update(void *plugin_context, const double delta_seconds) {
     }
     UpdateViewModeRecon(*context);
     RetryHookIfNeeded(*context);
-    LogViewUniformHookDiagnostics(*context);
-    LogRouteBDiagnostics(*context);
-    LogRouteBTiming(*context);
-    static_cast<void>(ResolveCameraPov(*context));
     // T0: time the Game-tick work that the camera itself owns. The host
     // callback as a whole also persists settings and resolves the POV, so only
     // UpdateCamera is bracketed here.

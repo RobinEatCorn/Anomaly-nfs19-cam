@@ -121,32 +121,31 @@ void UpdateBurnoutProbe(Context &context, const VehiclePresence &vehicle,
 UpdateBurnoutDetection(Context &context, bool on_ground, double speed_mps,
                        double forward_speed, double dt) noexcept;
 
-// --- render_x_probe.cpp ---------------------------------------------------
-void TryResolveRenderX(Context &context) noexcept;
-void EvaluateAnchorInsurance(Context &context) noexcept;
-void UpdateRenderXProbe(Context &context, const double base_cm[3],
-                        bool player_valid) noexcept;
-void SampleRenderXPhase(Context &context) noexcept;
+// --- vehicle_runtime.cpp --------------------------------------------------
+void EvaluateProfileGate(Context &context) noexcept;
+void TryResolveVehicleRuntime(Context &context) noexcept;
+// Game tick: resolve the profile/GWorld gate, walk the pawn chain, and publish
+// the vehicle presence/body-yaw sample. The camera still reads the live
+// ComponentToWorld at the scene-view phase.
+void UpdateVehicleRuntime(Context &context, const double base_cm[3],
+                          bool player_valid) noexcept;
 // Task group 5: read the vehicle mesh's ComponentToWorld at the scene-view
-// phase (CalcSceneViewInitOptions entry). The pointer is the one the Game tick
-// already resolved and validated; the transform itself is read here, after the
-// vehicle has run, so the camera and the car the renderer is about to draw use
-// the same transform.
+// advance. The pointer is the one the Game tick already resolved and
+// validated; the transform itself is read here, after the vehicle has run, so
+// the camera and the car the renderer is about to draw use the same transform.
 [[nodiscard]] bool ReadVehicleComponentTransform(Context &context,
                                                  double car_cm[3],
                                                  double forward[3]) noexcept;
+[[nodiscard]] bool ReadVehicleBodyYaw(const Context &context, double &yaw,
+                                      std::int64_t &timestamp_ns) noexcept;
 
 // --- hooks.cpp ------------------------------------------------------------
 [[nodiscard]] bool ResolveSignature(Context &context,
                                     std::string_view pattern,
                                     std::uintptr_t &address) noexcept;
-[[nodiscard]] bool ResolveCameraPov(Context &context) noexcept;
 AnomalyStatusV1 ResolveSignatureStatus(const Context &context,
                                        std::string_view pattern,
                                        std::uintptr_t &address) noexcept;
-[[nodiscard]] bool EnsurePrepareViewStateHook(Context &context) noexcept;
-[[nodiscard]] bool EnsureViewUniformHook(Context &context) noexcept;
-[[nodiscard]] bool EnsureTransformHook(Context &context) noexcept;
 // 2.1.0 game-thread path. Both are independent hooks; the view adapter is only
 // active when both are installed and the profile gate is open.
 [[nodiscard]] bool EnsureViewPointHook(Context &context) noexcept;
@@ -154,30 +153,13 @@ AnomalyStatusV1 ResolveSignatureStatus(const Context &context,
 [[nodiscard]] bool EnsureHook(Context &context) noexcept;
 void ReleaseHook(Context &context) noexcept;
 
-// --- routeb.cpp -----------------------------------------------------------
-[[nodiscard]] double UpdateRenderPitch(Context &context) noexcept;
-// The rendered vehicle proxy's chassis heading (yaw, radians), read under the
-// same seqlock/proxy checks as route B. Returns false when the snapshot is not
-// usable, so the caller can fall back to the game-camera yaw.
-[[nodiscard]] bool ReadRouteBBodyYaw(const RenderXProbe &probe, double &yaw,
-                                     std::uintptr_t &proxy,
-                                     std::int64_t &timestamp_ns) noexcept;
-[[nodiscard]] bool ReadRouteBDirectCar(const RenderXProbe &probe,
-                                       double car_cm[3],
-                                       double forward[3]) noexcept;
-[[nodiscard]] bool ApplyRouteBEarly(Context &context, void *renderer) noexcept;
-void ApplyRouteBAtRenderTransform(Context &context, const double car_cm[3],
-                                  const double forward[3]) noexcept;
-
 // --- presenter.cpp --------------------------------------------------------
-// `provided_sample` is the game-thread path: when non-null the model consumes
-// that sample directly and does not read the old ring or the borrow anchor.
-// The render-thread A/B path passes null and keeps the existing behaviour.
+// Advance the model once with the sample built at the scene-view phase.
 [[nodiscard]] bool AdvancePresenter(
-    Context &context, std::int64_t now_ns, const double *game_eye_cm,
-    double location[3], double rotation[3], float *lens, bool *fov_enabled,
-    bool *advanced, bool dedupe_same_frame = true,
-    const nfs2015_chase::CarSample *provided_sample = nullptr) noexcept;
+    Context &context, std::int64_t now_ns,
+    const nfs2015_chase::CarSample &provided_sample, double location[3],
+    double rotation[3], float *lens, bool *fov_enabled,
+    bool *advanced) noexcept;
 // The last completed Game-tick sample, written by UpdateCamera and read once
 // per frame at the scene-view advance. The value is a plain snapshot guarded by
 // an odd/even sequence; both writer and reader run on the Game thread.
@@ -194,8 +176,7 @@ void InvalidatePresenterPose(Context &context) noexcept;
 void ClearSceneCarTracking(Context &context) noexcept;
 void RequestPresenterReset(Context &context) noexcept;
 // T3.4e: eye speed/turn rate relative to the car, sampled only on the call that
-// actually advanced the model. Shared by the old render-thread detour and the
-// 2.1.0 game-thread view adapter so the A/B diagnostics have the same meaning.
+// actually advanced the model.
 void SamplePresenterMotion(Context &context, std::int64_t now_ns,
                            const double location[3],
                            const double rotation[3], bool advanced) noexcept;
@@ -204,16 +185,11 @@ void SamplePresenterMotion(Context &context, std::int64_t now_ns,
                                      float *lens, bool *fov_enabled,
                                      double car_cm[3] = nullptr) noexcept;
 
-// --- camera_detour.cpp ----------------------------------------------------
-void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
-                                        double *rotation) noexcept;
-
 // --- game_tick.cpp --------------------------------------------------------
 [[nodiscard]] bool QueryPlayer(Context &context, double origin_cm[3],
                                double base_cm[3], std::uint64_t &sequence,
                                AnomalyGenerationHandleV1 &handle) noexcept;
 double WrappedAngle(double angle) noexcept;
-void ResetRenderPitch(Context &context) noexcept;
 [[nodiscard]] bool WorldChanged(Context &context) noexcept;
 void ResetMotion(Context &context) noexcept;
 void UpdateBrakeInput(Context &context, bool speed_valid, bool speed_fresh,
@@ -302,9 +278,6 @@ std::uint8_t ANOMALY_CALL ToggleViewModeDetour(
 // --- display.cpp ----------------------------------------------------------
 void UpdateDisplay(Context &context) noexcept;
 void RetryHookIfNeeded(Context &context) noexcept;
-void LogViewUniformHookDiagnostics(Context &context) noexcept;
-void LogRouteBDiagnostics(Context &context) noexcept;
-void LogRouteBTiming(Context &context) noexcept;
 
 // --- lifecycle.cpp (the ABI v1 surface, called through the descriptor) -----
 AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,

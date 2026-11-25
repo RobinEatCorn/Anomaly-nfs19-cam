@@ -249,7 +249,6 @@ constexpr std::size_t kDiagnosticThreadSlots = 8;
 struct Diagnostics final {
   std::atomic<std::uint64_t> snap_by_reason[kSnapReasonCount]{};
   std::atomic<std::uint64_t> yaw_source_switches{};
-  std::atomic<std::uint64_t> observed_read_failures{};
   std::atomic<std::uint64_t> lease_failures{};
   std::atomic<std::uint64_t> view_read_torn{};
   std::atomic<std::uint64_t> detour_calls{};
@@ -282,7 +281,7 @@ struct Diagnostics final {
   std::atomic<std::uint32_t> detour_threads[kDiagnosticThreadSlots]{};
   std::atomic<std::uint32_t> detour_thread_count{};
   std::atomic<std::uint64_t> player_sequence_jumps{};
-  // T3.1: ticks that fell back to the render-thread camera observation because
+  // T3.1: ticks that fell back to the game-camera ESP yaw because
   // the Game-tick ESP camera tail was unavailable. Should stay 0.
   std::atomic<std::uint64_t> camera_yaw_esp_misses{};
   // Experiment (PLAN-camera-timing.md T3.4). Two independent ways to measure
@@ -308,9 +307,6 @@ struct Diagnostics final {
   // Turn rate on the render clock, in hundredths of a degree per second.
   std::atomic<std::uint64_t> render_turn_floor_cdps{};
   std::atomic<std::uint64_t> render_turn_peak_cdps{};
-  // How far the anchor moves in one Game tick, in tenths of a centimetre. The
-  // scale the two jitter numbers must be compared against.
-  std::atomic<std::uint64_t> car_step_dcm{};
   // Judder instrument. Every frame the game's own projection puts the car at a
   // screen position; the second difference of that position is how far the car
   // departs from a straight continuation of its previous two frames, in pixels.
@@ -465,397 +461,73 @@ struct Probe final {
   ScalarTrack track_lens{};
 };
 
-// PLAN-render-thread-hook.md task group 0: read-only phase probe. The host
-// samples `player.position` on the Game tick, but the Game draws the car from
-// whatever the render thread sees at draw time. This walks the host's own
-// player chain from `ue5.GWorld` on both clocks so the difference can be read
-// instead of argued about. Nothing here feeds the camera.
-//
-// The Game-tick read is the control: it must equal the host snapshot exactly.
-// If it does not, the hardcoded offsets no longer describe this build and the
-// render-thread number cannot be trusted either.
-struct RenderXProbe final {
-  // Game tick: resolution state, the GWorld slot, and the cached Pawn chain.
-  std::uint8_t resolve_state{kRenderXWait};
+// Game-thread vehicle runtime. It replaces the old render-thread probe:
+// profile gate and `ue5.GWorld` resolution, the player pawn chain, the vehicle
+// mesh's ComponentToWorld, and the presence/body-yaw sample used by the Game
+// tick. The camera itself reads the live transform at the scene-view phase;
+// nothing here feeds a view from another thread.
+struct VehicleRuntime final {
+  // The profile hash is the only runtime witness for the hardcoded offsets.
+  // A missing or mismatched profile closes the gate instead of reading a
+  // layout that may have moved.
+  std::uint8_t profile_state{kProfileGateWaiting};
+  std::uint8_t logged_profile_state{0xFF};
+  std::atomic_bool version_gate{};
+
+  // `ue5.GWorld` resolution and the current local player chain.
+  std::uint8_t resolve_state{kVehicleRuntimeWait};
   std::uint32_t resolve_code{};
   double next_resolve_elapsed{};
   std::uintptr_t gworld_slot{};
   std::atomic<std::uintptr_t> root{};
-  // Game tick: the host snapshot the render-thread read is compared with. The
-  // velocity turns the difference into a signed lead along the direction of
-  // travel, which is what separates "same field, read later" from "some other
-  // field that happens to be near". Measured from this probe's own successive
-  // snapshots, so it keeps working with the camera switched off.
-  std::atomic<double> player_cm[3]{};
-  std::atomic<double> velocity_cmps[3]{};
-  std::atomic_bool player_valid{};
-  // Which thread actually performs the X read. If the detour runs on the Game
-  // thread, a "render-time" reading is not render-time at all, and the whole
-  // premise needs revisiting before any anchoring work.
-  std::atomic<std::uint32_t> game_thread_id{};
-  std::atomic<std::uint64_t> samples_on_game_thread{};
-  double last_player_cm[3]{};
-  double last_player_time{};
-  bool have_last_player{};
-  // Game tick: same-chain cross-check, window max and session mismatch count.
-  double chain_max_cm{};
-  std::uint64_t chain_mismatches{};
-  // Render thread: phase samples. Reset with the host's 0.5 s windows.
-  std::atomic<std::uint64_t> read_failures{};
-  std::atomic<std::uint64_t> sample_count{};
-  std::atomic<std::uint64_t> peak_dcm{};
-  std::atomic<std::uint64_t> sum_dcm{};
-  std::atomic<std::uint64_t> peak_dms{};
-  std::atomic<std::uint64_t> sum_dms{};
-  std::atomic<std::uint64_t> speed_sum_cmps{};
-  std::atomic<std::int64_t> lead_sum_dcm{};
-  std::atomic<std::int64_t> lead_sum_dms{};
-  std::atomic<std::int64_t> lead_count{};
-
-  // Task group 1: version gate and the anchor snapshot the presenter reads.
-  // `insurance_state` and `chain_failed` are Game-tick only; the detour reads
-  // `anchor_enabled` and the snapshot fields.
-  std::uint8_t insurance_state{kAnchorInsuranceWaiting};
-  std::uint8_t logged_insurance_state{0xFF};
-  // Fail closed for the route B hooks that dereference the game's FViewInfo /
-  // FSceneRenderer layout. The profile hash is the only runtime witness we
-  // have for those offsets; patterns only prove that the function entry still
-  // exists. A missing/mismatched profile disables the camera instead of
-  // writing through a moved field.
-  std::atomic_bool version_gate{};
+  // Same-chain cross-check against the host's player snapshot. A stale offset
+  // table is caught here before the camera reads a transform through it.
   bool chain_verified{};
   bool chain_failed{};
   std::uint32_t chain_fail_streak{};
-  std::atomic_bool anchor_enabled{};
-  std::atomic_bool anchor_valid{};
-  std::atomic<double> anchor_cm[3]{};
-  std::atomic<std::int64_t> anchor_ns{};
-  std::atomic<std::int64_t> last_read_ns{};
-  std::atomic<std::uint64_t> anchor_read_failures{};
-  std::atomic<std::uint64_t> anchor_fallbacks{};
-  std::atomic<std::uint8_t> last_used{kAnchorStateDisabled};
-  // Task group 3: the vehicle anchor is the player capsule's AttachParent
-  // (the `VehicleMesh` SkeletalMesh). `vehicle_anchor_cm` is the scene proxy's
-  // LocalToWorld translation, or the parent's ComponentToWorld when the proxy
-  // did not validate, read in the same pass as `anchor_cm`; `vehicle_parent`
-  // is published for diagnostics only. `vehicle_read_failures` counts a
-  // non-null parent whose transform did not validate; a missing parent (on
-  // foot) is not a failure.
-  std::atomic_bool vehicle_anchor_valid{};
-  std::atomic<double> vehicle_anchor_cm[3]{};
-  std::atomic<std::int64_t> vehicle_anchor_ns{};
-  std::atomic<std::uintptr_t> vehicle_parent{};
-  // Game-tick presence signal derived from the same AttachParent read. The
-  // timestamp is refreshed on every valid parent sample, even while the car is
-  // parked and OnTransformChanged is not firing.
+  double chain_max_cm{};
+  std::uint64_t chain_mismatches{};
+
+  // Game-tick presence and body heading from the vehicle mesh's
+  // ComponentToWorld. `vehicle_sample_ns` is refreshed on every successful
+  // AttachParent read, including "no parent", so the Game tick can distinguish
+  // on-foot from a failed read. `vehicle_present_ns` is the last present
+  // sample.
   std::atomic_bool vehicle_present{};
   std::atomic<std::int64_t> vehicle_present_ns{};
-  // Last successful presence sample, present or absent. Unlike
-  // `vehicle_present_ns` (last present), this lets the Game tick distinguish
-  // "no parent, so definitely on foot" from "the parent read failed".
   std::atomic<std::int64_t> vehicle_sample_ns{};
+  std::atomic<std::uintptr_t> vehicle_parent{};
   std::atomic<std::uint64_t> vehicle_read_failures{};
-  std::atomic<std::uint64_t> vehicle_fallbacks{};
-  // A torn AttachParent/proxy read must not clear the render-thread proxy on
-  // the first miss: the prepare path would then hand one frame to the game
-  // camera. Keep the last valid proxy for a couple of 20 Hz polls, then fail
-  // closed if the vehicle really disappeared. Game-tick only.
-  std::atomic<std::uint32_t> vehicle_anchor_miss_streak{};
-  // True when the anchor came from the scene proxy rather than the component
-  // transform; the count is the number of valid parent frames that had to use
-  // the component transform because the proxy was null or did not validate.
-  std::atomic_bool vehicle_proxy_used{};
-  std::atomic<std::uint64_t> vehicle_proxy_fallbacks{};
-  // Task group 3 A2: the render thread's own transform notification. `watched_proxy`
-  // is published by the Game tick; the detour compares it by pointer. The
-  // published triple is guarded by `transform_sequence` (odd while writing), so
-  // the camera never mixes two frames of a moving car.
-  std::atomic<std::uintptr_t> watched_proxy{};
-  std::atomic<std::uint64_t> transform_sequence{};
-  std::atomic_bool transform_valid{};
-  std::atomic<std::uintptr_t> transform_proxy{};
-  std::atomic<double> transform_cm[3]{};
-  std::atomic<double> transform_forward[3]{};
-  std::atomic_bool transform_orientation_valid{};
-  std::atomic<std::int64_t> transform_ns{};
-  std::atomic<std::uint64_t> transform_updates{};
-  // Thread identity of the render-thread transform hook. The view hook is
-  // classified against it: a setup call from the Game thread (the renderer's
-  // constructor) must not be mistaken for a render-thread view build.
-  std::atomic<std::uint32_t> render_thread_id{};
-  std::atomic<std::uint64_t> view_uniform_calls{};
-  std::atomic<std::uint64_t> view_uniform_render_calls{};
-  std::atomic<std::uint64_t> view_uniform_game_calls{};
-  std::atomic<std::uint64_t> view_uniform_age_peak_us{};
-  std::atomic<std::uint64_t> view_uniform_age_sum_us{};
-  std::atomic<std::uint64_t> view_uniform_age_count{};
-  std::atomic<std::uint64_t> route_b_applied{};
-  std::atomic<std::uint64_t> route_b_fallbacks{};
-  std::atomic<std::uint64_t> route_b_witness_failures{};
-  std::atomic<std::uint64_t> route_b_last_age_us{};
-  // Pre-visibility applications. This is the only camera writer: the late
-  // SetupUniformBufferParameters hook no longer moves the view, because a
-  // post-Prepare pose would leave culling, motion vectors and TAA history on a
-  // different camera (the one-frame ghost).
-  std::atomic<std::uint64_t> route_b_early_applied{};
-  std::atomic<std::uint64_t> route_b_early_fallbacks{};
-  std::atomic<std::uint64_t> route_b_early_last_age_us{};
-  std::atomic<std::int64_t> route_b_early_ns{};
-  std::atomic<std::uint64_t> route_b_early_direct{};
-  std::atomic<std::uint64_t> route_b_early_presenter{};
-  std::atomic<std::uint64_t> route_b_early_held{};
-  // TEMP read-only timing diagnostics. These fields never write the camera.
-  std::atomic<std::uint64_t> timing_frame{};
-  std::atomic<std::uint64_t> timing_early_count{};
-  std::atomic<std::uint64_t> timing_late_count{};
-  std::atomic<std::uint64_t> timing_transform_before{};
-  std::atomic<std::uint64_t> timing_transform_between{};
-  std::atomic<std::uint64_t> timing_transform_after{};
-  std::atomic<std::int64_t> timing_early_ns{};
-  std::atomic<std::int64_t> timing_late_ns{};
-  std::atomic_bool timing_late_seen{};
-  std::atomic<double> timing_early_car[3]{};
-  std::atomic<double> timing_late_car[3]{};
-  std::atomic<double> timing_early_view[3]{};
-  std::atomic<double> timing_late_view[3]{};
-  std::atomic<double> timing_presenter_car[3]{};
-  std::atomic<std::uint64_t> timing_car_delta_peak_dmm{};
-  std::atomic<std::uint64_t> timing_car_delta_sum_dmm{};
-  std::atomic<std::uint64_t> timing_car_delta_count{};
-  std::atomic<std::uint64_t> timing_view_delta_peak_dmm{};
-  std::atomic<std::uint64_t> timing_view_delta_sum_dmm{};
-  std::atomic<std::uint64_t> timing_view_delta_count{};
-  // Render-thread-only last pose. If a proxy read is torn for one frame, repeat
-  // this pose briefly instead of dropping the frame to the game camera. Reset
-  // only when the session starts, before any callback can be in flight.
-  bool route_b_held_pose_valid{};
-  double route_b_held_eye_cm[3]{};
-  double route_b_held_rotation[3]{};
-  double route_b_held_eye_velocity_cmps[3]{};
-  double route_b_held_rotation_velocity_dps[3]{};
-  std::int64_t route_b_held_ns{};
-  std::uint32_t route_b_held_frames{};
-  std::atomic<std::uint64_t> route_b_render_applied{};
-  std::atomic<std::uint64_t> route_b_history_updated{};
-  // Latest NFS chase-model pose, published by the presenter on the Game
-  // thread and consumed by route B on the render thread. `sequence` is the
-  // usual odd/even seqlock; the transform remains the position truth, the
-  // model only supplies its camera offset and attitude.
-  std::atomic<std::uint64_t> route_b_model_sequence{};
-  std::atomic_bool route_b_model_valid{};
-  std::atomic<std::int64_t> route_b_model_ns{};
-  std::atomic<double> route_b_model_car_cm[3]{};
-  std::atomic<double> route_b_model_eye_cm[3]{};
-  std::atomic<double> route_b_model_rotation[3]{};
-  std::atomic<double> route_b_model_distance_scale{1.0};
-  std::atomic<double> route_b_model_height_scale{1.0};
-  std::atomic<float> route_b_model_lens{};
-  std::atomic<std::uint64_t> prepare_calls{};
-  std::atomic<std::uint64_t> prepare_thread_mismatch{};
-  std::atomic<std::uint64_t> prepare_anchor_off{};
-  std::atomic<std::uint64_t> prepare_no_views{};
-  std::atomic<std::uint64_t> prepare_pose_fail{};
-  std::atomic<std::uint64_t> prepare_fullscreen_views{};
-  // The exact views written before visibility. Kept for diagnostics only:
-  // route B no longer writes the camera from the late view hook, so a stale
-  // list cannot move a view after culling/TAA history were captured.
-  std::atomic<std::uint32_t> route_b_early_view_count{};
-  std::atomic<bool> route_b_early_views_valid{};
-  std::atomic<std::uint64_t> route_b_prepare_generation{};
-  std::atomic<std::uint64_t> route_b_transform_generation{};
-  std::atomic<std::uintptr_t> route_b_prepare_renderer{};
-  std::atomic<std::uintptr_t> route_b_active_renderer{};
-  std::atomic<std::int64_t> route_b_prepare_ns{};
-  std::atomic<std::uintptr_t> route_b_early_views[8]{};
-  std::atomic<std::uintptr_t> route_b_early_view_states[8]{};
-  // Task group 3 A2 isolation: the hook's own timestamp against the Game-tick
-  // proxy read in the same detour pass. A stable phase means the render value
-  // is the same transform read on another clock; a moving phase means the hook
-  // itself is stepping or stale. Read-only, reset with the 0.5 s windows.
-  std::atomic<std::uint64_t> render_proxy_peak_dcm{};
-  std::atomic<std::uint64_t> render_proxy_sum_dcm{};
-  std::atomic<std::uint64_t> render_proxy_count{};
-  std::atomic<std::uint64_t> render_proxy_peak_dms{};
-  std::atomic<std::uint64_t> render_proxy_sum_dms{};
-  std::atomic<std::uint64_t> render_proxy_time_count{};
-  std::atomic<std::int64_t> render_proxy_lead_sum_dcm{};
-  std::atomic<std::int64_t> render_proxy_lead_sum_dms{};
-  std::atomic<std::int64_t> render_proxy_lead_count{};
-  std::atomic<std::uint64_t> render_age_peak_us{};
-  std::atomic<std::uint64_t> render_age_sum_us{};
-  std::atomic<std::uint64_t> render_age_count{};
-  std::atomic_bool vehicle_render_used{};
+  std::atomic<double> body_yaw{};
+  std::atomic<std::int64_t> body_yaw_ns{};
+  std::atomic_bool body_yaw_valid{};
+  // A torn parent read must not clear the vehicle on the first miss; keep the
+  // last sample for at most this many 20 Hz polls. Game thread only.
+  std::uint32_t vehicle_miss_streak{};
 
   void Reset() noexcept {
-    resolve_state = kRenderXWait;
+    profile_state = kProfileGateWaiting;
+    logged_profile_state = 0xFF;
+    version_gate.store(false, std::memory_order_relaxed);
+    resolve_state = kVehicleRuntimeWait;
     resolve_code = 0;
     next_resolve_elapsed = 0.0;
     gworld_slot = 0;
     root.store(0, std::memory_order_relaxed);
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      player_cm[axis].store(0.0, std::memory_order_relaxed);
-      velocity_cmps[axis].store(0.0, std::memory_order_relaxed);
-    }
-    player_valid.store(false, std::memory_order_relaxed);
-    game_thread_id.store(0, std::memory_order_relaxed);
-    samples_on_game_thread.store(0, std::memory_order_relaxed);
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      last_player_cm[axis] = 0.0;
-    }
-    last_player_time = 0.0;
-    have_last_player = false;
-    chain_max_cm = 0.0;
-    chain_mismatches = 0;
-    read_failures.store(0, std::memory_order_relaxed);
-    sample_count.store(0, std::memory_order_relaxed);
-    peak_dcm.store(0, std::memory_order_relaxed);
-    sum_dcm.store(0, std::memory_order_relaxed);
-    peak_dms.store(0, std::memory_order_relaxed);
-    sum_dms.store(0, std::memory_order_relaxed);
-    speed_sum_cmps.store(0, std::memory_order_relaxed);
-    lead_sum_dcm.store(0, std::memory_order_relaxed);
-    lead_sum_dms.store(0, std::memory_order_relaxed);
-    lead_count.store(0, std::memory_order_relaxed);
-    insurance_state = kAnchorInsuranceWaiting;
-    logged_insurance_state = 0xFF;
-    version_gate.store(false, std::memory_order_relaxed);
     chain_verified = false;
     chain_failed = false;
     chain_fail_streak = 0;
-    anchor_enabled.store(false, std::memory_order_relaxed);
-    anchor_valid.store(false, std::memory_order_relaxed);
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      anchor_cm[axis].store(0.0, std::memory_order_relaxed);
-    }
-    anchor_ns.store(0, std::memory_order_relaxed);
-    last_read_ns.store(0, std::memory_order_relaxed);
-    anchor_read_failures.store(0, std::memory_order_relaxed);
-    anchor_fallbacks.store(0, std::memory_order_relaxed);
-    last_used.store(kAnchorStateDisabled, std::memory_order_relaxed);
-    vehicle_anchor_valid.store(false, std::memory_order_relaxed);
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      vehicle_anchor_cm[axis].store(0.0, std::memory_order_relaxed);
-    }
-    vehicle_anchor_ns.store(0, std::memory_order_relaxed);
-    vehicle_parent.store(0, std::memory_order_relaxed);
+    chain_max_cm = 0.0;
+    chain_mismatches = 0;
     vehicle_present.store(false, std::memory_order_relaxed);
     vehicle_present_ns.store(0, std::memory_order_relaxed);
     vehicle_sample_ns.store(0, std::memory_order_relaxed);
+    vehicle_parent.store(0, std::memory_order_relaxed);
     vehicle_read_failures.store(0, std::memory_order_relaxed);
-    vehicle_fallbacks.store(0, std::memory_order_relaxed);
-    vehicle_anchor_miss_streak.store(0, std::memory_order_relaxed);
-    vehicle_proxy_used.store(false, std::memory_order_relaxed);
-    vehicle_proxy_fallbacks.store(0, std::memory_order_relaxed);
-    watched_proxy.store(0, std::memory_order_relaxed);
-    transform_sequence.store(0, std::memory_order_relaxed);
-    transform_valid.store(false, std::memory_order_relaxed);
-    transform_proxy.store(0, std::memory_order_relaxed);
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      transform_cm[axis].store(0.0, std::memory_order_relaxed);
-      transform_forward[axis].store(0.0, std::memory_order_relaxed);
-    }
-    transform_orientation_valid.store(false, std::memory_order_relaxed);
-    transform_ns.store(0, std::memory_order_relaxed);
-    transform_updates.store(0, std::memory_order_relaxed);
-    render_thread_id.store(0, std::memory_order_relaxed);
-    view_uniform_calls.store(0, std::memory_order_relaxed);
-    view_uniform_render_calls.store(0, std::memory_order_relaxed);
-    view_uniform_game_calls.store(0, std::memory_order_relaxed);
-    view_uniform_age_peak_us.store(0, std::memory_order_relaxed);
-    view_uniform_age_sum_us.store(0, std::memory_order_relaxed);
-    view_uniform_age_count.store(0, std::memory_order_relaxed);
-    route_b_applied.store(0, std::memory_order_relaxed);
-    route_b_fallbacks.store(0, std::memory_order_relaxed);
-    route_b_witness_failures.store(0, std::memory_order_relaxed);
-    route_b_last_age_us.store(0, std::memory_order_relaxed);
-    route_b_early_applied.store(0, std::memory_order_relaxed);
-    route_b_early_fallbacks.store(0, std::memory_order_relaxed);
-    route_b_early_last_age_us.store(0, std::memory_order_relaxed);
-    route_b_early_ns.store(0, std::memory_order_relaxed);
-    route_b_early_direct.store(0, std::memory_order_relaxed);
-    route_b_early_presenter.store(0, std::memory_order_relaxed);
-    route_b_early_held.store(0, std::memory_order_relaxed);
-    route_b_held_pose_valid = false;
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      route_b_held_eye_cm[axis] = 0.0;
-      route_b_held_rotation[axis] = 0.0;
-      route_b_held_eye_velocity_cmps[axis] = 0.0;
-      route_b_held_rotation_velocity_dps[axis] = 0.0;
-    }
-    route_b_held_ns = 0;
-    route_b_held_frames = 0;
-    route_b_render_applied.store(0, std::memory_order_relaxed);
-    route_b_history_updated.store(0, std::memory_order_relaxed);
-    route_b_model_sequence.store(0, std::memory_order_relaxed);
-    route_b_model_valid.store(false, std::memory_order_relaxed);
-    route_b_model_ns.store(0, std::memory_order_relaxed);
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      route_b_model_car_cm[axis].store(0.0, std::memory_order_relaxed);
-      route_b_model_eye_cm[axis].store(0.0, std::memory_order_relaxed);
-      route_b_model_rotation[axis].store(0.0, std::memory_order_relaxed);
-    }
-    route_b_model_distance_scale.store(1.0, std::memory_order_relaxed);
-    route_b_model_height_scale.store(1.0, std::memory_order_relaxed);
-    route_b_model_lens.store(0.0F, std::memory_order_relaxed);
-    prepare_calls.store(0, std::memory_order_relaxed);
-    prepare_thread_mismatch.store(0, std::memory_order_relaxed);
-    prepare_anchor_off.store(0, std::memory_order_relaxed);
-    prepare_no_views.store(0, std::memory_order_relaxed);
-    prepare_pose_fail.store(0, std::memory_order_relaxed);
-    prepare_fullscreen_views.store(0, std::memory_order_relaxed);
-    route_b_early_view_count.store(0, std::memory_order_relaxed);
-    route_b_early_views_valid.store(false, std::memory_order_relaxed);
-    route_b_prepare_generation.store(0, std::memory_order_relaxed);
-    route_b_transform_generation.store(0, std::memory_order_relaxed);
-    route_b_prepare_renderer.store(0, std::memory_order_relaxed);
-    route_b_active_renderer.store(0, std::memory_order_relaxed);
-    route_b_prepare_ns.store(0, std::memory_order_relaxed);
-    for (auto &view : route_b_early_views) {
-      view.store(0, std::memory_order_relaxed);
-    }
-    for (auto &state : route_b_early_view_states) {
-      state.store(0, std::memory_order_relaxed);
-    }
-    render_proxy_peak_dcm.store(0, std::memory_order_relaxed);
-    render_proxy_sum_dcm.store(0, std::memory_order_relaxed);
-    render_proxy_count.store(0, std::memory_order_relaxed);
-    render_proxy_peak_dms.store(0, std::memory_order_relaxed);
-    render_proxy_sum_dms.store(0, std::memory_order_relaxed);
-    render_proxy_time_count.store(0, std::memory_order_relaxed);
-    render_proxy_lead_sum_dcm.store(0, std::memory_order_relaxed);
-    render_proxy_lead_sum_dms.store(0, std::memory_order_relaxed);
-    render_proxy_lead_count.store(0, std::memory_order_relaxed);
-    render_age_peak_us.store(0, std::memory_order_relaxed);
-    render_age_sum_us.store(0, std::memory_order_relaxed);
-    render_age_count.store(0, std::memory_order_relaxed);
-    vehicle_render_used.store(false, std::memory_order_relaxed);
-  }
-
-  // Called by the Game tick every 0.5 s, next to the other diagnostic windows.
-  void ResetWindow() noexcept {
-    peak_dcm.store(0, std::memory_order_relaxed);
-    sum_dcm.store(0, std::memory_order_relaxed);
-    peak_dms.store(0, std::memory_order_relaxed);
-    sum_dms.store(0, std::memory_order_relaxed);
-    speed_sum_cmps.store(0, std::memory_order_relaxed);
-    sample_count.store(0, std::memory_order_relaxed);
-    lead_sum_dcm.store(0, std::memory_order_relaxed);
-    lead_sum_dms.store(0, std::memory_order_relaxed);
-    lead_count.store(0, std::memory_order_relaxed);
-    render_proxy_peak_dcm.store(0, std::memory_order_relaxed);
-    render_proxy_sum_dcm.store(0, std::memory_order_relaxed);
-    render_proxy_count.store(0, std::memory_order_relaxed);
-    render_proxy_peak_dms.store(0, std::memory_order_relaxed);
-    render_proxy_sum_dms.store(0, std::memory_order_relaxed);
-    render_proxy_time_count.store(0, std::memory_order_relaxed);
-    render_proxy_lead_sum_dcm.store(0, std::memory_order_relaxed);
-    render_proxy_lead_sum_dms.store(0, std::memory_order_relaxed);
-    render_proxy_lead_count.store(0, std::memory_order_relaxed);
-    render_age_peak_us.store(0, std::memory_order_relaxed);
-    render_age_sum_us.store(0, std::memory_order_relaxed);
-    render_age_count.store(0, std::memory_order_relaxed);
-    samples_on_game_thread.store(0, std::memory_order_relaxed);
-    chain_max_cm = 0.0;
+    body_yaw.store(0.0, std::memory_order_relaxed);
+    body_yaw_ns.store(0, std::memory_order_relaxed);
+    body_yaw_valid.store(false, std::memory_order_relaxed);
+    vehicle_miss_streak = 0;
   }
 };
 
@@ -1021,9 +693,6 @@ struct DisplayState final {
   double slope_strength{kDefaultSlopeStrength};
   bool roll_only_in_drift{true};
   bool diagnostic_flat_pose{};
-  bool diagnostic_zero_lag{};
-  double borrow_strength{};
-  bool borrow_fallback{kDefaultBorrowFallback};
   bool diagnostic_skip_position{};
   bool diagnostic_skip_rotation{};
 
@@ -1037,7 +706,6 @@ struct DisplayState final {
   std::uint64_t snap_total{};
   std::uint64_t snap_by_reason[kSnapReasonCount]{};
   std::uint64_t yaw_source_switches{};
-  std::uint64_t observed_read_failures{};
   std::uint64_t lease_failures{};
   std::uint64_t view_read_torn{};
   std::uint64_t detour_calls{};
@@ -1061,73 +729,17 @@ struct DisplayState final {
   double render_speed_peak_mps{};
   double render_turn_floor_dps{};
   double render_turn_peak_dps{};
-  double car_step_cm{};
 
-  // Render-thread X probe (PLAN-render-thread-hook.md task group 0). Copied
-  // from Context::render_x on the Game tick.
-  std::uint8_t render_x_state{};
-  std::uint32_t render_x_code{};
-  std::uint64_t render_x_failures{};
-  std::uint64_t render_x_samples{};
-  bool render_x_valid{};
-  double render_x_avg_cm{};
-  double render_x_peak_cm{};
-  double render_x_avg_ms{};
-  double render_x_peak_ms{};
-  double render_x_lead_cm{};
-  double render_x_lead_ms{};
-  double render_x_speed_kmh{};
-  double render_x_chain_cm{};
-  std::uint64_t render_x_chain_mismatches{};
-  std::uint64_t render_x_gt_samples{};
-  std::uint32_t anchor_source{kAnchorSourceDefault};
-  std::uint8_t anchor_effective{kAnchorStateDisabled};
-  std::uint8_t anchor_gate{kAnchorGateOff};
-  std::uint64_t anchor_fallbacks{};
-  std::uint64_t anchor_read_failures{};
-  bool vehicle_anchor_valid{};
+  // Game-thread vehicle runtime. These fields are the chain gate and the
+  // vehicle presence signal.
+  std::uint8_t runtime_state{};
+  std::uint32_t runtime_code{};
+  std::uint8_t runtime_gate{kProfileGateOff};
+  double runtime_chain_cm{};
+  std::uint64_t runtime_chain_mismatches{};
   bool vehicle_present{};
   bool vehicle_presence_known{};
-  bool vehicle_proxy_used{};
-  bool vehicle_render_used{};
-  bool transform_hook_valid{};
-  std::uint64_t vehicle_fallbacks{};
   std::uint64_t vehicle_read_failures{};
-  std::uint64_t vehicle_proxy_fallbacks{};
-  std::uint64_t transform_updates{};
-  bool view_uniform_hook_valid{};
-  std::uint64_t view_uniform_calls{};
-  std::uint64_t view_uniform_render_calls{};
-  std::uint64_t view_uniform_game_calls{};
-  std::uint32_t render_thread_id{};
-  bool view_uniform_age_valid{};
-  double view_uniform_age_avg_ms{};
-  double view_uniform_age_peak_ms{};
-  std::uint64_t route_b_applied{};
-  std::uint64_t route_b_fallbacks{};
-  std::uint64_t route_b_witness_failures{};
-  std::uint64_t route_b_early_applied{};
-  std::uint64_t route_b_early_fallbacks{};
-  double route_b_last_age_ms{};
-  double route_b_early_last_age_ms{};
-  std::uint64_t prepare_calls{};
-  std::uint64_t prepare_thread_mismatch{};
-  std::uint64_t prepare_anchor_off{};
-  std::uint64_t prepare_no_views{};
-  std::uint64_t prepare_pose_fail{};
-  std::uint64_t prepare_fullscreen_views{};
-  std::uint64_t route_b_early_direct{};
-  std::uint64_t route_b_early_held{};
-  bool render_proxy_valid{};
-  double render_proxy_avg_cm{};
-  double render_proxy_peak_cm{};
-  double render_proxy_avg_ms{};
-  double render_proxy_peak_ms{};
-  double render_proxy_lead_cm{};
-  double render_proxy_lead_ms{};
-  bool render_age_valid{};
-  double render_age_avg_ms{};
-  double render_age_peak_ms{};
 
   // Probe. Copied from Context::probe on the Game tick.
   bool probe_ahud_service{};
@@ -1312,7 +924,7 @@ struct ViewModeState final {
   bool have_tag{};
   // TG-1: the chase slot. The plugin still never keeps its own "which mode am
   // I in" counter - the tag below is a copy of the game's, refreshed every tick
-  // by the watcher and read by the presenter and the render-thread guard.
+  // by the watcher and read by the presenter and the chase guard.
   std::atomic<std::uint64_t> published_tag{};
   std::atomic_bool published_tag_known{};
   // Set by the presenter: the same `driving` answer the chase model uses. The
@@ -1444,8 +1056,8 @@ struct Context final {
   // Optional engine access. Only the probe uses this; it may be null on a host
   // without the `ue5.ahud` feature, and every use is guarded.
   const AnomalyUe5AhudServiceV1 *ahud{};
-  // Optional build identity. It gates the hardcoded offset table used by the X
-  // anchor; a host without it simply leaves the X path disabled.
+  // Optional build identity. It gates the hardcoded vehicle/GWorld offsets;
+  // a host without it leaves the game-thread camera disabled.
   const AnomalyUe5BuildServiceV1 *build{};
   // Optional name pool access. `find_utf8` (names service v2) is the only way
   // to turn "CameraViewMode.ThirdPerson" into the id this process assigned it;
@@ -1453,32 +1065,16 @@ struct Context final {
   const AnomalyUe5NamesServiceV1 *names{};
 
   AnomalyGenerationHandleV1 settings_schema{};
-  std::atomic<std::uint64_t> view_hook_id{};
-  std::atomic<std::uint64_t> view_hook_generation{};
-  // 2.1.0 game-thread hooks. They are separate from the old CameraManager
-  // getter so the temporary A/B switch can choose exactly one path.
+  // The 2.1.0 game-thread hooks.
   std::atomic<std::uint64_t> game_view_point_hook_id{};
   std::atomic<std::uint64_t> game_view_point_hook_generation{};
   std::atomic<std::uintptr_t> game_view_point_hook_target{};
   std::atomic<std::uint64_t> scene_view_init_hook_id{};
   std::atomic<std::uint64_t> scene_view_init_hook_generation{};
   std::atomic<std::uintptr_t> scene_view_init_hook_target{};
-  std::atomic<std::uint64_t> transform_hook_id{};
-  std::atomic<std::uint64_t> transform_hook_generation{};
-  std::atomic<std::uintptr_t> transform_hook_target{};
-  std::atomic<std::uint64_t> view_uniform_hook_id{};
-  std::atomic<std::uint64_t> view_uniform_hook_generation{};
-  std::atomic<std::uintptr_t> view_uniform_hook_target{};
-  std::atomic<std::uint64_t> prepare_view_state_hook_id{};
-  std::atomic<std::uint64_t> prepare_view_state_hook_generation{};
-  std::atomic<std::uintptr_t> prepare_view_state_hook_target{};
 
   // Settings: Render/hotkey write, Game reads.
   std::atomic_bool enabled{true};
-  // Temporary A/B switch (task group 3; removed in task group 7). False keeps
-  // the render-thread path; true selects the new game-thread GetViewPoint path.
-  // Read by hook installation and by the detours, hence an atomic.
-  std::atomic_bool native_view_point{false};
   std::atomic<std::uint32_t> preset{0};
   std::atomic<double> camera_distance_m{kDefaultCameraDistanceM};
   std::atomic<double> position_spring{kDefaultPositionSpring};
@@ -1548,40 +1144,10 @@ struct Context final {
   // so only position and yaw survive. One click decides whether the twitch is
   // inside the attitude model at all, without reading a single number.
   std::atomic_bool diagnostic_flat_pose{};
-  // Second bisect switch: stop delaying at all and use the newest Game-tick
-  // position. If the Game draws the car from that same value, the car sits
-  // still in frame and only the background steps; if it draws an interpolated
-  // position, the car itself will start stepping instead. Either answer says
-  // which of the two we have been chasing.
-  std::atomic_bool diagnostic_zero_lag{};
-  // Third pair of bisect switches: what we write. Every build so far has
-  // overwritten the Game's location and rotation together, so the write itself
-  // has never been varied, only the arithmetic behind it. Turning one of these
-  // off leaves the Game's own value in place for that half.
+  // Bisect switches for what the view writes. Turning one off leaves the Game's
+  // own value in place for that half.
   std::atomic_bool diagnostic_skip_position{};
   std::atomic_bool diagnostic_skip_rotation{};
-  // Render-synced car position estimate. The Game draws the car at an instant
-  // our Game-tick samples cannot see, but the Game's own camera position is
-  // produced at that same instant. We low-pass the Game camera's offset from
-  // our sampled car to recover the Game camera's framing, then subtract it
-  // from the Game camera position to approximate where the Game actually drew
-  // the car this frame. The chase model can then anchor itself to that point,
-  // which is the quantity that was missing before.
-  bool game_offset_valid{};
-  double game_offset_cm[3]{};
-  std::int64_t game_offset_last_ns{};
-  // How much of the render-synced car position to use, 0..1. At zero this is
-  // the plain NFS model anchored to the Game-tick sample; at one the model is
-  // anchored to the Game's drawn car position.
-  std::atomic<double> borrow_strength{1.0};
-  // Whether a stale snapshot may fall back to the borrow estimate. Off keeps
-  // one estimator for the whole frame, so a hitch cannot move the eye for one
-  // frame and put the car in a different place on screen.
-  std::atomic_bool borrow_fallback{kDefaultBorrowFallback};
-  // Which position source feeds the anchor: X (detour-time `root+280`), the
-  // borrow estimate, or the plain tick sample. The X path falls back to borrow
-  // when the build gate is closed, so the camera never depends on it.
-  std::atomic<std::uint32_t> anchor_source{kAnchorSourceDefault};
   std::atomic_bool fov_enabled{true};
   // Grouped settings (PLAN-settings-ui-groups.md task group 1). The atomics
   // above remain the effective values every consumer reads; ApplyGroup() is
@@ -1604,54 +1170,19 @@ struct Context final {
   std::atomic<std::uint32_t> settings_save_reported_error{
       ANOMALY_STATUS_V1_OK};
 
-  // Hook and manager/POV state. `observed_manager` is written by the detour;
-  // `resolved_manager` and `camera_pov` are written by the Game tick.
-  std::atomic<std::uintptr_t> hook_target{};
+  // Hook state. `hook_ready` means both game-thread hooks are installed.
   std::atomic_bool hook_ready{};
-  std::atomic<std::uintptr_t> observed_manager{};
-  std::uintptr_t resolved_manager{};
-  std::atomic<std::uintptr_t> camera_pov{};
-  std::atomic<std::uintptr_t> camera_pov_manager{};
-  std::atomic<float> game_fov{};
-  std::atomic_bool fov_restore{};
-  std::atomic<double> observed_location[3]{};
-  std::atomic<double> observed_rotation[3]{};
-  std::atomic<std::uint64_t> observed_sequence{};
-  std::atomic_bool observed_valid{};
   double next_hook_retry{};
-  bool hook_failure_logged{};
-  bool transform_hook_failure_logged{};
-  bool view_uniform_hook_failure_logged{};
-  bool view_uniform_diag_logged{};
-  bool route_b_diag_logged{};
-  bool route_b_early_failure_logged{};
-  std::uint64_t route_b_timing_last_log_ms{};
-  std::uint32_t route_b_timing_windows{};
-  bool route_b_pattern_failure_logged{};
-  bool prepare_view_state_hook_failure_logged{};
-  bool prepare_view_state_pattern_failure_logged{};
   // A deterministic pattern miss cannot be fixed by scanning the module again.
-  // Latch it so the 2 s hook retry does not re-scan .text forever; the camera
-  // stays on whatever path remains available.
-  bool early_route_b_unavailable{};
-  std::uint32_t prepare_hook_pattern_failures{};
-  bool transform_pattern_unavailable{};
-  bool view_uniform_pattern_unavailable{};
-  bool view_point_pattern_unavailable{};
+  // Latch it so the 2 s hook retry does not re-scan .text forever.
   bool game_view_point_pattern_unavailable{};
   bool scene_view_init_pattern_unavailable{};
   bool game_view_point_hook_failure_logged{};
   bool scene_view_init_hook_failure_logged{};
 
-  // Published view snapshot. The location fields are offsets from the car,
-  // not absolute world positions: the detour adds the latest car position so
-  // a Game-tick car transform step cannot change the camera-to-car distance.
-  // Written under a seqlock: odd while a write is in progress, even when the
-  // snapshot is complete.
-  std::atomic<std::uint64_t> view_sequence{};
-  // Bumped when the chase slot is left or re-entered. The render thread
-  // compares it with its own copy and drops a latched shot, so returning from
-  // first person or a cutscene does not resume an orbit immediately.
+  // Bumped when the chase slot is left or re-entered. The presenter drops a
+  // latched orbit when it changes, so returning from first person or a cutscene
+  // does not resume an orbit immediately.
   std::atomic<std::uint64_t> view_epoch{};
   std::atomic_bool view_active{};
   // 2.1.0 scene-phase gate. The model advances once at the entry of
@@ -1667,15 +1198,6 @@ struct Context final {
   std::atomic<std::uint32_t> view_build_depth{};
   std::atomic_bool pose_attempted{};
   std::atomic_bool pose_ready{};
-  std::atomic<bool> view_fov_enabled{true};
-  // `view_car_location` is the published camera anchor. The detour computes
-  // `anchor + offset`, and the offset is built from the same anchor, so the
-  // anchor cancels out of the world position: it only has to be stable. The
-  // Pawn root location is the cheapest stable choice (one cached snapshot
-  // field per tick), and it is the actor transform the car is drawn at.
-  std::atomic<double> view_car_location[3]{};
-  // Game camera location at the time the published view was computed. The
-  // detour adds the movement since then so the eye and car share a frame.
 
   double brake_last_target{};
 
@@ -1698,13 +1220,9 @@ struct Context final {
   OrbitUiRuntimeState orbit_ui{};
   std::uint32_t configured_preset{0};
   bool chase_initialized{};
-  // T2: the old render-thread path still consumes a ring so it can interpolate
-  // between Game ticks. Task group 5 gives the game-thread path a direct
-  // snapshot instead: the last completed Game-tick car state is copied once at
-  // the scene-view advance, then the live VehicleMesh ComponentToWorld replaces
-  // its position and attitude. No interpolation and no render-clock mapping.
-  // The ring stays only for the A/B path until task group 7 deletes it.
-  nfs2015_chase::SampleRing car_ring;
+  // The last completed Game-tick car state. It is copied once at the
+  // scene-view advance, then the live VehicleMesh ComponentToWorld replaces its
+  // position and attitude. No interpolation and no render-clock mapping.
   std::atomic<std::uint64_t> latest_car_sample_sequence{};
   nfs2015_chase::CarSample latest_car_sample{};
   std::atomic_bool latest_car_sample_valid{};
@@ -1724,7 +1242,7 @@ struct Context final {
   std::int64_t presenter_last_ns{};
   std::uint64_t presenter_epoch{};
   std::uint64_t presenter_view_epoch{};
-  // Last orbit phase a transition log was emitted for (render thread only).
+  // Last orbit phase a transition log was emitted for.
   std::uint32_t presenter_orbit_logged_mode{};
   bool presenter_initialized{};
   std::int64_t presenter_pose_ns{};
@@ -1742,12 +1260,12 @@ struct Context final {
   // published pose. The settings panel shows it beside the live distance.
   std::atomic<double> presenter_height_cm{};
   // Diagnostics for the mixed chase/shot camera. The blend is written under
-  // the presenter lock and read by route B / diagnostics.
+  // the presenter lock and read by diagnostics.
   std::atomic<double> presenter_burnout_blend{};
   std::atomic<int> presenter_burnout_side{1};
   std::atomic<std::uint64_t> presenter_burnout_fallbacks{};
-  // Parked-orbit diagnostics. Written on the render thread, read by the
-  // Game-tick display snapshot. The mode is the numeric OrbitPhase value.
+  // Parked-orbit diagnostics. Written by the presenter, read by the Game-tick
+  // display snapshot. The mode is the numeric OrbitPhase value.
   std::atomic<double> presenter_orbit_blend{};
   std::atomic<std::uint32_t> presenter_orbit_mode{};
   std::atomic<double> presenter_orbit_hold_seconds{};
@@ -1772,15 +1290,6 @@ struct Context final {
   std::int64_t sample_last_ns{};
   // Bumped by the Game tick when the model must restart (world, preset, reset).
   std::uint64_t sample_epoch{};
-  // Latest body pitch published by the render-thread transform hook, radians
-  // (nose up positive). Game-tick only, so plain fields are enough.
-  // `render_pitch_floor_ns` rejects a snapshot from before the last reset or
-  // teleport; `render_pitch_ns` is the snapshot's own timestamp.
-  bool render_pitch_valid{};
-  double render_pitch_radians{};
-  std::int64_t render_pitch_ns{};
-  std::int64_t render_pitch_floor_ns{};
-  std::uintptr_t render_pitch_proxy{};
   std::atomic_bool reset_requested{};
   std::atomic<std::uint64_t> reset_feedback_until{};
   std::atomic_bool hook_retry_requested{};
@@ -1842,8 +1351,8 @@ struct Context final {
   // drop out for a tick now and then, and a gap must not look like an exit.
   double view_off_seconds{1.0};
   bool view_slot_chase_last{};
-  // T3.1: game-camera yaw from the player ESP snapshot, i.e. sampled by the
-  // host on this Game tick instead of observed on the render thread.
+  // T3.1: game-camera yaw from the player ESP snapshot, sampled by the host
+  // on this Game tick.
   double camera_yaw_radians{};
   bool camera_yaw_valid{};
   bool view_snap{true};
@@ -1852,9 +1361,8 @@ struct Context final {
   // touches Context::diag atomics.
   Diagnostics diag{};
   Probe probe{};
-  // PLAN-render-thread-hook.md task group 0. Read-only: it never reaches the
-  // camera or the publisher.
-  RenderXProbe render_x{};
+  // Game-thread profile gate, player chain and vehicle presence.
+  VehicleRuntime vehicle_runtime{};
   // Phase 0 burnout reconnaissance. Game-thread only; read-only.
   BurnoutProbeState burnout_probe{};
   // Phase 2: the compact facts and the Game-tick hysteresis that feed
