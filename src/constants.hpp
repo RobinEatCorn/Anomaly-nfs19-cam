@@ -498,8 +498,8 @@ constexpr std::string_view kAcceptedProfileHashes[] = {
     "93eefb64683fe66d202cd405079e15540fe1ee0d6f5b40b7eacf3889c6eff1ff",
     // Anomaly 3.0.0 repository profile (LF JSON).
     "ddba763c22f45a2354b48cc123eef217717637088046ea5353afa0380bd22a20",
-    // Anomaly 3.1.0 installed runtime (CRLF JSON). Adds combat/account keys;
-    // every camera layout key and ue5.GWorld are unchanged from 3.0.0.
+    // Anomaly 3.1.0 / 3.1.1 installed runtime (CRLF JSON). 3.1.1 ships the
+    // same NTE profile; every camera layout key and ue5.GWorld are unchanged.
     "08a3feb998c74f99375cebd6bd8866e409663680b9fe3da229274f4c9c2e249a",
     // Anomaly 3.1.0 repository profile (LF JSON, tag v3.1.0).
     "9acaf134e5279ade33f1b3c555a114b60871511717d9131850fe4a7bca2d5a82",

@@ -187,10 +187,28 @@ bool EnsureSceneViewInitOptionsHook(Context &context) noexcept {
 }
 
 bool EnsureHook(Context &context) noexcept {
+  // The two hooks are one path: the view-point hook writes the pose and the
+  // scene hook advances it and writes the cut. Installing only one would leave
+  // a half-active path, so a session that cannot resolve either pattern keeps
+  // the native camera and does not keep retrying the other hook.
+  if (context.game_view_point_pattern_unavailable ||
+      context.scene_view_init_pattern_unavailable) {
+    if (AnyCameraHookInstalled(context)) {
+      ReleaseHook(context);
+    }
+    context.hook_ready.store(false, std::memory_order_release);
+    return false;
+  }
   const bool view_point = EnsureViewPointHook(context);
-  const bool scene_init = EnsureSceneViewInitOptionsHook(context);
+  bool scene_init = false;
+  if (view_point) {
+    scene_init = EnsureSceneViewInitOptionsHook(context);
+  }
   const bool ready = view_point && scene_init;
   context.hook_ready.store(ready, std::memory_order_release);
+  if (!ready && AnyCameraHookInstalled(context)) {
+    ReleaseHook(context);
+  }
   return ready;
 }
 

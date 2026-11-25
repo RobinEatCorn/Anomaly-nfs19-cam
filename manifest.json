@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "robineatcorn.nfs2015-chase-cam",
   "name": "NFS 2015 Chase Cam",
-  "description": "Replaces the driving camera with the NFS 2015 action camera model and adds NFS-style visual front-wheel countersteer during drifts (travel direction, speed/slip gates, a 0.5s hold, smooth stock-angle handoff). Camera features: loose drift yaw spring, car-local pivot orbit, drift push-in/drop, body-pitch slope follow, speed FOV and shake. Parked 8s with no input, a handheld orbit shot circles the car and can hide the HUD. Z cycles chase, third person and first person while driving.",
+  "description": "Replaces the driving camera with the NFS 2015 action camera model and adds NFS-style visual front-wheel countersteer during drifts. The camera advances on the game thread at the scene-view phase, reads the same VehicleMesh ComponentToWorld the renderer is about to draw, and writes only FMinimalViewInfo / bInCameraCut; the render thread is not touched. Includes drift yaw spring, pivot orbit, slope follow, speed FOV, shake, parked orbit, and Z chase/third/first cycling while driving.",
   "author": "RobinEatCorn",
   "license": "AGPL-3.0-only",
   "version": "2.1.0",

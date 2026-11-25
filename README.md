@@ -12,6 +12,10 @@
 并在漂移时提供 NFS 2015 风格的前轮视觉反打。本仓库既是源码仓库，也是 Anomaly 的第三方插件源
 （根目录的 `pluginmaster.json`）。
 
+2.1.0 起相机在**游戏线程的场景视图相位**推进：读取渲染器即将绘制的车辆
+`ComponentToWorld`，只写 `FMinimalViewInfo` 和 `FSceneViewInitOptions::bInCameraCut`。
+插件不再写渲染线程视图，也不再写 `CameraCache`；钩子或偏移不可用时回游戏原相机。
+
 ## 烧胎特写
 
 烧胎特写默认关闭，把设置面板的 **烧胎特写** 组切到 **开启**（或 **自定义**）后可用。启用后，车辆静止、拉手刹并踩油门
@@ -128,9 +132,9 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 `Nfs2015ChaseCam-<version>.zip`，把 ZIP **里面的内容**解压到该目录
 （`manifest.json` 必须直接在目录根部，不能多套一层文件夹）。
 
-## Anomaly 2.7.0 / 3.0.0 / 3.1.0 兼容性
+## Anomaly 2.7.0 – 3.1.1 兼容性
 
-- **支持 Anomaly 2.7.0、3.0.0 与 3.1.0（同一个包）**。1.1.1 及更早版本使用旧插件 ID，
+- **支持 Anomaly 2.7.0、3.0.0、3.1.0 与 3.1.1（同一个包）**。1.1.1 及更早版本使用旧插件 ID，
   在这些版本下无法加载。
 - 2.7.0 删除了 `anomaly.nte.vehicle` 服务和 `nte-vehicle` capability；本版本已同步删除。
   旧版服务里的带符号车速通过 `HTVehicleMovementComponent:GetForwardSpeedKmH` 反射调用恢复：
@@ -156,10 +160,23 @@ https://raw.githubusercontent.com/RobinEatCorn/Anomaly-nfs19-cam/main/pluginmast
 - 3.1.0 的 profile 在 3.0.0 基础上只新增战斗/账号相关的 layout 和 symbol；插件依赖的
   相机 layout、`ue5.GWorld` 和 `HTGame.exe` 都没有变，所以偏移与 pattern 仍未改。
   3.1.0 SDK 下重新编译通过，3.1.0 测试宿主 10 次 reload / 660 tick 通过。
+- 3.1.1 使用与 3.1.0 相同的 NTE profile（`08a3feb9...249a`），门禁直接 ready；2.1.0 的
+  实机验证在 Anomaly 3.1.1 上完成。
 - 两个相机钩子只在 `CalcSceneViewInitOptions` 的场景相位写视点；早段 UI 使用上一场景
-  的 pose，场景推进失败时整帧退回游戏相机。
+  的 pose，场景推进失败时整帧退回游戏相机。两个钩子是一个整体：任一 pattern 或 hook
+  失败就释放另一个，不会留下半条路径。
 - 旧 ID 的启用状态、设置目录和窗口位置不会自动迁移；请按下面的手动步骤复制。
   完整变更列表见 [RELEASE-NOTES-2.0.0.md](RELEASE-NOTES-2.0.0.md)。
+
+### 从 2.0.6 升级
+
+插件 ID 和设置目录不变，直接在线更新或替换插件目录即可。设置 schema 仍是版本 1；
+2.1.0 删除了 `anchorSource`、`borrowStrength`、`borrowFallback`、`diagnosticZeroLag`
+这几个旧高级键，旧配置里的这些键会被忽略，其余 8 组设置和窗口状态保留。
+
+相机行为有一次架构切换：不再经过渲染线程，也不再覆盖 `CameraCache.POV.FOV`。如果你同时
+使用 Camera Tools / BetterPose，2.1.0 占用的是 `ULocalPlayer::GetViewPoint`，请只保留一个
+相机插件。
 
 ### 从 1.1.1 升级
 
@@ -242,6 +259,7 @@ Game tick 读取一次用于存在性和车头朝向，场景相位再读一次�
 ├── CMakePresets.json     MSVC x64 preset
 ├── manifest.json         插件包 Manifest（id / 服务 / capability）
 ├── pluginmaster.json     第三方插件源条目
+├── RELEASE-NOTES-2.1.0.md 游戏线程场景相位相机、2.1.0 验证
 ├── RELEASE-NOTES-2.0.6.md 停车环绕、第 8 组设置
 ├── RELEASE-NOTES-2.0.5.md 设置分组、米制机位、漂移前轮、车体朝向
 ├── RELEASE-NOTES-2.0.4.md Z 键三档视角循环（追车/第三人称/第一人称）
@@ -698,12 +716,11 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 ## 发布
 
 `manifest.json`、`pluginmaster.json` 与 `plugin.cpp` 里的描述符必须一致，当前 ID 为
-`robineatcorn.nfs2015-chase-cam`，当前版本 `2.0.6`。ID 一旦发布就不应再变。
+`robineatcorn.nfs2015-chase-cam`，当前版本 `2.1.0`。ID 一旦发布就不应再变。
 
 发布门禁、离线/实机测试矩阵、产物哈希和回滚步骤记录在
-[RELEASE-CHECKLIST-2.0.0.md](RELEASE-CHECKLIST-2.0.0.md)。完整发布前至少完成两个不同地图、
-两次完整重启的实机验收；2.0.4 的 Z 循环与抓拍修复已做过实机逐帧验收（见
-[REPORT-phase2-h1.md](REPORT-phase2-h1.md)），仍未覆盖的只有剧情过场目视一次与 30 分钟长跑。
+[RELEASE-CHECKLIST-2.1.0.md](RELEASE-CHECKLIST-2.1.0.md)。本版的架构、E4b 数据、
+故障注入和 fail-open 结果见 [RELEASE-NOTES-2.1.0.md](RELEASE-NOTES-2.1.0.md)。
 
 1. 同步升版本：`manifest.json` 的 `version`、`pluginmaster.json` 的 `Version` 和 ZIP 文件名。
 2. 构建 Release 包，跑 `ctest`、`anomaly-plugin validate` 和 `anomaly-test-host`（见上一节）。
@@ -711,7 +728,7 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 
    ```powershell
    Compress-Archive -Path .\build\package\robineatcorn.nfs2015-chase-cam\* `
-     -DestinationPath .\dist\Nfs2015ChaseCam-2.0.6.zip -Force
+     -DestinationPath .\dist\Nfs2015ChaseCam-2.1.0.zip -Force
    ```
 
    WSL 里用 `./build-mingw.sh --zip`，输出同名的 `dist/Nfs2015ChaseCam-<version>.zip`；
@@ -720,9 +737,9 @@ C++ `try/catch` 捕获不到这类异常。遇到新版本请先把新 hash 加�
 4. 先上传不可变的 Release 资源，确认下载链接直接返回 ZIP 而不是网页：
 
    ```sh
-   gh release create v2.0.6 dist/Nfs2015ChaseCam-2.0.6.zip \
-     --title "NFS 2015 Chase Cam 2.0.6" \
-     --notes-file RELEASE-NOTES-2.0.6.md
+   gh release create v2.1.0 dist/Nfs2015ChaseCam-2.1.0.zip \
+     --title "NFS 2015 Chase Cam 2.1.0" \
+     --notes-file RELEASE-NOTES-2.1.0.md
    ```
 
 5. 最后更新 `pluginmaster.json` 的 `Version` 与 `DownloadLinkInstall` / `DownloadLinkUpdate`，
