@@ -79,6 +79,16 @@ void UpdateDisplay(Context &context) noexcept {
       diag.view_applies.load(std::memory_order_relaxed);
   context.display.query_skips =
       diag.query_skips.load(std::memory_order_relaxed);
+  context.display.cut_applied =
+      diag.cut_applied.load(std::memory_order_relaxed);
+  context.display.cut_skipped_no_view =
+      diag.cut_skipped_no_view.load(std::memory_order_relaxed);
+  context.display.pose_invalidated =
+      diag.pose_invalidated.load(std::memory_order_relaxed);
+  context.display.extrapolated_frames =
+      diag.extrapolated_frames.load(std::memory_order_relaxed);
+  context.display.extrapolation_timeouts =
+      diag.extrapolation_timeouts.load(std::memory_order_relaxed);
   context.display.detour_thread_count =
       diag.detour_thread_count.load(std::memory_order_relaxed);
   context.display.player_sequence_jumps =

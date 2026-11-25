@@ -299,7 +299,14 @@ void UpdateMotion(Context &context, const double origin_cm[3],
                 kAccelerationSmoothing, elapsed);
           }
         } else {
-          NoteViewSnap(context, kSnapReasonTeleport);
+          // D30: the new game-thread path detects teleports on consecutive
+          // scene-phase ComponentToWorld reads, where the cut can still be
+          // written into this frame's CalcSceneViewInitOptions. The on_update
+          // detection remains the source for the old render-thread A/B path,
+          // and still clears the derived-speed history in both modes.
+          if (!context.native_view_point.load(std::memory_order_relaxed)) {
+            NoteViewSnap(context, kSnapReasonTeleport);
+          }
           ResetRenderPitch(context);
           // A teleport is not a brake. Clear the derived-speed history so the
           // next sample cannot turn the jump to zero into a full pitch input.
@@ -510,8 +517,12 @@ void PublishInactive(Context &context) noexcept {
   // is a fresh entry, not a continuation of the pose that was left behind.
   context.view_epoch.fetch_add(1U, std::memory_order_relaxed);
   // Re-entering the camera must not blend from the view that was active
-  // before the player stopped driving.
+  // before the player stopped driving. D29: drop the published pose and the
+  // scene-phase car history now, so the first active frame's early UI cannot
+  // replay a pose from before the inactive interval.
   NoteViewSnap(context, kSnapReasonInactive);
+  InvalidatePresenterPose(context);
+  ClearSceneCarTracking(context);
   if (context.last_view_active && context.last_fov_enabled) {
     context.fov_restore.store(true, std::memory_order_release);
   }

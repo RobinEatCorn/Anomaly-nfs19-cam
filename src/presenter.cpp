@@ -276,6 +276,19 @@ void ClearLatestCarSample(Context &context) noexcept {
                                            std::memory_order_release);
 }
 
+void InvalidatePresenterPose(Context &context) noexcept {
+  if (context.presenter_pose_valid.exchange(false,
+                                            std::memory_order_acq_rel)) {
+    context.diag.pose_invalidated.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void ClearSceneCarTracking(Context &context) noexcept {
+  context.last_scene_car_sample = {};
+  context.last_scene_car_valid = false;
+  context.scene_extrapolation_frames = 0;
+}
+
 // Advance the model to `now_ns` and produce the pose for this render call.
 // Returns false when there is nothing to present (no sample yet, or another
 // thread is advancing and no cached pose exists).

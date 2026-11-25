@@ -136,6 +136,11 @@ bool ReadPointerAtOffset(const AnomalyCoreServiceV1 *core,
 
 void Log(const Context &context, std::uint32_t level,
          std::string_view message) noexcept;
+// Ask the scene-view detour for one camera cut. This only sets our own pending
+// flag; the detour ORs it into FSceneViewInitOptions::bInCameraCut after the
+// game's own value has been written. Never call the game's
+// SetGameCameraCutThisFrame(): UE 5.5.4 never clears that bit.
+void RequestViewCut(Context &context) noexcept;
 void NoteViewSnap(Context &context, SnapReason reason) noexcept;
 void NoteYawSource(Context &context, YawSource source) noexcept;
 void NoteDetourThread(Context &context) noexcept;

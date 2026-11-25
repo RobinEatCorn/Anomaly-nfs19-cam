@@ -249,10 +249,18 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
   context->diag.detour_no_publish.store(0, std::memory_order_relaxed);
   context->diag.view_applies.store(0, std::memory_order_relaxed);
   context->diag.query_skips.store(0, std::memory_order_relaxed);
+  context->diag.cut_applied.store(0, std::memory_order_relaxed);
+  context->diag.cut_skipped_no_view.store(0, std::memory_order_relaxed);
+  context->diag.pose_invalidated.store(0, std::memory_order_relaxed);
+  context->diag.extrapolated_frames.store(0, std::memory_order_relaxed);
+  context->diag.extrapolation_timeouts.store(0, std::memory_order_relaxed);
   context->view_build_depth.store(0, std::memory_order_relaxed);
   context->pose_attempted.store(false, std::memory_order_release);
   context->pose_ready.store(false, std::memory_order_release);
   ClearLatestCarSample(*context);
+  ClearSceneCarTracking(*context);
+  InvalidatePresenterPose(*context);
+  context->pending_cut.store(false, std::memory_order_release);
   context->diag.player_sequence_jumps.store(0, std::memory_order_relaxed);
   context->diag.camera_yaw_esp_misses.store(0, std::memory_order_relaxed);
   context->diag.slip_from_position_degrees.store(0.0,
@@ -330,7 +338,10 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context,
   context->game_offset_last_ns = 0;
   context->car_ring.Clear();
   ClearLatestCarSample(*context);
+  ClearSceneCarTracking(*context);
+  InvalidatePresenterPose(*context);
   PublishInactive(*context);
+  context->pending_cut.store(false, std::memory_order_release);
   RestoreOrbitUiOnStop(*context);
   ReleaseProbeSubscription(*context);
   ReleaseSettingsWindow(*context);

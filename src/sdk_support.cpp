@@ -158,13 +158,19 @@ void Log(const Context &context, const std::uint32_t level,
   context.core->log(context.core->user, level, StringView(message));
 }
 
-// Mark the published view history as discontinuous. The reason is accumulated
-// and consumed by PublishView, so a reset requested while the camera is idle
-// costs nothing and is not reported as a snap that actually happened.
+void RequestViewCut(Context &context) noexcept {
+  context.pending_cut.store(true, std::memory_order_release);
+}
+
+// Mark the published view history as discontinuous. Every snap reason maps to
+// one engine camera cut; the scene view consumes the pending flag after the
+// game has written its own bInCameraCut. A reset requested while the camera is
+// idle stays pending until the first active scene view.
 void NoteViewSnap(Context &context, const SnapReason reason) noexcept {
   context.diag.reset_window.fetch_add(1, std::memory_order_relaxed);
   context.view_snap = true;
   context.view_snap_reasons |= static_cast<std::uint32_t>(reason);
+  RequestViewCut(context);
 }
 
 void NoteYawSource(Context &context, const YawSource source) noexcept {

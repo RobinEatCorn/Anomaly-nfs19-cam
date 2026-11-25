@@ -263,6 +263,17 @@ struct Diagnostics final {
   // on the game camera.
   std::atomic<std::uint64_t> view_applies{};
   std::atomic<std::uint64_t> query_skips{};
+  // Task group 6. `cut_applied` counts scene views where our pending cut was
+  // actually ORed into FSceneViewInitOptions::bInCameraCut. `pose_invalidated`
+  // counts transitions from a published pose to no pose (scene advance failed
+  // or the view went inactive), so the next frame's early UI cannot replay a
+  // stale pose. The extrapolation counters explain why the model kept running
+  // while the live ComponentToWorld was unavailable.
+  std::atomic<std::uint64_t> cut_applied{};
+  std::atomic<std::uint64_t> cut_skipped_no_view{};
+  std::atomic<std::uint64_t> pose_invalidated{};
+  std::atomic<std::uint64_t> extrapolated_frames{};
+  std::atomic<std::uint64_t> extrapolation_timeouts{};
   // TG-1: frames the chase pose was withheld because the game's live view-mode
   // tag was not ThirdPerson. This is the belt-and-suspenders counter for plan
   // SS2.4: a non-zero value means the presenter's flag lagged the game.
@@ -620,7 +631,10 @@ struct RenderXProbe final {
   bool route_b_held_pose_valid{};
   double route_b_held_eye_cm[3]{};
   double route_b_held_rotation[3]{};
+  double route_b_held_eye_velocity_cmps[3]{};
+  double route_b_held_rotation_velocity_dps[3]{};
   std::int64_t route_b_held_ns{};
+  std::uint32_t route_b_held_frames{};
   std::atomic<std::uint64_t> route_b_render_applied{};
   std::atomic<std::uint64_t> route_b_history_updated{};
   // Latest NFS chase-model pose, published by the presenter on the Game
@@ -765,8 +779,11 @@ struct RenderXProbe final {
     for (std::size_t axis = 0; axis < 3; ++axis) {
       route_b_held_eye_cm[axis] = 0.0;
       route_b_held_rotation[axis] = 0.0;
+      route_b_held_eye_velocity_cmps[axis] = 0.0;
+      route_b_held_rotation_velocity_dps[axis] = 0.0;
     }
     route_b_held_ns = 0;
+    route_b_held_frames = 0;
     route_b_render_applied.store(0, std::memory_order_relaxed);
     route_b_history_updated.store(0, std::memory_order_relaxed);
     route_b_model_sequence.store(0, std::memory_order_relaxed);
@@ -1027,6 +1044,11 @@ struct DisplayState final {
   std::uint64_t detour_no_publish{};
   std::uint64_t view_applies{};
   std::uint64_t query_skips{};
+  std::uint64_t cut_applied{};
+  std::uint64_t cut_skipped_no_view{};
+  std::uint64_t pose_invalidated{};
+  std::uint64_t extrapolated_frames{};
+  std::uint64_t extrapolation_timeouts{};
   std::uint64_t detour_thread_count{};
   std::uint64_t player_sequence_jumps{};
   std::uint64_t camera_yaw_esp_misses{};
@@ -1686,6 +1708,18 @@ struct Context final {
   std::atomic<std::uint64_t> latest_car_sample_sequence{};
   nfs2015_chase::CarSample latest_car_sample{};
   std::atomic_bool latest_car_sample_valid{};
+  // Task group 6: last successful scene-phase car read. It is used for the
+  // scene teleport check and for the short missing-transform extrapolation.
+  // Both the writer and reader are the Game thread; no atomics are needed.
+  nfs2015_chase::CarSample last_scene_car_sample{};
+  bool last_scene_car_valid{};
+  std::uint32_t scene_extrapolation_frames{};
+  // A snap requested by either the Game tick or the scene advance. The
+  // CalcSceneViewInitOptions detour consumes it only for an active, allowed
+  // view and ORs it into the engine's own bInCameraCut. Keeping it pending
+  // while the camera is inactive is deliberate: the first view after re-entry
+  // is the one that needs the cut.
+  std::atomic_bool pending_cut{};
   std::atomic_flag presenter_lock = ATOMIC_FLAG_INIT;
   std::int64_t presenter_last_ns{};
   std::uint64_t presenter_epoch{};

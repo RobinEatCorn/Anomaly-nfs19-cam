@@ -897,19 +897,40 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
   } else if (BuildRouteBPose(probe, follow_pitch, eye, rotation, age_ns)) {
     have_pose = true;
   }
+  const bool pose_was_fresh = have_pose;
+  bool held = false;
   if (!have_pose) {
     const std::int64_t held_age = now_ns - probe.route_b_held_ns;
+    const double age_seconds = static_cast<double>(held_age) * 1e-9;
     if (probe.route_b_held_pose_valid && held_age >= 0 &&
-        held_age <= kRouteBHeldPoseNs) {
+        held_age <= kRouteBHeldPoseNs &&
+        probe.route_b_held_frames < kSceneExtrapolationMaxFrames) {
+      // Task group 6: do not repeat a frozen pose. Continue the last measured
+      // camera motion for at most two render frames. This is the old
+      // render-thread A/B path; the game-thread path extrapolates the car
+      // sample in view_point.cpp instead.
       for (std::size_t axis = 0; axis < 3; ++axis) {
-        eye[axis] = probe.route_b_held_eye_cm[axis];
-        rotation[axis] = probe.route_b_held_rotation[axis];
+        eye[axis] = probe.route_b_held_eye_cm[axis] +
+                    probe.route_b_held_eye_velocity_cmps[axis] * age_seconds;
+        rotation[axis] =
+            probe.route_b_held_rotation[axis] +
+            probe.route_b_held_rotation_velocity_dps[axis] * age_seconds;
       }
+      probe.route_b_held_frames += 1U;
       probe.route_b_early_held.fetch_add(1, std::memory_order_relaxed);
+      held = true;
       have_pose = true;
     }
   }
   if (!have_pose) {
+    if (probe.route_b_held_pose_valid) {
+      // The held pose outlived its two-frame budget. Tell the engine that this
+      // is a discontinuity and stop extrapolating from it.
+      RequestViewCut(context);
+      context.diag.extrapolation_timeouts.fetch_add(
+          1, std::memory_order_relaxed);
+      probe.route_b_held_pose_valid = false;
+    }
     probe.prepare_pose_fail.fetch_add(1, std::memory_order_relaxed);
     probe.route_b_early_fallbacks.fetch_add(1, std::memory_order_relaxed);
     if (context.presenter_burnout_blend.load(std::memory_order_relaxed) >
@@ -919,8 +940,31 @@ bool ApplyRouteBEarly(Context &context, void *renderer) noexcept {
     }
     return false;
   }
-  // Keep the last applied pose for the one-frame hold above. The pose is in
-  // world centimetres, like the view fields it is copied into.
+  // Keep the last applied pose and its measured velocity for the short hold
+  // above. A fresh pose reseeds the velocity; an extrapolated one keeps the
+  // velocity it was derived from. The pose is in world centimetres, like the
+  // view fields it is copied into.
+  if (pose_was_fresh && probe.route_b_held_pose_valid) {
+    const double dt =
+        static_cast<double>(now_ns - probe.route_b_held_ns) * 1e-9;
+    if (dt > 1e-4 && dt < 0.2) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        probe.route_b_held_eye_velocity_cmps[axis] =
+            (eye[axis] - probe.route_b_held_eye_cm[axis]) / dt;
+        const double delta =
+            axis == 1
+                ? nfs2015_chase::WrapPi(
+                      (rotation[axis] - probe.route_b_held_rotation[axis]) *
+                      nfs2015_chase::kRadiansPerDegree) *
+                      nfs2015_chase::kDegreesPerRadian
+                : rotation[axis] - probe.route_b_held_rotation[axis];
+        probe.route_b_held_rotation_velocity_dps[axis] = delta / dt;
+      }
+    }
+  }
+  if (!held) {
+    probe.route_b_held_frames = 0;
+  }
   probe.route_b_held_pose_valid = true;
   probe.route_b_held_ns = now_ns;
   for (std::size_t axis = 0; axis < 3; ++axis) {

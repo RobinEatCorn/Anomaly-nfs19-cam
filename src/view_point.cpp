@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace nfs2015_chase_cam::detail {
 
@@ -105,6 +106,68 @@ void PublishObservedView(const MinimalViewInfo &view,
                                   std::memory_order_release);
 }
 
+// Task group 6: model a short gap in the live ComponentToWorld read. The
+// last successful scene sample still carries the Game-tick velocity and yaw
+// rate; advance those facts on the scene clock for at most two frames. This is
+// not a second smoothing layer: it keeps the camera on the car's known
+// trajectory while the transform read is unavailable, instead of freezing or
+// snapping to the game camera. A longer gap is a hitch/stream/pause; it
+// requests one cut and drops the history.
+bool ExtrapolateSceneCarSample(Context &context,
+                               const std::int64_t now_ns,
+                               nfs2015_chase::CarSample &sample) noexcept {
+  if (!context.last_scene_car_valid) {
+    return false;
+  }
+  const nfs2015_chase::CarSample &last = context.last_scene_car_sample;
+  if (last.epoch != context.sample_epoch) {
+    return false;
+  }
+  const std::int64_t age_ns = now_ns - last.time_ns;
+  if (age_ns <= 0) {
+    return false;
+  }
+  if (age_ns > kSceneExtrapolationMaxAgeNs ||
+      context.scene_extrapolation_frames >= kSceneExtrapolationMaxFrames) {
+    NoteViewSnap(context, kSnapReasonMotion);
+    context.diag.extrapolation_timeouts.fetch_add(1,
+                                                  std::memory_order_relaxed);
+    context.last_scene_car_valid = false;
+    context.scene_extrapolation_frames = 0;
+    return false;
+  }
+  const double dt = static_cast<double>(age_ns) * 1e-9;
+  sample = last;
+  sample.time_ns = now_ns;
+  sample.epoch = context.sample_epoch;
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double position =
+        axis == 0 ? last.car.position.x
+                  : (axis == 1 ? last.car.position.y : last.car.position.z);
+    const double velocity =
+        axis == 0 ? last.car.velocity.x
+                  : (axis == 1 ? last.car.velocity.y : last.car.velocity.z);
+    const double step = velocity * dt;
+    const double next = position + step;
+    if (axis == 0) {
+      sample.car.position.x = next;
+    } else if (axis == 1) {
+      sample.car.position.y = next;
+    } else {
+      sample.car.position.z = next;
+    }
+    // The anchor and origin are world centimetres, while CarState::position
+    // and velocity are metres.
+    sample.anchor_cm[axis] += step * 100.0;
+    sample.origin_cm[axis] += step * 100.0;
+  }
+  sample.car.yaw =
+      nfs2015_chase::WrapPi(last.car.yaw + last.car.yaw_rate * dt);
+  context.scene_extrapolation_frames += 1U;
+  context.diag.extrapolated_frames.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
 // Task group 5: build the sample the model consumes at the scene-view
 // advance. The last completed Game-tick sample supplies the derivative state
 // (velocity, acceleration, yaw rate, brake, burnout, rig geometry); the live
@@ -112,26 +175,55 @@ void PublishObservedView(const MinimalViewInfo &view,
 // is the transform after the vehicle has run, so the camera and the car about
 // to be drawn share it; there is no render-clock interpolation.
 bool ReadGameThreadCarSample(Context &context, const std::int64_t now_ns,
-                             nfs2015_chase::CarSample &sample) noexcept {
+                             nfs2015_chase::CarSample &sample,
+                             bool &extrapolated) noexcept {
+  extrapolated = false;
   if (!ReadLatestCarSample(context, sample)) {
-    return false;
+    extrapolated = ExtrapolateSceneCarSample(context, now_ns, sample);
+    return extrapolated;
   }
   double car_cm[3]{};
   double forward[3]{};
   if (!ReadVehicleComponentTransform(context, car_cm, forward)) {
-    return false;
+    extrapolated = ExtrapolateSceneCarSample(context, now_ns, sample);
+    return extrapolated;
   }
   if (!std::isfinite(car_cm[0]) || !std::isfinite(car_cm[1]) ||
       !std::isfinite(car_cm[2]) || !std::isfinite(forward[0]) ||
       !std::isfinite(forward[1]) || !std::isfinite(forward[2])) {
-    return false;
+    extrapolated = ExtrapolateSceneCarSample(context, now_ns, sample);
+    return extrapolated;
   }
   double pitch = 0.0;
   if (!BodyPitchFromForward(forward, pitch)) {
-    return false;
+    extrapolated = ExtrapolateSceneCarSample(context, now_ns, sample);
+    return extrapolated;
   }
   if (!std::isfinite(now_ns) || now_ns <= 0) {
     return false;
+  }
+  // D30: the teleport check runs on consecutive scene-phase car transforms,
+  // not on the on_update position. If the physics moved the car this frame,
+  // the cut must be produced in this frame, before CalcSceneViewInitOptions
+  // returns, so the engine can apply it to the view being built.
+  if (context.last_scene_car_valid &&
+      context.last_scene_car_sample.epoch == sample.epoch) {
+    const std::int64_t age_ns = now_ns - context.last_scene_car_sample.time_ns;
+    if (age_ns > 0) {
+      double squared = 0.0;
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const double delta =
+            car_cm[axis] - context.last_scene_car_sample.anchor_cm[axis];
+        squared += delta * delta;
+      }
+      const double step = std::sqrt(squared);
+      const double dt = static_cast<double>(age_ns) * 1e-9;
+      if (!std::isfinite(step) || step > kMaximumTeleportStepCm ||
+          (dt > 0.0 &&
+           step / dt > kMaximumPlausibleSpeedCmps)) {
+        NoteViewSnap(context, kSnapReasonTeleport);
+      }
+    }
   }
   // The derivative facts come from the Game tick, but this pose is evaluated
   // at the scene-view phase, when the VehicleMesh ComponentToWorld is the
@@ -157,8 +249,7 @@ bool ReadGameThreadCarSample(Context &context, const std::int64_t now_ns,
       nfs2015_chase::RightFromYaw(sample.car.yaw);
   const double forward_speed =
       nfs2015_chase::Dot(velocity, body_forward);
-  const double speed =
-      std::hypot(velocity.x, velocity.y);
+  const double speed = std::hypot(velocity.x, velocity.y);
   sample.car.speed = forward_speed;
   if (speed < 0.75) {
     sample.car.slip_angle = 0.0;
@@ -169,6 +260,9 @@ bool ReadGameThreadCarSample(Context &context, const std::int64_t now_ns,
   }
   sample.driving = true;
   sample.epoch = context.sample_epoch;
+  context.last_scene_car_sample = sample;
+  context.last_scene_car_valid = true;
+  context.scene_extrapolation_frames = 0;
   return true;
 }
 
@@ -198,14 +292,61 @@ void WritePose(Context &context, MinimalViewInfo &view,
   context.diag.view_applies.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Task group 6: consume one pending cut after the game has written its own
+// bInCameraCut. The field is a plain bool in FSceneViewInitOptions; use byte
+// copies so this stays independent of the C++ bool ABI at an opaque offset.
+// If the original did not produce a view, keep the request for the next one.
+void ApplyPendingCut(Context &context, void *out, const bool result) noexcept {
+  if (!context.pending_cut.load(std::memory_order_acquire)) {
+    return;
+  }
+  if (!result || out == nullptr) {
+    context.diag.cut_skipped_no_view.fetch_add(1,
+                                               std::memory_order_relaxed);
+    return;
+  }
+  if (!context.view_active.load(std::memory_order_acquire) ||
+      !ChaseCameraGuardAllows(context)) {
+    // The camera is inactive or the game is in a photo/cutscene slot. Keep the
+    // request pending: the first view after re-entry is the one that needs it.
+    return;
+  }
+  if (!context.pending_cut.exchange(false, std::memory_order_acq_rel)) {
+    return;
+  }
+  auto *field = reinterpret_cast<std::uint8_t *>(out) +
+                kSceneViewInitOptionsCameraCutOffset;
+  std::uint8_t current = 0;
+  std::memcpy(&current, field, sizeof(current));
+  if (current == 0) {
+    const std::uint8_t cut = 1;
+    std::memcpy(field, &cut, sizeof(cut));
+  }
+  if (context.diag.cut_applied.fetch_add(1, std::memory_order_relaxed) == 0) {
+    Log(context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+        std::string_view("nfs2015 chase cam: first camera cut applied"));
+  }
+  // The snap reason has been delivered to the engine. `view_snap` is no longer
+  // consumed by the old published-view path; clearing it keeps the diagnostic
+  // state honest if that path is inspected during the A/B.
+  context.view_snap = false;
+  context.view_snap_reasons = 0;
+}
+
 }  // namespace
 
 bool AdvanceScenePose(Context &context, const std::int64_t now_ns) noexcept {
   if (!context.view_active.load(std::memory_order_acquire)) {
+    // D29: no published pose may survive an inactive interval. The early UI
+    // on the next active frame must fail open until the scene has advanced.
+    InvalidatePresenterPose(context);
+    ClearSceneCarTracking(context);
     return false;
   }
   if (!ChaseCameraGuardAllows(context)) {
     context.diag.tag_veto_frames.fetch_add(1, std::memory_order_relaxed);
+    InvalidatePresenterPose(context);
+    ClearSceneCarTracking(context);
     return false;
   }
   if (context.pose_attempted.exchange(true, std::memory_order_acq_rel)) {
@@ -214,7 +355,12 @@ bool AdvanceScenePose(Context &context, const std::int64_t now_ns) noexcept {
   }
   context.pose_ready.store(false, std::memory_order_release);
   nfs2015_chase::CarSample sample;
-  if (!ReadGameThreadCarSample(context, now_ns, sample)) {
+  bool extrapolated = false;
+  if (!ReadGameThreadCarSample(context, now_ns, sample, extrapolated)) {
+    // The scene advance failed. Invalidate the previous pose so the next
+    // frame's early UI cannot mix it with a scene that has fallen back to the
+    // game camera.
+    InvalidatePresenterPose(context);
     context.diag.detour_no_publish.fetch_add(1,
                                              std::memory_order_relaxed);
     return false;
@@ -227,6 +373,7 @@ bool AdvanceScenePose(Context &context, const std::int64_t now_ns) noexcept {
   if (!AdvancePresenter(context, now_ns, nullptr, location, rotation,
                         &lens, &fov_enabled, &advanced,
                         /*dedupe_same_frame=*/false, &sample)) {
+    InvalidatePresenterPose(context);
     context.diag.detour_no_publish.fetch_add(1,
                                              std::memory_order_relaxed);
     return false;
@@ -234,6 +381,7 @@ bool AdvanceScenePose(Context &context, const std::int64_t now_ns) noexcept {
   context.pose_ready.store(true, std::memory_order_release);
   context.view_output_frames.fetch_add(1, std::memory_order_relaxed);
   SamplePresenterMotion(context, now_ns, location, rotation, advanced);
+  (void)extrapolated;
   return true;
 }
 
@@ -359,9 +507,10 @@ bool ANOMALY_CALL CalcSceneViewInitOptionsDetour(
   }
 
   if (context != nullptr) {
-    // Task group 6 writes `out + kSceneViewInitOptionsCameraCutOffset` here,
-    // after the original returned (so the game's own cut is preserved) and
-    // before the depth drops. This task group only owns the gate.
+    // Write the cut after the original returned, so the game's own
+    // bInCameraCut value is preserved and ORed with ours. This is the same
+    // field the engine reads in LocalPlayer.cpp:767.
+    ApplyPendingCut(*context, out, result);
     context->view_build_depth.fetch_sub(1, std::memory_order_acq_rel);
   }
   if (context != nullptr) {

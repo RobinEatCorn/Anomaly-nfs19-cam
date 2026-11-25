@@ -186,6 +186,12 @@ void PublishLatestCarSample(Context &context,
 [[nodiscard]] bool ReadLatestCarSample(
     const Context &context, nfs2015_chase::CarSample &sample) noexcept;
 void ClearLatestCarSample(Context &context) noexcept;
+// Task group 6: undo the published pose so the early UI cannot replay it after
+// a failed scene advance or an inactive interval. The count is transition-only.
+void InvalidatePresenterPose(Context &context) noexcept;
+// Drop the scene-phase teleport/extrapolation history. Called on Start, Stop,
+// and whenever the view leaves the chase slot.
+void ClearSceneCarTracking(Context &context) noexcept;
 void RequestPresenterReset(Context &context) noexcept;
 // T3.4e: eye speed/turn rate relative to the car, sampled only on the call that
 // actually advanced the model. Shared by the old render-thread detour and the

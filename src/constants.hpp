@@ -412,6 +412,18 @@ constexpr std::uint32_t kMinimalViewInfoLocationOffset = 0x00;
 constexpr std::uint32_t kMinimalViewInfoRotationOffset = 0x18;
 constexpr std::uint32_t kMinimalViewInfoFovOffset = 0x30;
 constexpr std::uint32_t kMinimalViewInfoDesiredFovOffset = 0x34;
+// `FSceneViewInitOptions::bInCameraCut` (SceneView.h). The game's own
+// CalcSceneViewInitOptions writes it from the camera manager's cut bit after
+// GetProjectionData returns; the detour only ORs our pending cut into that
+// value, so the game's own cuts are preserved. Task group 1 verified the
+// offset and the per-frame (non-latched) semantics with the live probe.
+constexpr std::uintptr_t kSceneViewInitOptionsCameraCutOffset = 0x2C8;
+
+// Missing scene-car transform: extrapolate for at most two consecutive scene
+// advances. A longer gap is a hitch or a stream/pause, not missing data; it
+// becomes a cut instead of a camera that keeps flying on old velocity.
+constexpr std::uint32_t kSceneExtrapolationMaxFrames = 2;
+constexpr std::int64_t kSceneExtrapolationMaxAgeNs = 150'000'000;
 
 // ---------------------------------------------------------------------------
 // Z-key view-mode recon (PLAN-zkey-phase2-h1.md task group 0).
