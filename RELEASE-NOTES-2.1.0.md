@@ -1,5 +1,7 @@
 # NFS 2015 Chase Cam 2.1.0
 
+发布候选提交：`41d9f68`
+
 适用：Anomaly 2.7.0 / 3.0.0 / 3.1.0 / 3.1.1 Runtime，NTE。
 本版的实机验证在 **Anomaly 3.1.1** 上完成；3.1.1 与 3.1.0 使用同一份 NTE profile
 (`08a3feb9...249a`)，门禁直接 ready。
