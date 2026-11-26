@@ -344,7 +344,10 @@ constexpr double kHookRetrySeconds = 2.0;
 // 2.1.0 game-thread view path. `ULocalPlayer::GetViewPoint` is the engine's
 // own view-point producer; `CalcSceneViewInitOptions` brackets the first view
 // construction (its GetProjectionData call reaches GetViewPoint once). Both
-// patterns were taken from the running 3.1.0 build and are unique in .text.
+// patterns were taken from the running 3.1.0 build and re-verified against the
+// 3.1.2 image: still unique in .text, and the two entry points only moved by
+// the same +0x230 the surrounding linker shuffle explains. The field offsets
+// below were re-read from the 3.1.2 disassembly (see RELEASE-NOTES-2.1.1.md).
 // They stay behind the profile-hash gate; a mismatch leaves the native camera
 // alone.
 constexpr std::string_view kLocalPlayerGetViewPointPattern =
@@ -443,10 +446,15 @@ constexpr std::uint32_t kSceneComponentTransformTranslationOffset = 0x210;
 // NTE player vehicles expose their visual wheel components as a TArray of
 // StaticMeshComponents. The animation controller normally owns all four; the
 // drift override parks it and writes the front steer plus the matching roll on
-// every wheel.
+// every wheel. `FrontWheels` / `RearWheels` are declared on
+// `HTWheeledVehicleDrivable` (not on a blueprint), so these two offsets cover
+// every wheeled vehicle. 3.1.2 inserted one 8-byte field before them (3.1.0:
+// 0x12D8/0x12E8), verified from the live class's `PropertyLink` reflection:
+// FrontWheels@0x12E0 num=2 {Wheel_FR, Wheel_FL},
+// RearWheels @0x12F0 num=2 {Wheel_RL, Wheel_RR}.
 constexpr std::uint32_t kVehicleMeshOffset = 0x348;
-constexpr std::uint32_t kVehicleFrontWheelsOffset = 0x12D8;
-constexpr std::uint32_t kVehicleRearWheelsOffset = 0x12E8;
+constexpr std::uint32_t kVehicleFrontWheelsOffset = 0x12E0;
+constexpr std::uint32_t kVehicleRearWheelsOffset = 0x12F0;
 constexpr std::uint32_t kSceneComponentAnimScriptInstanceOffset = 0x938;
 constexpr std::uint32_t kVehicleAnimWheelAnimationOffset = 0xC98;
 constexpr std::uint32_t kTArrayDataOffset = 0x0;
@@ -482,10 +490,14 @@ constexpr std::int64_t kVehicleBodyYawMaxAgeNs = 50'000'000;
 // reports the same value as `profileHash`. The profile is hashed as its raw
 // JSON text, so any edit - even whitespace or line endings - moves this value
 // and disables the camera hooks instead of reading a layout that moved.
-// Known 2.7.0, 3.0.0 and 3.1.0 spellings are accepted: for each release, the
-// installed CRLF profile and the repository's LF profile. The 3.0.0 profile is
-// the same HTGame.exe as 2.7.0, and 3.1.0 only adds combat/account entries on
-// top of the same camera layout and GWorld symbol, so the offsets stay valid.
+// Known 2.7.0, 3.0.0, 3.1.0/3.1.1 and 3.1.2 spellings are accepted: for each
+// release, the installed CRLF profile and the repository's LF profile. The
+// 3.0.0 profile is the same HTGame.exe as 2.7.0, and 3.1.0 only adds
+// combat/account entries on top of the same camera layout and GWorld symbol.
+// 3.1.2 ships a new HTGame.exe, but its profile only adds `cooked.vehicle.*`
+// schema keys: every existing layout value is byte-identical, and the camera
+// patterns, FMinimalViewInfo fields, `bInCameraCut`, the PC view-mode block
+// and the toggle vtable slot were re-verified against the live 3.1.2 image.
 // On a mismatch no camera hook is installed, the game camera stays native, and
 // the panel says `hash mismatch`.
 constexpr std::string_view kAcceptedProfileHashes[] = {
@@ -503,6 +515,11 @@ constexpr std::string_view kAcceptedProfileHashes[] = {
     "08a3feb998c74f99375cebd6bd8866e409663680b9fe3da229274f4c9c2e249a",
     // Anomaly 3.1.0 repository profile (LF JSON, tag v3.1.0).
     "9acaf134e5279ade33f1b3c555a114b60871511717d9131850fe4a7bca2d5a82",
+    // Anomaly 3.1.2 installed runtime (CRLF JSON). New HTGame.exe (RVA shift),
+    // unchanged camera layout; see the block comment above.
+    "7341beb0ffae6e43c017d20b51a357d30249d4516dd487d5ac91c0cd2fafdf7d",
+    // Anomaly 3.1.2 repository profile (LF JSON).
+    "228b0ac3642a682688442706e517af4963c3700a475386ee7291acde25336501",
 };
 constexpr std::uint8_t kProfileGateWaiting = 0;
 constexpr std::uint8_t kProfileGateReady = 1;

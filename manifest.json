@@ -5,7 +5,7 @@
   "description": "Replaces the driving camera with the NFS 2015 action camera model and adds NFS-style visual front-wheel countersteer during drifts. The camera advances on the game thread at the scene-view phase, reads the same VehicleMesh ComponentToWorld the renderer is about to draw, and writes only FMinimalViewInfo / bInCameraCut; the render thread is not touched. Includes drift yaw spring, pivot orbit, slope follow, speed FOV, shake, parked orbit, and Z chase/third/first cycling while driving.",
   "author": "RobinEatCorn",
   "license": "AGPL-3.0-only",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "entry": "plugin.dll",
   "api": {
     "major": 1,
